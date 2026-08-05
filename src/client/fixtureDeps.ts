@@ -255,16 +255,31 @@ interface LoopConfig {
   fault?: string;
   utterancesPerLoop: number;
   utteranceSpacingMs: number;
+  now: () => number;
 }
 
 /**
- * Ticket 021 — fixture transport that LOOPS its utterance script
- * indefinitely until stop(). Each loop schedules `utterancesPerLoop`
- * utterances at `utteranceSpacingMs` intervals, then schedules the next
- * loop; `utt` numbering (and record ids) keeps incrementing across wraps so
- * ids are unique per session, and every scripted utterance settles inside
- * its own slot (completion — or the one scripted fail-mt error) before the
- * wrap. stop() cancels every pending timer: no events after stop.
+ * Ticket 022 — the ONE shared utterance timeline for a buildFixtureDeps
+ * call. Anchored (epoch ms) when the FIRST arm starts; utterance k begins
+ * at anchor + k·spacing for every arm, with source sentence
+ * SENTENCES[k % len] — identical across arms.
+ */
+interface SharedTimeline {
+  anchor: number | null;
+}
+
+/**
+ * Ticket 021/022 — fixture transport on the SHARED utterance timeline.
+ * Utterance k fires at anchor + k·utteranceSpacingMs, indefinitely until
+ * stop() (the utterancesPerLoop knob is retained for compatibility, but a
+ * wrap at loop-index utterancesPerLoop lands exactly at the same uniform
+ * spacing, so the timeline is simply k·spacing). The first arm to start
+ * anchors the timeline at utterance 0; an arm started mid-session JOINS at
+ * the NEXT shared utterance index (never replays index 0) and numbers
+ * contiguously from there. `utt` ids stay unique/incrementing, every
+ * utterance settles inside its own slot (completion — or the one scripted
+ * fail-mt error), and stop() cancels every pending timer: no events after
+ * stop.
  */
 class LoopingFixtureTransport implements InterpreterTransport {
   readonly armId: string;
@@ -274,13 +289,15 @@ class LoopingFixtureTransport implements InterpreterTransport {
 
   private readonly def: ArmDef;
   private readonly cfg: LoopConfig;
+  private readonly timeline: SharedTimeline;
   private handlers: TransportHandlers = {};
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopped = false;
 
-  constructor(def: ArmDef, cfg: LoopConfig) {
+  constructor(def: ArmDef, cfg: LoopConfig, timeline: SharedTimeline) {
     this.def = def;
     this.cfg = cfg;
+    this.timeline = timeline;
     this.armId = def.id;
     this.kind = def.mode;
     this.label = def.label;
@@ -288,8 +305,19 @@ class LoopingFixtureTransport implements InterpreterTransport {
   }
 
   async start(_config: TransportConfig): Promise<void> {
+    this.stopped = false;
     this.handlers.onConnectionState?.('connected');
-    this.scheduleLoop(0);
+    const now = this.cfg.now();
+    let firstUtt: number;
+    if (this.timeline.anchor === null) {
+      // First arm anchors the shared timeline at utterance 0.
+      this.timeline.anchor = now;
+      firstUtt = 0;
+    } else {
+      // Mid-session join: the NEXT shared utterance (never index 0 again).
+      firstUtt = Math.max(0, Math.ceil((now - this.timeline.anchor) / this.cfg.utteranceSpacingMs));
+    }
+    this.scheduleUtterance(firstUtt);
   }
 
   private schedule(delayMs: number, fn: () => void): void {
@@ -300,25 +328,18 @@ class LoopingFixtureTransport implements InterpreterTransport {
     this.timers.add(timer);
   }
 
-  private scheduleLoop(loop: number): void {
-    if (this.stopped) return;
-    const { fault, utterancesPerLoop, utteranceSpacingMs } = this.cfg;
-    for (let i = 0; i < utterancesPerLoop; i++) {
-      const utt = loop * utterancesPerLoop + i;
-      // fail-mt: exactly ONE scripted mt-stage error, on the cascade-openai
-      // arm's second utterance of the session; everything else completes.
-      const failMt = fault === 'fail-mt' && this.def.id === 'cascade-openai' && utt === 1;
-      const events = utteranceScript(
-        this.def,
-        utt,
-        i * utteranceSpacingMs,
-        utt * utteranceSpacingMs,
-        failMt,
-      );
-      for (const ev of events) this.schedule(ev.at, () => this.fire(ev));
-    }
-    // Wrap: schedule the next loop after this one's full span.
-    this.schedule(utterancesPerLoop * utteranceSpacingMs, () => this.scheduleLoop(loop + 1));
+  /** Schedule shared utterance k (and chain k+1 at the next slot). */
+  private scheduleUtterance(utt: number): void {
+    if (this.stopped || this.timeline.anchor === null) return;
+    const { fault, utteranceSpacingMs } = this.cfg;
+    const uttStart = this.timeline.anchor + utt * utteranceSpacingMs;
+    const delay = Math.max(0, uttStart - this.cfg.now());
+    // fail-mt: exactly ONE scripted mt-stage error, on the cascade-openai
+    // arm's second shared utterance; everything else completes.
+    const failMt = fault === 'fail-mt' && this.def.id === 'cascade-openai' && utt === 1;
+    const events = utteranceScript(this.def, utt, 0, utt * utteranceSpacingMs, failMt);
+    for (const ev of events) this.schedule(delay + ev.at, () => this.fire(ev));
+    this.schedule(delay + utteranceSpacingMs, () => this.scheduleUtterance(utt + 1));
   }
 
   private fire(ev: FixtureScriptEvent): void {
@@ -390,13 +411,19 @@ function silentPlaybackContext(): PlaybackAudioContextLike {
 const LEVEL_PATTERN = [2, 3, 4, 3, 2, 1, 2, 4] as const;
 
 export function buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps {
+  const now = options?.now ?? (() => Date.now());
   const loopConfig: LoopConfig = {
     fault: options?.fault,
     utterancesPerLoop: options?.utterancesPerLoop ?? DEFAULT_UTTERANCES_PER_LOOP,
     utteranceSpacingMs: options?.utteranceSpacingMs ?? DEFAULT_UTTERANCE_SPACING_MS,
+    now,
   };
+  // Ticket 022 — ONE shared utterance timeline per deps bag: every transport
+  // built here schedules against the same anchor, so all arms are always on
+  // the same utterance index / source sentence (like sharing one real mic).
+  const timeline: SharedTimeline = { anchor: null };
   return {
-    transportFactory: (def: ArmDef) => new LoopingFixtureTransport(def, loopConfig),
+    transportFactory: (def: ArmDef) => new LoopingFixtureTransport(def, loopConfig, timeline),
     // Grants WITHOUT getUserMedia; synthetic level/chunk emission on a timer
     // until stop(). Dev/QA path — never used when the flag is absent.
     startCapture: async ({ onChunk, onLevel }): Promise<CaptureResult> => {
@@ -420,6 +447,6 @@ export function buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps {
     },
     playbackContextFactory: silentPlaybackContext,
     ledger: new RunLedger(), // fresh, in-memory — fixture data never persists
-    now: options?.now ?? (() => Date.now()),
+    now,
   };
 }
