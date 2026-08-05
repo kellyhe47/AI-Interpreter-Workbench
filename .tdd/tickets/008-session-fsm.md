@@ -1,10 +1,10 @@
 ---
 id: 008
 title: Session lifecycle state machine + four-value mic permission model
-status: pending
+status: green
 depends_on: []
 touches: [src/client/state/sessionMachine.ts, src/client/state/permission.ts]
-test_files: []
+test_files: [src/client/state/sessionMachine.test.ts]
 iterations: 0
 ---
 

@@ -1,10 +1,10 @@
 ---
 id: 009
 title: Run ledger — append-only utterance records, aggregation, export, blind draws
-status: pending
+status: green
 depends_on: []
 touches: [src/client/state/ledger.ts]
-test_files: []
+test_files: [src/client/state/ledger.test.ts]
 iterations: 0
 ---
 
