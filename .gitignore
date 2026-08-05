@@ -1,0 +1,22 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# deps & build
+node_modules/
+dist/
+build/
+.vite/
+coverage/
+
+# runtime artifacts
+*.log
+benchmark-results/*.json
+!benchmark-results/.gitkeep
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -255,10 +255,32 @@ The session is not implicitly "live." Every state below is represented in the UI
 
 Controls persistently visible in every state: mode toggle, language pair, direction swap, start/stop, permission status, connection status, input level.
 
+### Microphone permission — a four-value property
+
+Permission is not a boolean and must never be rendered as a fixed value. It has exactly four states, and the current one is continuously visible wherever session controls are:
+
+| Value | Meaning |
+|---|---|
+| `not-requested` | no session started yet; nothing has been asked |
+| `requesting` | the browser prompt is open, awaiting the user |
+| `granted` | capture is available |
+| `denied` | capture is unavailable — **blocking** |
+
+**Requirements:**
+
+1. The indicator reflects the live value. A hardcoded or optimistic default is a defect.
+2. `denied` **blocks session start.** The user cannot proceed until it is resolved, so it cannot be surfaced as a dismissible or transient element.
+3. **Browsers do not re-prompt after a denial** — a subsequent `getUserMedia` call fails immediately with no prompt. A retry affordance alone will appear to do nothing. The UI must therefore communicate the remediation path, not just offer a retry.
+4. Permission can be blocked **independently at two layers** — the site permission and the operating system. Remediation guidance must cover both, or a user who fixes one and still fails will conclude the app is broken.
+5. Rubric must-have: mic-permission-denied is an explicitly graded error case.
+
+**Visual treatment is delegated to implementation.** This is a small surface and the design handoff deliberately does not prescribe it; any presentation satisfying the five requirements above is acceptable.
+
 **Measurement note:** "first audio out" is timestamped when the first audio sample is decoded and queued for playback — the exact instant it would begin sounding if autoplay were on. On-demand playback does not move that timestamp, and the write-up states this explicitly since the rubric's wording is "perceived latency."
 - **Language pair is selectable in-session**, not only pre-session, using the identical queue-at-boundary mechanism. One mechanism, two triggers.
 - **Direction swap is a dedicated control** (EN→ES ⇄ ES→EN) rather than a dropdown re-selection, since both directions are measured arms run repeatedly.
 - The language menu **labels support per pair** — "both modes" or "cascade only" — surfacing the architectural limitation in the product's own navigation.
+- **Support is a property of a direction, not of a pair.** EN→YUE and YUE→EN are separate claims: the first depends on Realtime *producing* Cantonese, the second on it *recognising* Cantonese. The unsupported-output warning fires only when the **target** is Cantonese. The pair-level support pill ("cascade only") is labelled by its most constrained direction, so the pill and the warning can legitimately disagree — the write-up reports coverage per direction.
 - Selecting a pair the Realtime model does not list **warns but does not block.** Blocking would prevent the observation the experiment wants: what it actually does. The target pane additionally carries a "text looks correct — audio pronunciation may not be" callout, surfacing the Mandarin-pronunciation trap in the product itself.
 - **Disclosed:** Realtime conversation history is held server-side by OpenAI and is lost on switch. Minor for interpretation (utterances translate independently) but affects pronoun/gender resolution.
 
@@ -446,6 +468,8 @@ This yields a core finding: **cascade's transcript is auditable — it *is* what
 
 Because nothing autoplays, blind comparison is a natural feature rather than an offline chore. **"Compare blind" hides arm identity**, presents the outputs as Sample A and Sample B in randomized order, and asks for a **1–5 rating on adequacy and fluency**. Identity is revealed after submission, and scores append to the results view.
 
+**Randomization is per comparison, not a fixed swap**, and the drawn assignment is **persisted to the run ledger** alongside the score. A fixed A↔B inversion would teach the evaluator the mapping after a single reveal; persisting the draw is what makes the blinding auditable after the fact rather than merely asserted.
+
 - **Spanish** — scored in-app by the Spanish-speaking coworker
 - **Cantonese** — scored in-app by the author (native speaker)
 - Plus the author's listening notes on prosody, naturalness, number/proper-noun survival, and disfluency handling
@@ -500,6 +524,13 @@ Whichever way ElevenLabs coverage lands, the result is reportable:
 | Empty / null result | Skip utterance, log, do not crash the pipeline |
 | WebSocket drop | Auto-reconnect with session state preserved |
 | Provider hard failure | Surface clearly in the UI; session survives |
+
+**Failure messages are architecture-differentiated, and that is a finding.** Cascade can name the stage that failed; Realtime cannot:
+
+- Cascade — *"mt stage timed out for this utterance — session still running"*
+- Realtime — *"opaque failure — no stage attribution · session still running"*
+
+The auditability gap does not only appear in the happy path's timing breakdown. It appears again, and more sharply, at the moment something breaks — which is exactly when an operator needs attribution. Worth one line in the write-up.
 
 All implemented via the `withRetry` / `withTimeout` decorators — once, applied uniformly.
 
@@ -629,6 +660,10 @@ Working app on day 1 with fixtures; every subsequent step swaps one fixture for 
 | 15g | One run ledger beneath all result views; mandatory empty states | Prevents metric drift between screens and the write-up; stops polished placeholders reading as measured evidence |
 | 15h | Day-0 provider preflight before freezing interfaces | API churn is the largest external risk. Preflight also revealed `gpt-realtime-translate` is duration-billed, which reframes the cost-slope finding |
 | 15i | WebSocket-vs-WebRTC restated as a hypothesis | It was reasoned, not measured. The transport hop is instrumented and reported as a number instead |
+| 16a | Failure copy differentiated by architecture | Cascade names the failed stage; Realtime cannot. The auditability gap reappears at the moment attribution matters most |
+| 16b | Blind draw randomized per comparison and persisted to the ledger | A fixed A↔B swap stops being blind after one reveal; persisting the draw makes the blinding auditable |
+| 16c | Language support labelled per direction | EN→YUE and YUE→EN are different claims — producing Cantonese versus recognising it |
+| 16d | Mic permission specified as a four-value property, **design delegated** | It is one small indicator plus one blocking case, not a screen worth reworking the handoff for. The functional constraints — no re-prompt after denial, two independent blocking layers — are what actually determine correctness |
 | 15 | TTS interface takes `AsyncIterable<string>` | Shape to the most capable provider; `string` would forfeit ElevenLabs streaming input to match the weakest vendor |
 | 16 | Async generators over EventEmitters/streams | Backpressure, `try/catch` propagation, trivially fake-able |
 | 17 | Timing/retry/timeout as decorators | Implemented once; a stage cannot be left uninstrumented |
