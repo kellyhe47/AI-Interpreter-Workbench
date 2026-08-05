@@ -1,10 +1,10 @@
 ---
 id: 005
 title: Server WS transport + ephemeral token endpoint + static serving
-status: pending
+status: green
 depends_on: [004]
 touches: [src/server/index.ts, src/server/ws.ts, src/server/token.ts]
-test_files: []
+test_files: [src/server/ws.test.ts, src/server/token.test.ts, src/server/index.test.ts]
 iterations: 0
 ---
 

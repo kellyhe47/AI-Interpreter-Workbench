@@ -1,10 +1,10 @@
 ---
 id: 004
 title: Cascade orchestrator (server core pipeline)
-status: pending
+status: green
 depends_on: [001, 002, 003]
 touches: [src/server/cascade/*]
-test_files: []
+test_files: [src/server/cascade/orchestrator.test.ts]
 iterations: 0
 ---
 
