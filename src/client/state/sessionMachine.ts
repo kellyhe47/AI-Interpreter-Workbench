@@ -177,19 +177,184 @@ export const pairs: readonly LanguagePairDef[] = [
 ];
 
 export function createInitialState(overrides?: Partial<SessionState>): SessionState {
-  void overrides;
-  throw new Error('not implemented');
+  return {
+    status: 'idle',
+    micPermission: 'not-requested',
+    mode: 'cascade',
+    langIdx: 0,
+    reversed: false,
+    arms: ['arm-1'],
+    autoplay: true,
+    pending: null,
+    reconnectAttempts: 0,
+    resumeStatus: null,
+    playingArm: null,
+    utteranceCount: 0,
+    startedAt: null,
+    stoppedAt: null,
+    summary: null,
+    ...overrides,
+  };
 }
 
+const ACTIVE_STATUSES: readonly SessionStatus[] = ['listening', 'processing', 'ready', 'playing'];
+
+const STOPPABLE_STATUSES: readonly SessionStatus[] = [
+  'requesting-permission',
+  'listening',
+  'processing',
+  'ready',
+  'playing',
+  'reconnecting',
+  'disconnected',
+];
+
 export function reduce(state: SessionState, event: SessionEvent): SessionState {
-  void state;
-  void event;
-  throw new Error('not implemented');
+  switch (event.type) {
+    case 'START': {
+      if (state.status !== 'idle' || state.micPermission === 'denied') return state;
+      return {
+        ...state,
+        status: 'requesting-permission',
+        micPermission: 'requesting',
+        startedAt: event.now,
+      };
+    }
+
+    case 'PERMISSION_GRANTED': {
+      if (state.status !== 'requesting-permission') return state;
+      return { ...state, status: 'listening', micPermission: 'granted' };
+    }
+
+    case 'PERMISSION_DENIED': {
+      if (state.status !== 'requesting-permission') return state;
+      return { ...state, status: 'permission-denied', micPermission: 'denied' };
+    }
+
+    case 'SPEECH_DETECTED': {
+      if (state.status !== 'listening' && state.status !== 'ready') return state;
+      return { ...state, status: 'processing' };
+    }
+
+    case 'ARMS_SETTLED': {
+      if (state.status !== 'processing') return state;
+      return { ...state, status: 'ready' };
+    }
+
+    case 'PLAY': {
+      if (state.status !== 'ready') return state;
+      return { ...state, status: 'playing', playingArm: event.armId };
+    }
+
+    case 'PLAYBACK_ENDED': {
+      if (state.status !== 'playing') return state;
+      return { ...state, status: 'ready', playingArm: null };
+    }
+
+    case 'REQUEST_SWITCH': {
+      if (ACTIVE_STATUSES.includes(state.status)) {
+        return {
+          ...state,
+          pending: { kind: event.kind, label: event.label, patch: { ...event.patch } },
+        };
+      }
+      return { ...state, ...event.patch, pending: null };
+    }
+
+    case 'UTTERANCE_BOUNDARY': {
+      const next: SessionState = {
+        ...state,
+        ...(state.pending ? state.pending.patch : {}),
+        pending: null,
+        utteranceCount: state.utteranceCount + 1,
+      };
+      return next;
+    }
+
+    case 'ADD_ARM': {
+      if (state.arms.length >= 3 || state.arms.includes(event.armId)) return state;
+      const arms = [...state.arms, event.armId];
+      return { ...state, arms, autoplay: arms.length > 1 ? false : state.autoplay };
+    }
+
+    case 'REMOVE_ARM': {
+      if (!state.arms.includes(event.armId)) return state;
+      const arms = state.arms.filter((id) => id !== event.armId);
+      return { ...state, arms, autoplay: arms.length === 1 ? true : state.autoplay };
+    }
+
+    case 'SET_AUTOPLAY': {
+      if (event.value && state.arms.length > 1) return state;
+      return { ...state, autoplay: event.value };
+    }
+
+    case 'CONNECTION_LOST': {
+      if (!ACTIVE_STATUSES.includes(state.status)) return state;
+      return { ...state, status: 'reconnecting', resumeStatus: state.status };
+    }
+
+    case 'RECONNECT_ATTEMPT': {
+      if (state.status !== 'reconnecting') return state;
+      if (state.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        return { ...state, status: 'disconnected' };
+      }
+      return { ...state, reconnectAttempts: state.reconnectAttempts + 1 };
+    }
+
+    case 'RECONNECT_EXHAUSTED': {
+      if (state.status !== 'reconnecting') return state;
+      return { ...state, status: 'disconnected' };
+    }
+
+    case 'RECONNECTED': {
+      if (state.status !== 'reconnecting') return state;
+      return {
+        ...state,
+        status: state.resumeStatus ?? 'listening',
+        resumeStatus: null,
+        reconnectAttempts: 0,
+      };
+    }
+
+    case 'RECONNECT_CLICKED': {
+      if (state.status !== 'disconnected') return state;
+      return { ...state, status: 'reconnecting', reconnectAttempts: 0 };
+    }
+
+    case 'STOP': {
+      if (!STOPPABLE_STATUSES.includes(state.status)) return state;
+      return { ...state, status: 'stopping', stoppedAt: event.now };
+    }
+
+    case 'FLUSH_DONE': {
+      if (state.status !== 'stopping') return state;
+      return { ...state, status: 'stopped', summary: { ...event.summary } };
+    }
+
+    case 'NEW_SESSION': {
+      const granted = state.micPermission === 'granted';
+      return {
+        ...state,
+        status: granted ? 'listening' : 'requesting-permission',
+        micPermission: granted ? 'granted' : 'requesting',
+        pending: null,
+        reconnectAttempts: 0,
+        resumeStatus: null,
+        playingArm: null,
+        utteranceCount: 0,
+        startedAt: event.now,
+        stoppedAt: null,
+        summary: null,
+      };
+    }
+
+    default:
+      return state;
+  }
 }
 
 export function supportPill(langIdx: number): 'both modes' | 'cascade only' {
-  void langIdx;
-  throw new Error('not implemented');
+  return langIdx === 1 ? 'cascade only' : 'both modes';
 }
 
 export interface LanguageWarnings {
@@ -202,8 +367,12 @@ export function warnings(
   reversed: boolean,
   modeOrArms: Mode | readonly Mode[],
 ): LanguageWarnings {
-  void langIdx;
-  void reversed;
-  void modeOrArms;
-  throw new Error('not implemented');
+  const realtimeInvolved = Array.isArray(modeOrArms)
+    ? (modeOrArms as readonly Mode[]).some((m) => m === 'realtime')
+    : modeOrArms === 'realtime';
+  const cantoPair = langIdx === 1;
+  return {
+    targetCantoOnRealtime: cantoPair && !reversed && realtimeInvolved,
+    inputCantoOnRealtime: cantoPair && reversed && realtimeInvolved,
+  };
 }

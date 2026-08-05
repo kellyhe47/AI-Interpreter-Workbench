@@ -94,51 +94,138 @@ export interface LedgerExport {
  * corpusId not placeholder-prefixed, arm not 'fixture').
  */
 export function isRealRecord(record: UtteranceRecord): boolean {
-  void record;
-  throw new Error('not implemented');
+  const { stt, mt, tts } = record.providers;
+  if (stt === 'fixture' || mt === 'fixture' || tts === 'fixture') return false;
+  if (record.corpusId.startsWith('placeholder')) return false;
+  if (record.arm === 'fixture') return false;
+  return true;
+}
+
+function deepCopy<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+interface LedgerState {
+  records: UtteranceRecord[];
+  blindDraws: BlindDraw[];
 }
 
 export class RunLedger {
+  private records: UtteranceRecord[] = [];
+  private blindDraws: BlindDraw[] = [];
+  private readonly storage?: StorageAdapter;
+
   constructor(storage?: StorageAdapter) {
-    void storage;
-    throw new Error('not implemented');
+    this.storage = storage;
+    if (storage) {
+      const blob = storage.getItem(LEDGER_STORAGE_KEY);
+      if (blob !== null) {
+        const state = JSON.parse(blob) as LedgerState;
+        this.records = state.records ?? [];
+        this.blindDraws = state.blindDraws ?? [];
+      }
+    }
+  }
+
+  private persist(): void {
+    if (this.storage) {
+      this.storage.setItem(
+        LEDGER_STORAGE_KEY,
+        JSON.stringify({ records: this.records, blindDraws: this.blindDraws }),
+      );
+    }
   }
 
   append(record: UtteranceRecord): void {
-    void record;
-    throw new Error('not implemented');
+    this.records.push(deepCopy(record));
+    this.persist();
   }
 
   getRecords(runId?: string): UtteranceRecord[] {
-    void runId;
-    throw new Error('not implemented');
+    const matching =
+      runId === undefined ? this.records : this.records.filter((r) => r.runId === runId);
+    return deepCopy(matching);
   }
 
   recordBlindDraw(draw: BlindDrawInput): void {
-    void draw;
-    throw new Error('not implemented');
+    this.blindDraws.push(deepCopy(draw));
+    this.persist();
   }
 
   recordBlindScores(input: BlindScoresInput): void {
-    void input;
-    throw new Error('not implemented');
+    const draw = this.blindDraws.find((d) => d.id === input.drawId);
+    if (!draw) {
+      throw new Error(`Unknown blind draw id: ${input.drawId}`);
+    }
+    draw.scores = deepCopy(input.scores);
+    draw.revealedAt = input.revealedAt;
+    this.persist();
   }
 
   exportRuns(): LedgerExport {
-    throw new Error('not implemented');
+    const runIds: string[] = [];
+    for (const r of this.records) {
+      if (!runIds.includes(r.runId)) runIds.push(r.runId);
+    }
+    const utteranceRun = new Map<string, string>();
+    for (const r of this.records) utteranceRun.set(r.id, r.runId);
+
+    return {
+      runs: runIds.map((runId) => ({
+        runId,
+        records: deepCopy(this.records.filter((r) => r.runId === runId)),
+        blindDraws: deepCopy(
+          this.blindDraws.filter((d) => utteranceRun.get(d.utteranceId) === runId),
+        ),
+      })),
+    };
   }
 
   importRuns(data: LedgerExport): void {
-    void data;
-    throw new Error('not implemented');
+    const records: UtteranceRecord[] = [];
+    const blindDraws: BlindDraw[] = [];
+    for (const run of data.runs) {
+      for (const r of run.records) records.push(deepCopy(r));
+      for (const d of run.blindDraws) blindDraws.push(deepCopy(d));
+    }
+    this.records = records;
+    this.blindDraws = blindDraws;
+    this.persist();
   }
 
   aggregates(runId?: string): LedgerAggregates {
-    void runId;
-    throw new Error('not implemented');
+    const perArm: { [arm: string]: ArmAggregate } = {};
+    const latenciesByArm: { [arm: string]: number[] } = {};
+
+    for (const r of this.records) {
+      if (runId !== undefined && r.runId !== runId) continue;
+      if (!isRealRecord(r)) continue;
+      let agg = perArm[r.arm];
+      if (!agg) {
+        agg = { count: 0, p50Ms: null, p95Ms: null, costUsd: 0 };
+        perArm[r.arm] = agg;
+        latenciesByArm[r.arm] = [];
+      }
+      agg.count += 1;
+      agg.costUsd += r.costUnits;
+      const timings = r.timings as { speech_end?: number; audio_queued?: number };
+      if (typeof timings.speech_end === 'number' && typeof timings.audio_queued === 'number') {
+        latenciesByArm[r.arm]!.push(timings.audio_queued - timings.speech_end);
+      }
+    }
+
+    for (const [arm, latencies] of Object.entries(latenciesByArm)) {
+      if (latencies.length === 0) continue;
+      const sorted = [...latencies].sort((a, b) => a - b);
+      const rank = (p: number) => sorted[Math.ceil(p * sorted.length) - 1]!;
+      perArm[arm]!.p50Ms = rank(0.5);
+      perArm[arm]!.p95Ms = rank(0.95);
+    }
+
+    return { perArm };
   }
 
   get hasRuns(): boolean {
-    throw new Error('not implemented');
+    return this.records.some(isRealRecord);
   }
 }
