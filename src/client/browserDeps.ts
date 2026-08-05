@@ -36,6 +36,12 @@ const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
 export function buildBrowserDeps(): SessionDeps {
   const wsBase = `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
 
+  // Live getUserMedia stream captured as it is granted, so RealtimeTransport
+  // can attach the mic track to its RTCPeerConnection before createOffer
+  // (controller starts transports only after the grant, and reconnects
+  // re-read this on every connect). Exercised by browser QA, not unit tests.
+  let liveMicStream: MediaStream | null = null;
+
   const transportFactory = (def: ArmDef): InterpreterTransport => {
     if (def.mode === 'realtime') {
       return new RealtimeTransport(
@@ -45,6 +51,7 @@ export function buildBrowserDeps(): SessionDeps {
             fetch(input, init)) as typeof fetch,
           rtcFactory: () => new RTCPeerConnection() as unknown as RtcPeerConnectionLike,
           now: () => Date.now(),
+          getMediaStream: () => liveMicStream,
         },
       );
     }
@@ -66,7 +73,11 @@ export function buildBrowserDeps(): SessionDeps {
     transportFactory,
     startCapture: (cbs: CaptureCallbacks): Promise<CaptureResult> =>
       startCapture({
-        getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
+        getUserMedia: async (constraints) => {
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          liveMicStream = stream; // expose to the realtime transport (see above)
+          return stream;
+        },
         audioContextFactory: () => new AudioContext(),
         pipeline: browserPipeline,
         onChunk: cbs.onChunk,

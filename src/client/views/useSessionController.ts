@@ -171,6 +171,19 @@ export interface SessionFooterData {
   costUsd: number;
 }
 
+export type BlindSampleKey = 'A' | 'B';
+
+/** Ticket 014 — blind-compare slice (rendered by components/session/BlindCompare). */
+export interface BlindSlice {
+  open: boolean;
+  revealed: boolean;
+  /** Presented arm order for the open draw; order[0] is Sample A. */
+  order: string[];
+  scores: Record<BlindSampleKey, number | null>;
+  /** True when the last settled utterance had at least one failed arm. */
+  lastUtteranceFailed: boolean;
+}
+
 export interface SessionActions {
   start: () => void;
   stop: () => void;
@@ -183,6 +196,11 @@ export interface SessionActions {
   removeArm: (armId: string) => void;
   togglePlay: (armId: string) => void;
   reconnect: () => void;
+  /** Ticket 014 — blind compare. */
+  toggleBlind: () => void;
+  scoreBlind: (sample: BlindSampleKey, score: number) => void;
+  submitBlind: () => void;
+  playBlindSample: (sample: BlindSampleKey) => void;
 }
 
 /**
@@ -199,6 +217,7 @@ export interface SessionController {
   armViews: Record<string, ArmUtteranceView>;
   footer: SessionFooterData;
   elapsedMs: number;
+  blind: BlindSlice;
   actions: SessionActions;
   [key: string]: unknown;
 }
@@ -282,6 +301,14 @@ interface ArmRuntime {
   view: ArmUtteranceView;
 }
 
+interface BlindStore {
+  open: boolean;
+  drawId: string | null;
+  order: string[];
+  scores: Record<BlindSampleKey, number | null>;
+  revealed: boolean;
+}
+
 interface ControllerStore {
   router: ArmRouter;
   captureHandle: CaptureHandle | null;
@@ -291,8 +318,15 @@ interface ControllerStore {
   utteranceOpen: boolean;
   settled: Set<string>;
   failedThisUtterance: boolean;
+  lastUtteranceFailed: boolean;
   dropped: number;
   level: number;
+  blind: BlindStore;
+  drawCounter: number;
+}
+
+function emptyBlind(): BlindStore {
+  return { open: false, drawId: null, order: [], scores: { A: null, B: null }, revealed: false };
 }
 
 export function useSessionController(deps: SessionDeps): SessionController {
@@ -316,8 +350,11 @@ export function useSessionController(deps: SessionDeps): SessionController {
       utteranceOpen: false,
       settled: new Set(),
       failedThisUtterance: false,
+      lastUtteranceFailed: false,
       dropped: 0,
       level: 0,
+      blind: emptyBlind(),
+      drawCounter: 0,
     };
     storeRef.current = store;
 
@@ -383,6 +420,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
       if (active.length > 0 && active.every((id) => store.settled.has(id))) {
         store.utteranceOpen = false;
         store.settled.clear();
+        store.lastUtteranceFailed = store.failedThisUtterance;
         if (store.failedThisUtterance) store.dropped += 1;
         store.failedThisUtterance = false;
         dispatch({ type: 'ARMS_SETTLED' });
@@ -563,6 +601,20 @@ export function useSessionController(deps: SessionDeps): SessionController {
     return () => clearInterval(timer);
   }, [state.status]);
 
+  const togglePlayArm = (armId: string): void => {
+    const s = stateRef.current;
+    const rt = store.arms.get(armId);
+    if (!rt) return;
+    if (s.playingArm === armId) {
+      rt.playback.pause();
+      dispatch({ type: 'PLAYBACK_ENDED' });
+    } else {
+      rt.playback.onEnded(() => dispatch({ type: 'PLAYBACK_ENDED' }));
+      rt.playback.play();
+      dispatch({ type: 'PLAY', armId });
+    }
+  };
+
   const actions: SessionActions = {
     start: () => {
       const s = stateRef.current;
@@ -602,7 +654,9 @@ export function useSessionController(deps: SessionDeps): SessionController {
       store.utteranceOpen = false;
       store.settled.clear();
       store.failedThisUtterance = false;
+      store.lastUtteranceFailed = false;
       store.dropped = 0;
+      store.blind = emptyBlind();
       store.router.stopAll();
       store.arms.clear();
       dispatch({ type: 'NEW_SESSION', now });
@@ -647,22 +701,16 @@ export function useSessionController(deps: SessionDeps): SessionController {
       const s = stateRef.current;
       if (s.arms.length >= 3) return;
       const next = ADD_ORDER.find((id) => !s.arms.includes(id));
-      if (next) dispatch({ type: 'ADD_ARM', armId: next });
-    },
-    removeArm: (armId) => dispatch({ type: 'REMOVE_ARM', armId }),
-    togglePlay: (armId) => {
-      const s = stateRef.current;
-      const rt = store.arms.get(armId);
-      if (!rt) return;
-      if (s.playingArm === armId) {
-        rt.playback.pause();
-        dispatch({ type: 'PLAYBACK_ENDED' });
-      } else {
-        rt.playback.onEnded(() => dispatch({ type: 'PLAYBACK_ENDED' }));
-        rt.playback.play();
-        dispatch({ type: 'PLAY', armId });
+      if (next) {
+        store.blind = emptyBlind(); // arm set changed — any open draw is stale
+        dispatch({ type: 'ADD_ARM', armId: next });
       }
     },
+    removeArm: (armId) => {
+      store.blind = emptyBlind(); // arm set changed — any open draw is stale
+      dispatch({ type: 'REMOVE_ARM', armId });
+    },
+    togglePlay: togglePlayArm,
     reconnect: () => {
       dispatch({ type: 'RECONNECT_CLICKED' });
       for (const id of store.router.armIds) {
@@ -670,6 +718,67 @@ export function useSessionController(deps: SessionDeps): SessionController {
         const def = catalogById.get(id);
         if (transport && def) void transport.start(buildConfig(def));
       }
+    },
+    toggleBlind: () => {
+      if (store.blind.open) {
+        store.blind = emptyBlind();
+        bump();
+        return;
+      }
+      const s = stateRef.current;
+      // Fisher–Yates over the ACTIVE arm order, consuming exactly N−1 rng()
+      // values (two arms → one value: < 0.5 keeps the order, >= 0.5 swaps).
+      const rng = depsRef.current.rng ?? Math.random;
+      const order = [...s.arms];
+      for (let i = 0; i < order.length - 1; i++) {
+        const j = Math.min(i + Math.floor(rng() * (order.length - i)), order.length - 1);
+        const tmp = order[i]!;
+        order[i] = order[j]!;
+        order[j] = tmp;
+      }
+      const now = depsRef.current.now();
+      store.drawCounter += 1;
+      const id = `draw-${now}-${store.drawCounter}`;
+      // Recorded AT OPEN TIME so the drawn assignment is auditable even if
+      // the rater never submits. The draw attaches to the last settled
+      // utterance's record id, tying it to the session run in exportRuns().
+      depsRef.current.ledger.recordBlindDraw({
+        id,
+        utteranceId: `utt-${Math.max(0, s.utteranceCount - 1)}`,
+        order: [...order],
+        createdAt: now,
+      });
+      store.blind = {
+        open: true,
+        drawId: id,
+        order,
+        scores: { A: null, B: null },
+        revealed: false,
+      };
+      bump();
+    },
+    scoreBlind: (sample, score) => {
+      if (!store.blind.open || store.blind.revealed) return;
+      store.blind.scores[sample] = score;
+      bump();
+    },
+    submitBlind: () => {
+      const blind = store.blind;
+      if (!blind.open || blind.drawId === null || blind.revealed) return;
+      const scores: { [sample: string]: number } = {};
+      if (blind.scores.A !== null) scores.A = blind.scores.A;
+      if (blind.scores.B !== null) scores.B = blind.scores.B;
+      depsRef.current.ledger.recordBlindScores({
+        drawId: blind.drawId,
+        scores,
+        revealedAt: depsRef.current.now(),
+      });
+      blind.revealed = true;
+      bump();
+    },
+    playBlindSample: (sample) => {
+      const armId = store.blind.order[sample === 'A' ? 0 : 1];
+      if (armId) togglePlayArm(armId);
     },
   };
 
@@ -706,6 +815,14 @@ export function useSessionController(deps: SessionDeps): SessionController {
   const elapsedMs =
     state.startedAt === null ? 0 : (state.stoppedAt ?? depsRef.current.now()) - state.startedAt;
 
+  const blind: BlindSlice = {
+    open: store.blind.open,
+    revealed: store.blind.revealed,
+    order: [...store.blind.order],
+    scores: { ...store.blind.scores },
+    lastUtteranceFailed: store.lastUtteranceFailed,
+  };
+
   return {
     state,
     sourceText: store.sourceText,
@@ -715,6 +832,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
     armViews,
     footer,
     elapsedMs,
+    blind,
     actions,
   };
 }

@@ -95,12 +95,24 @@ export interface RtcSessionDescriptionLike {
   sdp: string;
 }
 
+/** Minimal MediaStream surface the transport touches (production only). */
+export interface RtcMediaStreamLike {
+  getAudioTracks(): unknown[];
+}
+
 export interface RtcPeerConnectionLike {
   createDataChannel(label: string): RtcDataChannelLike;
   createOffer(): Promise<RtcSessionDescriptionLike>;
   setLocalDescription(desc: RtcSessionDescriptionLike): Promise<void>;
   setRemoteDescription(desc: RtcSessionDescriptionLike): Promise<void>;
   close(): void;
+  /**
+   * OPTIONAL production-path additions (real RTCPeerConnection has them;
+   * test fakes may omit them and behave exactly as before). Exercised by
+   * browser QA, not unit tests.
+   */
+  addTrack?(track: unknown, stream: unknown): unknown;
+  addTransceiver?(kind: string, init?: { direction: string }): unknown;
 }
 
 export interface RealtimeDeps {
@@ -108,6 +120,14 @@ export interface RealtimeDeps {
   rtcFactory: () => RtcPeerConnectionLike;
   /** Epoch-ms clock for timing marks. */
   now: () => number;
+  /**
+   * OPTIONAL (production): the live getUserMedia MediaStream, so the mic
+   * track rides the WebRTC media path. Called on every (re)connect BEFORE
+   * createOffer; null/undefined → no track is attached (test fakes and
+   * pre-grant connects behave exactly as before). Exercised by browser QA,
+   * not unit tests.
+   */
+  getMediaStream?: () => RtcMediaStreamLike | null;
 }
 
 export interface RealtimeTransportOptions {
@@ -171,6 +191,20 @@ export class RealtimeTransport implements InterpreterTransport {
 
       const pc = this.deps.rtcFactory();
       const channel = pc.createDataChannel('oai-events');
+
+      // Production path (browser QA, not unit tests): attach the live mic
+      // track BEFORE createOffer so the offer carries a sendrecv audio
+      // m-line (mic up, model audio down). Without a stream, fall back to a
+      // recvonly transceiver so the model's audio track could still flow —
+      // playback itself stays on the data-channel PCM path by design. Test
+      // fakes implement neither optional method and behave as before.
+      const media = this.deps.getMediaStream?.() ?? null;
+      if (media && typeof pc.addTrack === 'function') {
+        for (const track of media.getAudioTracks()) pc.addTrack(track, media);
+      } else if (typeof pc.addTransceiver === 'function') {
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+      }
+
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 

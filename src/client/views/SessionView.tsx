@@ -120,6 +120,7 @@ import {
   type CascadeTimestamps,
   type RealtimeTimestamps,
 } from '../../core/timing';
+import BlindCompare from '../components/session/BlindCompare';
 import {
   MAX_RECONNECT_ATTEMPTS,
   pairs,
@@ -1206,6 +1207,9 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
               />
             ))}
           </div>
+
+          {/* blind compare — comparison mode only (ticket 014) */}
+          {multi && <BlindCompare controller={controller} />}
         </>
       )}
 
