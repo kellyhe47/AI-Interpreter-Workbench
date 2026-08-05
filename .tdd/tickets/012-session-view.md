@@ -1,7 +1,7 @@
 ---
 id: 012
 title: Session view UI — full cockpit per design handoff
-status: pending
+status: green
 depends_on: [008, 009, 010, 011]
 touches: [src/client/App.tsx, src/client/components/*, src/client/views/SessionView.tsx]
 test_files: []
