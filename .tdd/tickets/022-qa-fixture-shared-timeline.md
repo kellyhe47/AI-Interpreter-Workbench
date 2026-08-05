@@ -1,7 +1,7 @@
 ---
 id: 022
 title: Fixture arms must share one utterance timeline (unsynchronized playlists mislead comparison QA)
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/fixtureDeps.ts]
