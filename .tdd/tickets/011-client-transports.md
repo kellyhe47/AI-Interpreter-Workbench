@@ -1,7 +1,7 @@
 ---
 id: 011
 title: Client transports — InterpreterTransport, Realtime WebRTC, Cascade WS, fixture, ArmRouter
-status: pending
+status: green
 depends_on: [008, 010]
 touches: [src/client/transport/*]
 test_files: []

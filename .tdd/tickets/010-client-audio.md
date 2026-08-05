@@ -1,7 +1,7 @@
 ---
 id: 010
 title: Client audio — mic capture to PCM16/24k, playback queue, level meter
-status: pending
+status: green
 depends_on: []
 touches: [src/client/audio/*]
 test_files: []
