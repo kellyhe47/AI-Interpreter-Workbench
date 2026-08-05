@@ -1,10 +1,10 @@
 ---
 id: 006
 title: OpenAI real adapters — STT (transcription WS), MT (chat stream), TTS (speech stream)
-status: pending
+status: green
 depends_on: [001, 002, 003]
 touches: [src/server/providers/openai-stt.ts, src/server/providers/openai-mt.ts, src/server/providers/openai-tts.ts, src/core/registry.ts, scripts/smoke-*.mjs]
-test_files: []
+test_files: [src/server/providers/openai-stt.test.ts, src/server/providers/openai-mt.test.ts, src/server/providers/openai-tts.test.ts, src/core/registry-adapters.test.ts]
 iterations: 0
 ---
 

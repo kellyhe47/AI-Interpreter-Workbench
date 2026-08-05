@@ -1,10 +1,10 @@
 ---
 id: 007
 title: ElevenLabs Flash v2.5 TTS adapter (WS stream-input, true streaming text input)
-status: pending
+status: green
 depends_on: [001, 002, 003]
 touches: [src/server/providers/elevenlabs-tts.ts, src/core/registry.ts, scripts/smoke-elevenlabs.mjs]
-test_files: []
+test_files: [src/server/providers/elevenlabs-tts.test.ts]
 iterations: 0
 ---
 
