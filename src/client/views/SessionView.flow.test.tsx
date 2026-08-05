@@ -242,6 +242,50 @@ describe('AC9 — reconnect and disconnect banners', () => {
   });
 });
 
+describe('Ticket 020 — arm cards are per-utterance (no stale ready)', () => {
+  it('a new source partial resets every arm card to in-flight; a non-delivering arm never shows ready', async () => {
+    const { ledger } = renderApp({
+      initialState: { mode: 'realtime', arms: ['realtime', 'cascade-openai'], autoplay: false },
+      scripts: {
+        realtime: [
+          ...realtimeUtteranceScript({ utt: 0, base: 0 }),
+          ...realtimeUtteranceScript({ utt: 1, base: 2000 }),
+        ],
+        // cascade arm delivers utterance 0 only — never anything for utt 1
+        'cascade-openai': cascadeUtteranceScript({ utt: 0, base: 0 }),
+      },
+    });
+    await clickStartMicrophone();
+
+    // Utterance 0 settles on both arms.
+    await advance(1300);
+    expect(armCard('cascade-openai')).toHaveAttribute('data-arm-status', 'ready');
+    expect(armCard('cascade-openai')).toHaveTextContent(TGT_FINAL);
+    expect(armCard('realtime')).toHaveAttribute('data-arm-status', 'ready');
+
+    // Utterance 1's first source partial (t≈2010): EVERY active arm card
+    // resets to in-flight — no stale utterance-0 target text as "current".
+    await advance(750);
+    expect(sourceCard()).toHaveTextContent(SRC_PARTIAL_1);
+    expect(armCard('realtime')).toHaveAttribute('data-arm-status', 'in-flight');
+    expect(armCard('cascade-openai')).toHaveAttribute('data-arm-status', 'in-flight');
+    expect(armCard('cascade-openai')).not.toHaveTextContent(TGT_FINAL);
+
+    // Realtime finishes utterance 1; the cascade arm never delivered — it
+    // must stay visibly in-flight, not 'ready' with old content.
+    await advance(1100);
+    expect(armCard('realtime')).toHaveAttribute('data-arm-status', 'ready');
+    expect(armCard('cascade-openai')).toHaveAttribute('data-arm-status', 'in-flight');
+    expect(armCard('cascade-openai')).not.toHaveTextContent(TGT_FINAL);
+
+    // Transcript history semantics untouched: utterance-0 records from both
+    // arms remain in the ledger.
+    const ids = ledger.getRecords().map((r) => `${r.arm}:${r.id}`);
+    expect(ids).toContain('cascade-openai:utt-0');
+    expect(ids).toContain('realtime:utt-0');
+  });
+});
+
 describe('AC10 — stop → stopped summary with REAL numbers; ledger-backed footer', () => {
   function twoUtteranceRun(now: () => number) {
     return renderApp({

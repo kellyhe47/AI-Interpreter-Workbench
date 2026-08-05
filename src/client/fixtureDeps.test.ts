@@ -185,6 +185,51 @@ describe('buildFixtureDeps — scripted utterances', () => {
   });
 });
 
+describe('Ticket 021 — fixture scripts loop until stop()', () => {
+  it('a 2-utterance loop keeps producing utterances: unique incrementing numbering, all settling', async () => {
+    const deps = buildFixtureDeps({ utterancesPerLoop: 2, utteranceSpacingMs: 1500 });
+    const { events } = await runArm(deps, 'cascade-openai', 8_000);
+
+    const ids = events.completions.map((r) => (r as UtteranceRecord).id);
+    // Wrapped past the 2-utterance script — the session never runs dry.
+    expect(ids.length).toBeGreaterThanOrEqual(3);
+    // Every started utterance settled, in order, with ids unique and
+    // contiguous from utt-0 (numbering keeps incrementing across loops —
+    // no repeats, no dangling utterance at the wrap).
+    expect(ids).toEqual(ids.map((_, i) => `utt-${i}`));
+    const finalUtts = events.source.filter((e) => e.kind === 'final').map((e) => e.utt);
+    expect(new Set(finalUtts).size).toBe(finalUtts.length);
+  });
+
+  it('the default script loops too (production fixture mode never wedges in processing)', async () => {
+    const { events } = await runArm(buildFixtureDeps(), 'cascade-openai', 40_000);
+    const ids = events.completions.map((r) => (r as UtteranceRecord).id);
+    expect(ids.length).toBeGreaterThanOrEqual(9); // beyond the base 8-utterance script
+    expect(ids).toContain('utt-8');
+  });
+
+  it('stop() halts the loop — no events after stop', async () => {
+    const deps = buildFixtureDeps({ utterancesPerLoop: 2, utteranceSpacingMs: 1500 });
+    const transport = deps.transportFactory(armDef('cascade-openai'));
+    const completions: UtteranceCompletion[] = [];
+    const sources: SourceTextEvent[] = [];
+    transport.setHandlers({
+      onUtteranceComplete: (record) => completions.push(record),
+      onSourceText: (e) => sources.push(e),
+    });
+    await transport.start(CONFIG);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(completions.length).toBeGreaterThan(0);
+
+    transport.stop();
+    const completionCount = completions.length;
+    const sourceCount = sources.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(completions.length).toBe(completionCount);
+    expect(sources.length).toBe(sourceCount);
+  });
+});
+
 describe('buildFixtureDeps — capture fake', () => {
   it('grants without getUserMedia and emits synthetic levels/chunks until stopped', async () => {
     const deps = buildFixtureDeps();

@@ -31,11 +31,14 @@
  *   'ready'.
  * - PERMISSION_DENIED → 'permission-denied' + micPermission 'denied'; START
  *   while micPermission is 'denied' is a no-op (blocking screen).
- * - REQUEST_SWITCH(kind, label, patch) while active (listening / processing /
- *   ready / playing) only sets `pending`; UTTERANCE_BOUNDARY applies the
- *   patch (mode / langIdx / reversed) and clears `pending`. While
- *   idle/stopped the patch applies immediately and `pending` stays null.
- *   Same mechanism for all three kinds ('mode' | 'language' | 'direction').
+ * - REQUEST_SWITCH(kind, label, patch) — TICKET 019: queues ONLY while an
+ *   utterance is actually in flight (status 'processing' | 'playing'):
+ *   there it sets `pending`, and UTTERANCE_BOUNDARY applies the patch
+ *   (mode / langIdx / reversed) and clears `pending`. In every other status
+ *   — including 'listening' and 'ready' (a boundary: no sentence to finish)
+ *   and idle/stopped — the patch applies immediately and `pending` stays
+ *   null. Same mechanism for all three kinds ('mode' | 'language' |
+ *   'direction').
  * - UTTERANCE_BOUNDARY also increments `utteranceCount` — the transcript
  *   preservation marker that must survive reconnect cycles.
  * - Autoplay invariants: ADD_ARM taking arms to 2 or 3 forces

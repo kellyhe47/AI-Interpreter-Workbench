@@ -59,6 +59,19 @@ export interface FixtureDepsOptions {
   fault?: string;
   /** Injectable clock; defaults to Date.now. */
   now?: () => number;
+  /**
+   * Ticket 021 — utterances per script loop (default 8). Fixture transports
+   * LOOP their utterance script indefinitely with the same spacing until
+   * stop(): a QA session always has a next utterance, so boundary-dependent
+   * behaviors (queued switches) stay reachable. Utterance numbering (`utt`
+   * and record ids) keeps incrementing across loop wraps — unique per
+   * session — and every scripted utterance settles (completion or scripted
+   * failure); no dangling utterance at the wrap. Small values make loop
+   * wraps cheap to observe in tests.
+   */
+  utterancesPerLoop?: number;
+  /** Ticket 021 — ms between utterance starts (default 4000). */
+  utteranceSpacingMs?: number;
 }
 
 export function isFixtureMode(search: string): FixtureModeSelection {

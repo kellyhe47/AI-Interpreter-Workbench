@@ -24,6 +24,7 @@ import {
   makeDenyingCapture,
   makePendingCapture,
   micIndicator,
+  cascadeUtteranceScript,
   realtimeUtteranceScript,
   renderApp,
   sourceCard,
@@ -129,16 +130,17 @@ describe('AC2 — mic permission: live four-value indicator', () => {
   });
 });
 
-describe('AC3 — mode toggle queues at the utterance boundary', () => {
+describe('AC3 — mode switch queues ONLY while an utterance is in flight (ticket 019)', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('active session: banner until the utterance finishes, then mode applies', async () => {
+  it('in-flight request: banner while streaming; settle clears it AND the new mode + arm apply', async () => {
     renderApp({
       initialState: { mode: 'realtime', arms: ['realtime'] },
       scripts: { realtime: realtimeUtteranceScript() },
     });
     await clickStartMicrophone();
+    await advance(50); // first source partial arrived → utterance in flight
 
     fireEvent.click(screen.getByRole('button', { name: 'Cascade' }));
     expect(
@@ -149,7 +151,7 @@ describe('AC3 — mode toggle queues at the utterance boundary', () => {
       'false',
     );
 
-    await advance(1200); // fixture utterance completes → boundary
+    await advance(1200); // fixture utterance settles → boundary
     expect(
       screen.queryByText('switching to Cascade after this sentence finishes'),
     ).not.toBeInTheDocument();
@@ -157,10 +159,28 @@ describe('AC3 — mode toggle queues at the utterance boundary', () => {
       'aria-pressed',
       'true',
     );
+    // The regression that matters (QA iteration 2): the switch actually
+    // LANDS — the single arm swaps to the new mode's catalog arm.
+    expect(armPillIds()).toEqual(['cascade-openai']);
+    expect(armCardIds()).toEqual(['cascade-openai']);
+  });
+
+  it('request while ready (no utterance in flight) applies immediately — no banner', async () => {
+    renderApp({
+      initialState: { mode: 'cascade', arms: ['cascade-openai'] },
+      scripts: { 'cascade-openai': cascadeUtteranceScript() },
+    });
+    await clickStartMicrophone();
+    await advance(1300); // utterance 0 settled → ready, nothing in flight
+    expect(stateLabel()).toHaveTextContent('ready');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Realtime' }));
+    expect(screen.queryByText(/switching to/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Realtime' })).toHaveAttribute(
       'aria-pressed',
-      'false',
+      'true',
     );
+    expect(armPillIds()).toEqual(['realtime']);
   });
 
   it('idle: mode applies instantly with no banner', () => {

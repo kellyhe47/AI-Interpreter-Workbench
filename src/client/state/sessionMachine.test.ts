@@ -174,10 +174,14 @@ describe('rule 3 — switch queueing', () => {
     },
   ];
 
-  const activeStatuses: SessionStatus[] = ['listening', 'processing', 'ready', 'playing'];
+  // Ticket 019: a switch queues ONLY while an utterance is actually in
+  // flight (processing/playing). listening/ready ARE boundaries — there is
+  // no sentence to finish, so the patch applies immediately.
+  const inFlightStatuses: SessionStatus[] = ['processing', 'playing'];
+  const boundaryStatuses: SessionStatus[] = ['listening', 'ready'];
 
   for (const c of kinds) {
-    for (const status of activeStatuses) {
+    for (const status of inFlightStatuses) {
       it(`${c.kind} switch while ${status}: queued as pending, applied at UTTERANCE_BOUNDARY`, () => {
         const start = active(status, c.initial);
         const queued = reduce(start, {
@@ -195,6 +199,21 @@ describe('rule 3 — switch queueing', () => {
         const applied = reduce(queued, { type: 'UTTERANCE_BOUNDARY' });
         expect(c.read(applied)).toEqual(c.expected);
         expect(applied.pending).toBeNull();
+      });
+    }
+
+    for (const status of boundaryStatuses) {
+      it(`${c.kind} switch while ${status}: no utterance in flight — applied immediately (ticket 019)`, () => {
+        const start = active(status, c.initial);
+        const s = reduce(start, {
+          type: 'REQUEST_SWITCH',
+          kind: c.kind,
+          label: c.label,
+          patch: c.patch,
+        });
+        expect(s.status).toBe(status);
+        expect(c.read(s)).toEqual(c.expected);
+        expect(s.pending).toBeNull();
       });
     }
 
