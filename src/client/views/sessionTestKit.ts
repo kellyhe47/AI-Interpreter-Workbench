@@ -244,6 +244,8 @@ export interface TestDepsOptions {
   initialState?: Partial<SessionState>;
   now?: () => number;
   ledger?: RunLedger;
+  /** Injectable RNG (ticket 014 blind compare). Omitted → deps default. */
+  rng?: () => number;
 }
 
 export interface TestDeps {
@@ -275,6 +277,7 @@ export function makeDeps(opts: TestDepsOptions = {}): TestDeps {
     ledger,
     now: opts.now ?? (() => 0),
     initialState: opts.initialState,
+    rng: opts.rng,
   };
   return { deps, ledger, transports, capture };
 }

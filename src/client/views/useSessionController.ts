@@ -136,6 +136,15 @@ export interface SessionDeps {
   now: () => number;
   /** Test seed forwarded into createInitialState. */
   initialState?: Partial<SessionState>;
+  /**
+   * Ticket 014 — injectable RNG for the blind-compare draw (default
+   * Math.random). CONTRACT (locked by BlindCompare.test.tsx): each open of
+   * the blind-compare card draws a fresh presentation order from the ACTIVE
+   * arm order via Fisher–Yates, consuming exactly N−1 rng() values for N
+   * arms — so with two arms exactly ONE value per open, where rng() < 0.5
+   * keeps the active order and rng() >= 0.5 swaps the pair.
+   */
+  rng?: () => number;
 }
 
 /** Per-arm view of the current (latest) utterance. */
