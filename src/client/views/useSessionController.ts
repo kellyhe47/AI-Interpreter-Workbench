@@ -316,6 +316,8 @@ interface ControllerStore {
   runId: string | null;
   arms: Map<string, ArmRuntime>;
   sourceText: string;
+  /** Highest utterance number seen in a source partial (-1 before any). */
+  currentUtt: number;
   utteranceOpen: boolean;
   settled: Set<string>;
   failedThisUtterance: boolean;
@@ -348,6 +350,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
       runId: null,
       arms: new Map(),
       sourceText: '',
+      currentUtt: -1,
       utteranceOpen: false,
       settled: new Set(),
       failedThisUtterance: false,
@@ -435,10 +438,21 @@ export function useSessionController(deps: SessionDeps): SessionController {
         if (rt) touch(rt, e.utt);
         if (e.kind === 'partial') {
           if (rt) rt.view.sourcePartials.push(e.text);
-          if (!store.utteranceOpen) {
+          if (e.utt > store.currentUtt) {
+            // Ticket 020: a NEW utterance begins — reset EVERY active arm
+            // card to in-flight for utterance e.utt. An arm that never
+            // delivers stays visibly in-flight, never 'ready' with the
+            // previous utterance's text. (Ledger records are untouched.)
+            store.currentUtt = e.utt;
             store.utteranceOpen = true;
             store.settled.clear();
             store.failedThisUtterance = false;
+            for (const runtime of store.arms.values()) {
+              if (runtime.view.utt < e.utt) {
+                runtime.view = { ...emptyView(), utt: e.utt, hasData: true, status: 'in-flight' };
+                runtime.playback.reset();
+              }
+            }
             dispatch({ type: 'SPEECH_DETECTED' });
           }
         } else if (rt) {
@@ -590,9 +604,17 @@ export function useSessionController(deps: SessionDeps): SessionController {
     const only = state.arms[0]!;
     const def = catalogById.get(only);
     if (def && def.mode !== state.mode) {
+      // The replacement transport numbers its utterances from 0 again —
+      // reset utterance tracking so its first utterance opens normally
+      // (SPEECH_DETECTED + boundary; ticket 019 QA follow-up).
+      store.currentUtt = -1;
+      store.utteranceOpen = false;
+      store.settled.clear();
+      store.failedThisUtterance = false;
       dispatch({ type: 'REMOVE_ARM', armId: only });
       dispatch({ type: 'ADD_ARM', armId: armForMode(state.mode) });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.mode, state.arms]);
 
   // Elapsed ticker — re-render once a second while the session runs.
@@ -652,6 +674,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
       const now = depsRef.current.now();
       store.runId = `session-${now}`;
       store.sourceText = '';
+      store.currentUtt = -1;
       store.utteranceOpen = false;
       store.settled.clear();
       store.failedThisUtterance = false;

@@ -45,7 +45,13 @@ import type { UtteranceRecord } from '../core/timing';
 import type { CaptureResult } from './audio/capture';
 import type { PlaybackAudioContextLike, PlaybackSourceLike } from './audio/playback';
 import { RunLedger } from './state/ledger';
-import { FixtureTransport, type FixtureScriptEvent } from './transport/fixture';
+import type { FixtureScriptEvent } from './transport/fixture';
+import type {
+  InterpreterTransport,
+  TransportConfig,
+  TransportHandlers,
+  TransportKind,
+} from './transport/types';
 import type { ArmDef, SessionDeps } from './views/useSessionController';
 
 export interface FixtureModeSelection {
@@ -101,8 +107,8 @@ const SENTENCES: ReadonlyArray<{ src: string; tgt: string }> = [
   },
 ];
 
-const UTTERANCE_SPACING_MS = 4_000;
-const UTTERANCE_COUNT = 8;
+const DEFAULT_UTTERANCE_SPACING_MS = 4_000;
+const DEFAULT_UTTERANCES_PER_LOOP = 8;
 
 /** 50400 samples @ 24 kHz = 2.1 s of (silent) fixture audio. */
 function silentAudio(): Int16Array {
@@ -184,25 +190,29 @@ function fixtureRecord(
   };
 }
 
-/** One scripted utterance for an arm; `failMt` replaces the back half with a
- * stage-attributed mt error (no completion). */
+/** One scripted utterance for an arm. `atBase` is the fire-time offset
+ * within the current loop; `tBase` is the (monotonic, session-wide) base for
+ * timestamp values so latencies stay derivable across loop wraps. `failMt`
+ * replaces the back half with a stage-attributed mt error (no completion —
+ * the error IS the settle). */
 function utteranceScript(
   def: ArmDef,
   utt: number,
-  base: number,
+  atBase: number,
+  tBase: number,
   failMt: boolean,
 ): FixtureScriptEvent[] {
   const sentence = SENTENCES[utt % SENTENCES.length]!;
-  const offsets = def.mode === 'cascade' ? cascadeOffsets(base) : realtimeOffsets(base);
+  const offsets = def.mode === 'cascade' ? cascadeOffsets(tBase) : realtimeOffsets(tBase);
   const events: FixtureScriptEvent[] = [
-    { at: base + 10, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 18), utt },
-    { at: base + 220, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 34), utt },
-    { at: base + 560, type: 'sourceText', kind: 'final', text: sentence.src, utt },
+    { at: atBase + 10, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 18), utt },
+    { at: atBase + 220, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 34), utt },
+    { at: atBase + 560, type: 'sourceText', kind: 'final', text: sentence.src, utt },
   ];
 
   if (failMt) {
     events.push({
-      at: base + 900,
+      at: atBase + 900,
       type: 'error',
       message: 'mt stage timed out for this utterance',
       opaque: false,
@@ -212,15 +222,15 @@ function utteranceScript(
   }
 
   for (const [event, at, stage] of offsets.marks) {
-    events.push({ at: base + at, type: 'timing', event, t: offsets.timings[event]!, utt, stage });
+    events.push({ at: atBase + at, type: 'timing', event, t: offsets.timings[event]!, utt, stage });
   }
   events.push(
-    { at: base + 900, type: 'targetText', kind: 'delta', text: sentence.tgt.slice(0, 18), utt },
-    { at: base + 960, type: 'targetText', kind: 'delta', text: sentence.tgt.slice(18, 30), utt },
-    { at: base + 1055, type: 'audio', pcm: silentAudio(), utt },
-    { at: base + 1080, type: 'targetText', kind: 'final', text: sentence.tgt, utt },
+    { at: atBase + 900, type: 'targetText', kind: 'delta', text: sentence.tgt.slice(0, 18), utt },
+    { at: atBase + 960, type: 'targetText', kind: 'delta', text: sentence.tgt.slice(18, 30), utt },
+    { at: atBase + 1055, type: 'audio', pcm: silentAudio(), utt },
+    { at: atBase + 1080, type: 'targetText', kind: 'final', text: sentence.tgt, utt },
     {
-      at: base + 1100,
+      at: atBase + 1100,
       type: 'utteranceComplete',
       record: fixtureRecord(def, utt, sentence, offsets.timings),
     },
@@ -228,15 +238,116 @@ function utteranceScript(
   return events;
 }
 
-function buildScript(def: ArmDef, fault?: string): FixtureScriptEvent[] {
-  const script: FixtureScriptEvent[] = [];
-  for (let utt = 0; utt < UTTERANCE_COUNT; utt++) {
-    // fail-mt: exactly ONE scripted mt-stage error, on the cascade-openai
-    // arm's second utterance; every other utterance completes normally.
-    const failMt = fault === 'fail-mt' && def.id === 'cascade-openai' && utt === 1;
-    script.push(...utteranceScript(def, utt, utt * UTTERANCE_SPACING_MS, failMt));
+interface LoopConfig {
+  fault?: string;
+  utterancesPerLoop: number;
+  utteranceSpacingMs: number;
+}
+
+/**
+ * Ticket 021 — fixture transport that LOOPS its utterance script
+ * indefinitely until stop(). Each loop schedules `utterancesPerLoop`
+ * utterances at `utteranceSpacingMs` intervals, then schedules the next
+ * loop; `utt` numbering (and record ids) keeps incrementing across wraps so
+ * ids are unique per session, and every scripted utterance settles inside
+ * its own slot (completion — or the one scripted fail-mt error) before the
+ * wrap. stop() cancels every pending timer: no events after stop.
+ */
+class LoopingFixtureTransport implements InterpreterTransport {
+  readonly armId: string;
+  readonly kind: TransportKind;
+  readonly label: string;
+  readonly costPerMinUsd: number;
+
+  private readonly def: ArmDef;
+  private readonly cfg: LoopConfig;
+  private handlers: TransportHandlers = {};
+  private timers = new Set<ReturnType<typeof setTimeout>>();
+  private stopped = false;
+
+  constructor(def: ArmDef, cfg: LoopConfig) {
+    this.def = def;
+    this.cfg = cfg;
+    this.armId = def.id;
+    this.kind = def.mode;
+    this.label = def.label;
+    this.costPerMinUsd = def.costPerMinUsd;
   }
-  return script;
+
+  async start(_config: TransportConfig): Promise<void> {
+    this.handlers.onConnectionState?.('connected');
+    this.scheduleLoop(0);
+  }
+
+  private schedule(delayMs: number, fn: () => void): void {
+    const timer = setTimeout(() => {
+      this.timers.delete(timer);
+      if (!this.stopped) fn();
+    }, delayMs);
+    this.timers.add(timer);
+  }
+
+  private scheduleLoop(loop: number): void {
+    if (this.stopped) return;
+    const { fault, utterancesPerLoop, utteranceSpacingMs } = this.cfg;
+    for (let i = 0; i < utterancesPerLoop; i++) {
+      const utt = loop * utterancesPerLoop + i;
+      // fail-mt: exactly ONE scripted mt-stage error, on the cascade-openai
+      // arm's second utterance of the session; everything else completes.
+      const failMt = fault === 'fail-mt' && this.def.id === 'cascade-openai' && utt === 1;
+      const events = utteranceScript(
+        this.def,
+        utt,
+        i * utteranceSpacingMs,
+        utt * utteranceSpacingMs,
+        failMt,
+      );
+      for (const ev of events) this.schedule(ev.at, () => this.fire(ev));
+    }
+    // Wrap: schedule the next loop after this one's full span.
+    this.schedule(utterancesPerLoop * utteranceSpacingMs, () => this.scheduleLoop(loop + 1));
+  }
+
+  private fire(ev: FixtureScriptEvent): void {
+    const h = this.handlers;
+    switch (ev.type) {
+      case 'sourceText':
+        h.onSourceText?.({ kind: ev.kind, text: ev.text, utt: ev.utt });
+        break;
+      case 'targetText':
+        h.onTargetText?.({ kind: ev.kind, text: ev.text, utt: ev.utt });
+        break;
+      case 'audio':
+        h.onAudio?.(ev.pcm, ev.utt);
+        break;
+      case 'timing':
+        h.onTiming?.({ event: ev.event, t: ev.t ?? Date.now(), utt: ev.utt, stage: ev.stage });
+        break;
+      case 'utteranceComplete':
+        h.onUtteranceComplete?.(ev.record);
+        break;
+      case 'error':
+        h.onError?.({ message: ev.message, opaque: ev.opaque, stage: ev.stage });
+        break;
+      case 'connection':
+        h.onConnectionState?.(ev.state, ev.attempt);
+        break;
+    }
+  }
+
+  stop(): void {
+    this.stopped = true;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers.clear();
+  }
+
+  sendAudio(_pcm: Int16Array): void {
+    // Fixture mode: mic audio goes nowhere (scripts drive the session).
+  }
+
+  setHandlers(handlers: TransportHandlers): void {
+    this.handlers = handlers;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -266,16 +377,13 @@ function silentPlaybackContext(): PlaybackAudioContextLike {
 const LEVEL_PATTERN = [2, 3, 4, 3, 2, 1, 2, 4] as const;
 
 export function buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps {
-  const fault = options?.fault;
+  const loopConfig: LoopConfig = {
+    fault: options?.fault,
+    utterancesPerLoop: options?.utterancesPerLoop ?? DEFAULT_UTTERANCES_PER_LOOP,
+    utteranceSpacingMs: options?.utteranceSpacingMs ?? DEFAULT_UTTERANCE_SPACING_MS,
+  };
   return {
-    transportFactory: (def: ArmDef) =>
-      new FixtureTransport({
-        armId: def.id,
-        kind: def.mode,
-        label: def.label,
-        costPerMinUsd: def.costPerMinUsd,
-        script: buildScript(def, fault),
-      }),
+    transportFactory: (def: ArmDef) => new LoopingFixtureTransport(def, loopConfig),
     // Grants WITHOUT getUserMedia; synthetic level/chunk emission on a timer
     // until stop(). Dev/QA path — never used when the flag is absent.
     startCapture: async ({ onChunk, onLevel }): Promise<CaptureResult> => {

@@ -272,7 +272,10 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
     }
 
     case 'REQUEST_SWITCH': {
-      if (ACTIVE_STATUSES.includes(state.status)) {
+      // Ticket 019: queue ONLY while an utterance is actually in flight
+      // (processing/playing). listening/ready ARE boundaries — no sentence
+      // to finish — so the patch applies immediately, like idle/stopped.
+      if (state.status === 'processing' || state.status === 'playing') {
         return {
           ...state,
           pending: { kind: event.kind, label: event.label, patch: { ...event.patch } },
