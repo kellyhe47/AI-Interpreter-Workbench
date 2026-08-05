@@ -1,0 +1,32 @@
+/* Interpreter Workbench design system tokens — from design_handoff_interpreter_workbench/design_system/tokens/ */
+:root{
+/* base neutrals (warm-tinted) */
+--gray-0:#FFFFFF; --gray-25:#FAFAF9; --gray-50:#F5F5F4; --gray-100:#EEEDEC; --gray-200:#E7E5E4; --gray-300:#D6D3D1; --gray-400:#A8A29E; --gray-500:#78716C; --gray-600:#57534E; --gray-700:#44403C; --gray-800:#292524; --ink:#18181B;
+/* accent — the only pop of color */
+--accent:oklch(54% 0.19 262); --accent-strong:oklch(48% 0.19 262); --accent-soft:oklch(95% 0.03 262); --accent-ring:oklch(54% 0.19 262 / .35);
+/* semantic status */
+--positive:oklch(55% 0.14 155); --positive-soft:oklch(95% 0.04 155); --negative:oklch(56% 0.19 25); --negative-soft:oklch(95% 0.03 25); --warning:oklch(70% 0.15 75); --warning-soft:oklch(96% 0.05 85);
+/* semantic aliases */
+--surface-app:var(--gray-25); --surface-card:var(--gray-0); --surface-sunken:var(--gray-50); --surface-hover:var(--gray-50); --surface-selected:var(--gray-100);
+--text-body:var(--ink); --text-secondary:var(--gray-500); --text-muted:var(--gray-400); --text-inverse:#FFFFFF; --text-link:var(--accent);
+--border-default:var(--gray-200); --border-strong:var(--gray-300);
+--btn-primary-bg:var(--ink); --btn-primary-bg-hover:var(--gray-800); --btn-accent-bg:var(--accent); --btn-accent-bg-hover:var(--accent-strong);
+/* radii / effects */
+--radius-sm:6px; --radius-md:8px; --radius-lg:12px; --radius-pill:999px;
+--shadow-card:0 1px 2px rgba(0,0,0,.05); --shadow-popover:0 4px 16px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.06);
+--ring-focus:0 0 0 2px var(--accent-ring); --ease-out:cubic-bezier(.2,.8,.4,1); --dur-fast:150ms;
+/* spacing */
+--space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-5:20px; --space-6:24px; --space-8:32px; --space-10:40px; --space-12:48px;
+--sidebar-width:240px; --page-gutter:32px; --card-pad:20px;
+/* typography */
+--font-sans:"Geist",system-ui,-apple-system,sans-serif; --font-mono:"Geist Mono",ui-monospace,monospace;
+--text-xs:11px; --text-sm:12px; --text-base:13px; --text-md:14px; --text-lg:16px; --text-xl:20px; --text-2xl:24px; --text-kpi:28px;
+--weight-regular:400; --weight-medium:500; --weight-semibold:600; --weight-bold:700;
+--leading-tight:1.2; --leading-normal:1.5; --tracking-heading:-0.01em;
+}
+body{margin:0;font-family:var(--font-sans);font-size:var(--text-base);color:var(--text-body);background:var(--surface-app);-webkit-font-smoothing:antialiased}
+a{color:var(--text-link);text-decoration:none}
+a:hover{color:var(--accent-strong);text-decoration:underline}
+@keyframes wb-pulse{from{transform:scaleY(.45)}to{transform:scaleY(1.05)}}
+@keyframes wb-dot{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes wb-fill{from{width:8%}to{width:92%}}
