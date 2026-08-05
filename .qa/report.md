@@ -1,3 +1,23 @@
+# QA report — iterations 5 & 6 — CONVERGED (two consecutive clean passes)
+
+Iteration 5 (post-022): idle Realtime default · deny path w/ frozen 00:00 timer ·
+fixture session: instant ready-switch (arm swap, no banner), continuous numbering, add arm
+mid-session joins the SHARED utterance timeline (both cards translate the same sentence —
+verified concurrently mid-stream and at ready), blind compare full cycle, remove-arm autoplay
+restore, stop summary real numbers, Results still empty, zero console errors. **CLEAN.**
+
+Iteration 6: fail-mt journey — cascade card 'failed' with exact copy "mt stage timed out for
+this utterance — session still running" at the injected utterance, session recovers and
+streams the next utterance normally; shared timeline holds under the fault; stop; Results
+empty; zero console errors. Deny + idle re-checked. **CLEAN.**
+
+Verdict: the QA loop converged at iteration 6 (findings across the run: 7 filed, 7 fixed and
+verified in-browser). Standing escalations: real-microphone journeys and real-provider
+end-to-end audio remain unverified in a browser (pane blocks capture; provider paths were
+smoke-tested at the adapter level). These need the operator.
+
+---
+
 # QA report — iterations 3 & 4
 
 Iteration 3 (post 019–021 fixes): **CLEAN PASS #1.** Re-walked: idle (Realtime default),
