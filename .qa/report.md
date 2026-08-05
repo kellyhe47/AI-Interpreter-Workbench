@@ -1,3 +1,60 @@
+# QA report — iteration 2
+
+```yaml
+sha: (post 016-018 fixes)
+branch: main
+tree: dirty (RUN_LOG only)
+launched: npm run dev (reused) → http://localhost:5173 (+ ?fixture=1 / ?fixture=fail-mt)
+```
+
+## Verified fixed from iteration 1
+- QA-1 (016): denied-state elapsed frozen at 00:00 over 3+ s. ✓
+- QA-2 (017): cold open defaults Realtime; subline '… · Realtime · autoplay on.' ✓
+- QA-3 (018): ?fixture=1 drives the full live UI with no mic and no keys. ✓
+
+## Flows walked (all via fixture mode unless noted)
+- Idle → deny (real block) → remediation card ✓ · Idle → fixture grant → listening →
+  transcripts streaming (partials then finals, target deltas) ✓ · arm card in-flight →
+  ready with labelled mono ms (realtime 3 rows + opaque note; cascade 5 rows) ✓ ·
+  add arm (2-col, priced pill, autoplay-off note, shared suffix) ✓ · blind compare full
+  cycle (hidden → score 4/5 → submit → identities revealed, hints/labels exact) ✓ ·
+  remove arm restores autoplay ✓ · stop → green summary with real numbers, frozen elapsed,
+  history intact ✓ · fail-mt → cascade card 'failed' with EXACT stage-attributed copy,
+  session continues ✓ · Results after fixture session → still 'No runs recorded' ✓ ·
+  console: zero errors throughout.
+
+## New findings
+
+### QA-4 [medium] Queued mode switch never applies; banner stuck indefinitely
+- Repro A: fixture session, single arm, state `ready` between utterances → click Cascade →
+  banner 'switching to Cascade after this sentence finishes' → banner persists ≥60 s across
+  later utterance completions; mode never changes.
+- Repro B: same but clicked while an utterance was actively streaming → utterance settled →
+  banner still present, mode unchanged.
+- Expected: PRD §6 — switch "queues and applies at the next utterance boundary"; and when no
+  utterance is in flight there is no sentence to finish, so the switch should apply
+  immediately.
+- Ticket: 019-qa-switch-never-applies.md
+
+### QA-5 [low] Arm card shows a previous utterance's translation labelled 'ready'
+- Repro: fixture session; when an arm has produced nothing for the current utterance, its card
+  keeps the prior utterance's target text + 'ready' while the source card has advanced (seen
+  3 utterances apart).
+- Expected: per-arm state is per-utterance (PRD §6 table); a card should show in-flight/empty
+  for the current utterance, not stale content labelled ready.
+- Ticket: 020-qa-stale-arm-card.md
+
+### QA-6 [low, fixture-mode] Script exhaustion wedges the session in 'processing'
+- Repro: let the 8-utterance fixture script run out mid-utterance → status strip stays
+  'processing' forever; no settle, no error.
+- Expected: fixture transport should loop its script (QA needs continuous utterances) or end
+  the last utterance cleanly.
+- Ticket: 021-qa-fixture-script-loop.md
+
+Escalations: unchanged (real-mic + real-provider journeys).
+
+---
+
 # QA report — iteration 1
 
 ```yaml
