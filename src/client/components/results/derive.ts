@@ -77,8 +77,14 @@
  * - formatUsd(usd): null → '—'; otherwise '$' + usd.toFixed(3) ('$0.200').
  */
 
-import type { UtteranceRecord } from '../../../core/timing';
-import type { RunLedger } from '../../state/ledger';
+import {
+  deriveCascadeIntervals,
+  deriveRealtimeIntervals,
+  type CascadeTimestamps,
+  type RealtimeTimestamps,
+  type UtteranceRecord,
+} from '../../../core/timing';
+import { isRealRecord, type RunLedger } from '../../state/ledger';
 
 /** Post-hoc quality annotations a record MAY carry (absent tonight). */
 export interface RecordAnnotations {
@@ -168,15 +174,279 @@ export interface ResultsModel {
 
 /** Format a millisecond duration per the locked rule (see module docs). */
 export function formatMs(ms: number | null): string {
-  throw new Error('not implemented (ticket 013)');
+  if (ms === null) return '—';
+  if (ms < 10_000) return `${(ms / 1000).toFixed(2)} s`;
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
 /** Format a USD amount per the locked rule (see module docs). */
 export function formatUsd(usd: number | null): string {
-  throw new Error('not implemented (ticket 013)');
+  if (usd === null) return '—';
+  return `$${usd.toFixed(3)}`;
+}
+
+type RunClass = 'benchmark' | 'stability' | 'coverage';
+
+function classifyRun(runId: string): RunClass {
+  if (runId.includes('stability')) return 'stability';
+  if (runId.includes('coverage')) return 'coverage';
+  return 'benchmark';
+}
+
+/** Distinct arm ids in first-appearance order. */
+function armsOf(records: AnnotatedUtteranceRecord[]): string[] {
+  const arms: string[] = [];
+  for (const r of records) {
+    if (!arms.includes(r.arm)) arms.push(r.arm);
+  }
+  return arms;
+}
+
+function sign(value: number): string {
+  return value < 0 ? '-' : '+';
+}
+
+/** Mean of an optional annotation over the records that carry it, or null. */
+function annotationMean(
+  records: AnnotatedUtteranceRecord[],
+  key: 'wer' | 'adequacy' | 'fluency',
+): number | null {
+  const values = records
+    .map((r) => r.annotations?.[key])
+    .filter((v): v is number => typeof v === 'number');
+  if (values.length === 0) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+/** Cost per audio minute for an arm's records, or null. */
+function costPerMin(records: AnnotatedUtteranceRecord[]): number | null {
+  const audioMs = records.reduce((sum, r) => sum + r.audioDurationMs, 0);
+  if (audioMs === 0) return null;
+  const costUsd = records.reduce((sum, r) => sum + r.costUnits, 0);
+  return (costUsd * 60_000) / audioMs;
+}
+
+/** Count of named pipeline stages (excluding endToEnd) observable in ≥1 record. */
+function observableIntervals(records: AnnotatedUtteranceRecord[]): number {
+  const observed = new Set<string>();
+  for (const r of records) {
+    const intervals =
+      r.mode === 'realtime'
+        ? deriveRealtimeIntervals(r.timings as RealtimeTimestamps)
+        : deriveCascadeIntervals(r.timings as CascadeTimestamps);
+    for (const [stage, value] of Object.entries(intervals)) {
+      if (stage !== 'endToEnd' && value !== null) observed.add(`${r.mode}:${stage}`);
+    }
+  }
+  return observed.size;
+}
+
+interface MetricValues {
+  /** Raw numeric value per side (null = absent). */
+  a: number | null;
+  b: number | null;
+  valueA: string;
+  valueB: string;
+}
+
+function metricRow(
+  metric: MetricSlug,
+  label: string,
+  values: MetricValues,
+  direction: 'lower' | 'higher' | 'none',
+  formatDelta: (delta: number) => string,
+): MetricRow {
+  let delta = '—';
+  let deltaTone: Tone = 'neutral';
+  if (direction !== 'none' && values.a !== null && values.b !== null) {
+    const d = values.b - values.a;
+    delta = formatDelta(d);
+    if (d !== 0) {
+      const improved = direction === 'lower' ? d < 0 : d > 0;
+      deltaTone = improved ? 'good' : 'bad';
+    }
+  }
+  return { metric, label, valueA: values.valueA, valueB: values.valueB, delta, deltaTone };
+}
+
+/** Utterance key = record id up to an optional '#' suffix. */
+function utteranceKey(id: string): string {
+  const hash = id.indexOf('#');
+  return hash === -1 ? id : id.slice(0, hash);
+}
+
+function buildComparisonCard(
+  ledger: RunLedger,
+  runId: string,
+  records: AnnotatedUtteranceRecord[],
+  armA: string,
+  armB: string,
+  provenanceSuffix: string,
+): ComparisonCardModel {
+  const recordsA = records.filter((r) => r.arm === armA);
+  const recordsB = records.filter((r) => r.arm === armB);
+  const perArm = ledger.aggregates(runId).perArm;
+
+  const msRow = (metric: 'p50' | 'p95', label: string): MetricRow => {
+    const a = perArm[armA]?.[metric === 'p50' ? 'p50Ms' : 'p95Ms'] ?? null;
+    const b = perArm[armB]?.[metric === 'p50' ? 'p50Ms' : 'p95Ms'] ?? null;
+    return metricRow(
+      metric,
+      label,
+      { a, b, valueA: formatMs(a), valueB: formatMs(b) },
+      'lower',
+      (d) => `${sign(d)}${formatMs(Math.abs(d))}`,
+    );
+  };
+
+  const costA = costPerMin(recordsA);
+  const costB = costPerMin(recordsB);
+  const annotationRow = (
+    metric: 'wer' | 'adequacy' | 'fluency',
+    label: string,
+    direction: 'lower' | 'higher',
+  ): MetricRow => {
+    const a = annotationMean(recordsA, metric);
+    const b = annotationMean(recordsB, metric);
+    const format = (v: number | null): string => {
+      if (v === null) return '—';
+      return metric === 'wer' ? `${(v * 100).toFixed(1)}%` : v.toFixed(1);
+    };
+    const formatDelta = (d: number): string =>
+      metric === 'wer'
+        ? `${sign(d)}${(Math.abs(d) * 100).toFixed(1)}%`
+        : `${sign(d)}${Math.abs(d).toFixed(1)}`;
+    return metricRow(metric, label, { a, b, valueA: format(a), valueB: format(b) }, direction, formatDelta);
+  };
+
+  const rows: MetricRow[] = [
+    msRow('p50', 'p50 latency'),
+    msRow('p95', 'p95 latency'),
+    metricRow(
+      'cost',
+      'cost per min',
+      { a: costA, b: costB, valueA: formatUsd(costA), valueB: formatUsd(costB) },
+      'lower',
+      (d) => `${sign(d)}${formatUsd(Math.abs(d))}`,
+    ),
+    annotationRow('wer', 'word error rate', 'lower'),
+    annotationRow('adequacy', 'adequacy 1–5', 'higher'),
+    annotationRow('fluency', 'fluency 1–5', 'higher'),
+    metricRow(
+      'intervals',
+      'observable intervals',
+      {
+        a: null,
+        b: null,
+        valueA: String(observableIntervals(recordsA)),
+        valueB: String(observableIntervals(recordsB)),
+      },
+      'none',
+      () => '—',
+    ),
+  ];
+
+  const first = records[0]!;
+  const utterances = new Set(recordsA.map((r) => utteranceKey(r.id)));
+  const n = utterances.size;
+  const reps = n === 0 ? 0 : Math.round(recordsA.length / n);
+  const provenance =
+    `${first.languagePair} · ${n} utterances × ${reps} runs · ` +
+    'endpointing pinned 500 ms · turn-final trigger · ' +
+    `${first.corpusId} · run ${runId}${provenanceSuffix}`;
+
+  return { provenance, armA, armB, rows };
 }
 
 /** Derive the full, render-ready Results model from the ledger. */
 export function deriveResultsModel(ledger: RunLedger): ResultsModel {
-  throw new Error('not implemented (ticket 013)');
+  const real = (ledger.getRecords() as AnnotatedUtteranceRecord[]).filter(isRealRecord);
+
+  // Group real records by run, first-appended order.
+  const runIds: string[] = [];
+  const byRun = new Map<string, AnnotatedUtteranceRecord[]>();
+  for (const r of real) {
+    let run = byRun.get(r.runId);
+    if (!run) {
+      run = [];
+      byRun.set(r.runId, run);
+      runIds.push(r.runId);
+    }
+    run.push(r);
+  }
+
+  const model: ResultsModel = {
+    hasRuns: ledger.hasRuns,
+    ledgerRows: [],
+  };
+
+  for (const runId of runIds) {
+    const records = byRun.get(runId)!;
+    const experiment = classifyRun(runId);
+
+    // exp1: first benchmark run with both a realtime-mode and a cascade-mode arm.
+    if (!model.exp1 && experiment === 'benchmark') {
+      const realtimeArm = records.find((r) => r.mode === 'realtime')?.arm;
+      const cascadeArm = records.find((r) => r.mode === 'cascade')?.arm;
+      if (realtimeArm !== undefined && cascadeArm !== undefined) {
+        model.exp1 = buildComparisonCard(ledger, runId, records, realtimeArm, cascadeArm, '');
+      }
+    }
+
+    // exp2: first benchmark run with two or more distinct cascade-mode arms.
+    if (!model.exp2 && experiment === 'benchmark') {
+      const cascadeArms = armsOf(records.filter((r) => r.mode === 'cascade'));
+      if (cascadeArms.length >= 2) {
+        model.exp2 = buildComparisonCard(
+          ledger,
+          runId,
+          records,
+          cascadeArms[0]!,
+          cascadeArms[1]!,
+          ' · not pooled with track 1',
+        );
+      }
+    }
+
+    // stability: first stability-marked run with real records.
+    if (!model.stability && experiment === 'stability') {
+      model.stability = { runId, count: records.length };
+    }
+
+    // coverage: stage-annotated records of coverage runs.
+    if (experiment === 'coverage') {
+      for (const r of records) {
+        const stage = r.annotations?.stage;
+        if (stage === undefined) continue;
+        if (!model.coverage) {
+          model.coverage = { stages: [], arms: [], counts: {} };
+        }
+        if (!model.coverage.stages.includes(stage)) model.coverage.stages.push(stage);
+        if (!model.coverage.arms.includes(r.arm)) model.coverage.arms.push(r.arm);
+        const byStage = (model.coverage.counts[stage] ??= {});
+        byStage[r.arm] = (byStage[r.arm] ?? 0) + 1;
+      }
+    }
+
+    // Ledger row.
+    const speechEnds = records
+      .map((r) => (r.timings as { speech_end?: number }).speech_end)
+      .filter((t): t is number => typeof t === 'number');
+    model.ledgerRows.push({
+      runId,
+      experiment,
+      configuration: armsOf(records).join(' vs '),
+      pair: records[0]!.languagePair,
+      n: records.length,
+      date:
+        speechEnds.length === 0
+          ? '—'
+          : new Date(Math.min(...speechEnds)).toISOString().slice(0, 10),
+    });
+  }
+
+  return model;
 }
