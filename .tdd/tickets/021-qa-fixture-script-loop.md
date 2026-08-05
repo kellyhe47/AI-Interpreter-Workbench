@@ -1,7 +1,7 @@
 ---
 id: 021
 title: Fixture transports must loop their script (exhaustion wedges session in 'processing')
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/fixtureDeps.ts]

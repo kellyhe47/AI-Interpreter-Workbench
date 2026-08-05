@@ -1,7 +1,7 @@
 ---
 id: 020
 title: Arm card shows previous utterance's translation labelled 'ready' after source advances
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/views/useSessionController.ts, src/client/views/SessionView.tsx]

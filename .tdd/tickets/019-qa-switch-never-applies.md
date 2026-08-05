@@ -1,7 +1,7 @@
 ---
 id: 019
 title: Queued mode/language/direction switch never applies — banner stuck indefinitely
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/views/useSessionController.ts, src/client/state/sessionMachine.ts]
