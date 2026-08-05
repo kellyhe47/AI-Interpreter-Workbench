@@ -288,9 +288,10 @@ function emptyView(): ArmUtteranceView {
 
 function initialStateFromDeps(deps: SessionDeps): SessionState {
   const overrides = deps.initialState ?? {};
-  const mode = overrides.mode ?? 'cascade';
+  // Ticket 017: default mode is Realtime (design-mock initial state governs).
+  const mode = overrides.mode ?? 'realtime';
   const arms = overrides.arms ?? [armForMode(mode)];
-  return createInitialState({ ...overrides, arms });
+  return createInitialState({ ...overrides, mode, arms });
 }
 
 interface ArmRuntime {

@@ -192,10 +192,12 @@ export function createInitialState(overrides?: Partial<SessionState>): SessionSt
   return {
     status: 'idle',
     micPermission: 'not-requested',
-    mode: 'cascade',
+    // Ticket 017: the design mock's initial state governs — Realtime default,
+    // seeded with the realtime catalog arm id.
+    mode: 'realtime',
     langIdx: 0,
     reversed: false,
-    arms: ['arm-1'],
+    arms: ['realtime'],
     autoplay: true,
     pending: null,
     reconnectAttempts: 0,
@@ -225,17 +227,20 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
   switch (event.type) {
     case 'START': {
       if (state.status !== 'idle' || state.micPermission === 'denied') return state;
+      // Ticket 016: startedAt is NOT stamped here — the session has not
+      // started yet (permission-denied must show a non-advancing 00:00).
       return {
         ...state,
         status: 'requesting-permission',
         micPermission: 'requesting',
-        startedAt: event.now,
       };
     }
 
     case 'PERMISSION_GRANTED': {
       if (state.status !== 'requesting-permission') return state;
-      return { ...state, status: 'listening', micPermission: 'granted' };
+      // Ticket 016: the session starts HERE — stamp startedAt on entering
+      // 'listening' from the event's own clock payload.
+      return { ...state, status: 'listening', micPermission: 'granted', startedAt: event.now };
     }
 
     case 'PERMISSION_DENIED': {
@@ -354,7 +359,10 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
         resumeStatus: null,
         playingArm: null,
         utteranceCount: 0,
-        startedAt: event.now,
+        // Ticket 016: only a session that actually starts (straight to
+        // listening) gets a startedAt; otherwise it stays null until
+        // PERMISSION_GRANTED stamps it.
+        startedAt: granted ? event.now : null,
         stoppedAt: null,
         summary: null,
       };

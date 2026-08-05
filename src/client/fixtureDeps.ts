@@ -1,5 +1,5 @@
 /**
- * Ticket 018 — dev-only browser fixture mode (STUB — tests written first).
+ * Ticket 018 — dev-only browser fixture mode.
  *
  * Makes every live-session journey reachable in a real browser without a
  * grantable microphone (PRD §7: fixture providers are for development, CI,
@@ -20,38 +20,33 @@
  *
  * buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps
  * Returns the SAME shape buildBrowserDeps returns — `<App deps={...} />`
- * accepts either (main.tsx selects via isFixtureMode(window.location.search)
+ * accepts either (App selects via isFixtureMode(window.location.search)
  * and passes `fault` through). Contents:
  * - transportFactory: FixtureTransport per catalog ArmDef (armId / kind /
  *   label / costPerMinUsd taken from the def), loaded with scripted
  *   utterances: source partials + final, target deltas + final, audio, and
  *   per-stage timings — cascade arms with all FIVE cascade timestamps
- *   (endpointing/stt/mt/tts/queue derivable, deriveCascadeIntervals all
- *   non-null), the realtime arm with the THREE realtime stages
- *   (endpointing/model/queue via deriveRealtimeIntervals).
+ *   (deriveCascadeIntervals all non-null), the realtime arm with the THREE
+ *   realtime stages (deriveRealtimeIntervals).
  * - Every utteranceComplete delivers a FULL UtteranceRecord whose providers
- *   are ALL 'fixture' ({ stt: 'fixture', mt: 'fixture', tts: 'fixture' })
- *   — including the realtime arm (unlike the live realtime transport's
- *   {utt, usage} completion; UtteranceCompletion permits the full record,
- *   and delivering it keeps fixture provider names on everything the
- *   controller appends, so isRealRecord is false and the ledger keeps
- *   excluding fixture records from Results/aggregates).
+ *   are ALL 'fixture' — including the realtime arm — so isRealRecord is
+ *   false and the ledger keeps excluding fixture records from
+ *   Results/aggregates.
  * - options.fault === 'fail-mt' → the cascade-openai arm's script includes
- *   one error event { opaque: false, stage: 'mt' } (message mentions the mt
- *   stage). No fault → no error events anywhere.
- * - startCapture: "grants" WITHOUT getUserMedia — resolves
- *   { status: 'granted', handle } and emits synthetic mic activity on a
- *   timer (onLevel bars 0..5 and 480-sample Int16Array chunks) until
- *   handle.stop(); stop() halts all emission.
- * - playbackContextFactory: silent no-op PlaybackAudioContextLike
- *   (createBuffer/createBufferSource/destination/currentTime/resume/
- *   suspend all satisfied, nothing audible).
- * - ledger: fresh in-memory RunLedger (no storage adapter).
- * - now: options.now ?? Date.now.
+ *   one error event { opaque: false, stage: 'mt' }. No fault → no errors.
+ * - startCapture: "grants" WITHOUT getUserMedia and emits synthetic mic
+ *   activity on a timer until handle.stop().
+ * - playbackContextFactory: silent no-op PlaybackAudioContextLike.
+ * - ledger: fresh in-memory RunLedger. now: options.now ?? Date.now.
  * ==========================================================================
  */
 
-import type { SessionDeps } from './views/useSessionController';
+import type { UtteranceRecord } from '../core/timing';
+import type { CaptureResult } from './audio/capture';
+import type { PlaybackAudioContextLike, PlaybackSourceLike } from './audio/playback';
+import { RunLedger } from './state/ledger';
+import { FixtureTransport, type FixtureScriptEvent } from './transport/fixture';
+import type { ArmDef, SessionDeps } from './views/useSessionController';
 
 export interface FixtureModeSelection {
   enabled: boolean;
@@ -66,10 +61,231 @@ export interface FixtureDepsOptions {
   now?: () => number;
 }
 
-export function isFixtureMode(_search: string): FixtureModeSelection {
-  throw new Error('isFixtureMode not implemented (ticket 018)');
+export function isFixtureMode(search: string): FixtureModeSelection {
+  const value = new URLSearchParams(search).get('fixture');
+  if (value === null) return { enabled: false };
+  if (value === '' || value === '1') return { enabled: true };
+  return { enabled: true, fault: value };
 }
 
-export function buildFixtureDeps(_options?: FixtureDepsOptions): SessionDeps {
-  throw new Error('buildFixtureDeps not implemented (ticket 018)');
+// ---------------------------------------------------------------------------
+// Scripted fixture utterances
+// ---------------------------------------------------------------------------
+
+/** Rotating source/target sentences (medical-interpreting theme, per mock). */
+const SENTENCES: ReadonlyArray<{ src: string; tgt: string }> = [
+  {
+    src: 'I need to schedule an appointment for next Tuesday to review the test results.',
+    tgt: 'Necesito programar una cita para el próximo martes para revisar los resultados.',
+  },
+  {
+    src: 'Have you been taking the medication twice a day as prescribed?',
+    tgt: '¿Ha estado tomando el medicamento dos veces al día según lo recetado?',
+  },
+  {
+    src: 'The pharmacy will call you when the prescription is ready for pickup.',
+    tgt: 'La farmacia le llamará cuando la receta esté lista para recoger.',
+  },
+];
+
+const UTTERANCE_SPACING_MS = 4_000;
+const UTTERANCE_COUNT = 8;
+
+/** 50400 samples @ 24 kHz = 2.1 s of (silent) fixture audio. */
+function silentAudio(): Int16Array {
+  return new Int16Array(50_400);
+}
+
+interface StageOffsets {
+  timings: Record<string, number>;
+  /** [event name, at-offset, stage?] in script order. */
+  marks: Array<[string, number, string?]>;
+}
+
+/** Cascade offsets matching the design mock: 500/42/298/201/12 = 1053. */
+function cascadeOffsets(base: number): StageOffsets {
+  return {
+    timings: {
+      speech_end: base,
+      vad_fired: base + 500,
+      stt_final: base + 542,
+      mt_first_token: base + 840,
+      tts_first_byte: base + 1041,
+      audio_queued: base + 1053,
+    },
+    marks: [
+      ['speech_end', 500],
+      ['vad_fired', 505],
+      ['stt_final', 565, 'stt'],
+      ['mt_first_token', 850, 'mt'],
+      ['tts_first_byte', 1045, 'tts'],
+      ['audio_queued', 1060],
+    ],
+  };
+}
+
+/** Realtime offsets matching the design mock: 500/471/9 = 980. */
+function realtimeOffsets(base: number): StageOffsets {
+  return {
+    timings: {
+      speech_end: base,
+      server_speech_stopped: base + 500,
+      first_audio_delta: base + 971,
+      audio_queued: base + 980,
+    },
+    marks: [
+      ['speech_end', 500],
+      ['server_speech_stopped', 505],
+      ['first_audio_delta', 975],
+      ['audio_queued', 985],
+    ],
+  };
+}
+
+function fixtureRecord(
+  def: ArmDef,
+  utt: number,
+  sentence: { src: string; tgt: string },
+  timings: Record<string, number>,
+): UtteranceRecord {
+  return {
+    id: `utt-${utt}`,
+    arm: def.id,
+    mode: def.mode,
+    languagePair: 'EN↔ES',
+    direction: 'en→es',
+    sourcePartials: [sentence.src.slice(0, 18), sentence.src.slice(0, 34)],
+    sourceFinal: sentence.src,
+    targetPartials: [sentence.tgt.slice(0, 18), sentence.tgt.slice(18, 30)],
+    targetFinal: sentence.tgt,
+    audioState: 'queued',
+    audioDurationMs: 2_100,
+    timings: timings as UtteranceRecord['timings'],
+    speechEndSource: 'vad',
+    // Fixture provider names on EVERY arm (realtime included) — keeps
+    // isRealRecord false so Results/aggregates never see fixture data.
+    providers: { stt: 'fixture', mt: 'fixture', tts: 'fixture' },
+    costUnits: 0.004,
+    corpusId: 'fixture-loop',
+    runId: 'fixture', // controller re-stamps with the live session run id
+  };
+}
+
+/** One scripted utterance for an arm; `failMt` replaces the back half with a
+ * stage-attributed mt error (no completion). */
+function utteranceScript(
+  def: ArmDef,
+  utt: number,
+  base: number,
+  failMt: boolean,
+): FixtureScriptEvent[] {
+  const sentence = SENTENCES[utt % SENTENCES.length]!;
+  const offsets = def.mode === 'cascade' ? cascadeOffsets(base) : realtimeOffsets(base);
+  const events: FixtureScriptEvent[] = [
+    { at: base + 10, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 18), utt },
+    { at: base + 220, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 34), utt },
+    { at: base + 560, type: 'sourceText', kind: 'final', text: sentence.src, utt },
+  ];
+
+  if (failMt) {
+    events.push({
+      at: base + 900,
+      type: 'error',
+      message: 'mt stage timed out for this utterance',
+      opaque: false,
+      stage: 'mt',
+    });
+    return events;
+  }
+
+  for (const [event, at, stage] of offsets.marks) {
+    events.push({ at: base + at, type: 'timing', event, t: offsets.timings[event]!, utt, stage });
+  }
+  events.push(
+    { at: base + 900, type: 'targetText', kind: 'delta', text: sentence.tgt.slice(0, 18), utt },
+    { at: base + 960, type: 'targetText', kind: 'delta', text: sentence.tgt.slice(18, 30), utt },
+    { at: base + 1055, type: 'audio', pcm: silentAudio(), utt },
+    { at: base + 1080, type: 'targetText', kind: 'final', text: sentence.tgt, utt },
+    {
+      at: base + 1100,
+      type: 'utteranceComplete',
+      record: fixtureRecord(def, utt, sentence, offsets.timings),
+    },
+  );
+  return events;
+}
+
+function buildScript(def: ArmDef, fault?: string): FixtureScriptEvent[] {
+  const script: FixtureScriptEvent[] = [];
+  for (let utt = 0; utt < UTTERANCE_COUNT; utt++) {
+    // fail-mt: exactly ONE scripted mt-stage error, on the cascade-openai
+    // arm's second utterance; every other utterance completes normally.
+    const failMt = fault === 'fail-mt' && def.id === 'cascade-openai' && utt === 1;
+    script.push(...utteranceScript(def, utt, utt * UTTERANCE_SPACING_MS, failMt));
+  }
+  return script;
+}
+
+// ---------------------------------------------------------------------------
+// Silent playback + synthetic capture
+// ---------------------------------------------------------------------------
+
+function silentPlaybackContext(): PlaybackAudioContextLike {
+  return {
+    createBuffer: (_channels: number, length: number) => ({
+      getChannelData: () => new Float32Array(length),
+    }),
+    createBufferSource: (): PlaybackSourceLike => ({
+      buffer: null,
+      connect: () => {},
+      start: () => {},
+      stop: () => {},
+      onended: null,
+    }),
+    destination: {},
+    currentTime: 0,
+    resume: () => {},
+    suspend: () => {},
+  };
+}
+
+/** Deterministic synthetic mic-level pattern (0..5 bars). */
+const LEVEL_PATTERN = [2, 3, 4, 3, 2, 1, 2, 4] as const;
+
+export function buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps {
+  const fault = options?.fault;
+  return {
+    transportFactory: (def: ArmDef) =>
+      new FixtureTransport({
+        armId: def.id,
+        kind: def.mode,
+        label: def.label,
+        costPerMinUsd: def.costPerMinUsd,
+        script: buildScript(def, fault),
+      }),
+    // Grants WITHOUT getUserMedia; synthetic level/chunk emission on a timer
+    // until stop(). Dev/QA path — never used when the flag is absent.
+    startCapture: async ({ onChunk, onLevel }): Promise<CaptureResult> => {
+      let stopped = false;
+      let tick = 0;
+      const timer = setInterval(() => {
+        if (stopped) return;
+        onLevel(LEVEL_PATTERN[tick % LEVEL_PATTERN.length]!);
+        onChunk(new Int16Array(480));
+        tick += 1;
+      }, 100);
+      return {
+        status: 'granted',
+        handle: {
+          stop: () => {
+            stopped = true;
+            clearInterval(timer);
+          },
+        },
+      };
+    },
+    playbackContextFactory: silentPlaybackContext,
+    ledger: new RunLedger(), // fresh, in-memory — fixture data never persists
+    now: options?.now ?? (() => Date.now()),
+  };
 }

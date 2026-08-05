@@ -25,6 +25,7 @@
 
 import { useRef, useState, type ReactElement } from 'react';
 import { buildBrowserDeps } from './browserDeps';
+import { buildFixtureDeps, isFixtureMode } from './fixtureDeps';
 import TopBar, { type WorkbenchView } from './components/TopBar';
 import type { SessionStatus } from './state/sessionMachine';
 import ResultsView from './views/ResultsView';
@@ -43,7 +44,18 @@ const LIVE_STATUSES: readonly SessionStatus[] = ['listening', 'processing', 'rea
 export default function App(props: AppProps): ReactElement {
   const depsRef = useRef<AppDeps | null>(null);
   if (depsRef.current === null) {
-    depsRef.current = props.deps ?? buildBrowserDeps();
+    if (props.deps) {
+      depsRef.current = props.deps;
+    } else {
+      // Ticket 018 — `?fixture=1` (or `?fixture=fail-mt`) swaps in the
+      // scripted fixture deps so every live-session journey is reachable
+      // without a grantable microphone. No flag → production deps,
+      // byte-identical behavior to before.
+      const fixture = isFixtureMode(window.location.search);
+      depsRef.current = fixture.enabled
+        ? buildFixtureDeps({ fault: fixture.fault })
+        : buildBrowserDeps();
+    }
   }
   const deps = depsRef.current;
 
