@@ -46,31 +46,67 @@ export interface ArmRouterHandlers {
 }
 
 export class ArmRouter {
+  private readonly arms = new Map<string, InterpreterTransport>();
+  private handlers: ArmRouterHandlers = {};
+
   get armIds(): string[] {
-    throw new Error('not implemented');
+    return [...this.arms.keys()];
   }
 
-  getArm(_armId: string): InterpreterTransport | undefined {
-    throw new Error('not implemented');
+  getArm(armId: string): InterpreterTransport | undefined {
+    return this.arms.get(armId);
   }
 
-  addArm(_transport: InterpreterTransport): void {
-    throw new Error('not implemented');
+  addArm(transport: InterpreterTransport): void {
+    const armId = transport.armId;
+    if (this.arms.has(armId)) {
+      throw new Error(`duplicate armId: ${armId}`);
+    }
+    this.arms.set(armId, transport);
+    const active = (): boolean => this.arms.get(armId) === transport;
+    transport.setHandlers({
+      onSourceText: (e) => {
+        if (active()) this.handlers.onSourceText?.({ ...e, armId });
+      },
+      onTargetText: (e) => {
+        if (active()) this.handlers.onTargetText?.({ ...e, armId });
+      },
+      onAudio: (pcm, utt) => {
+        if (active()) this.handlers.onAudio?.({ armId, pcm, utt });
+      },
+      onTiming: (e) => {
+        if (active()) this.handlers.onTiming?.({ ...e, armId });
+      },
+      onUtteranceComplete: (record) => {
+        if (active()) this.handlers.onUtteranceComplete?.({ armId, record });
+      },
+      onError: (e) => {
+        if (active()) this.handlers.onError?.({ ...e, armId });
+      },
+      onConnectionState: (state, attempt) => {
+        if (active()) this.handlers.onConnectionState?.({ armId, state, attempt });
+      },
+    });
   }
 
-  removeArm(_armId: string): void {
-    throw new Error('not implemented');
+  removeArm(armId: string): void {
+    const transport = this.arms.get(armId);
+    if (!transport) return;
+    this.arms.delete(armId);
+    transport.stop();
   }
 
-  sendAudio(_chunk: Int16Array): void {
-    throw new Error('not implemented');
+  sendAudio(chunk: Int16Array): void {
+    for (const transport of this.arms.values()) {
+      transport.sendAudio(chunk);
+    }
   }
 
-  setHandlers(_handlers: ArmRouterHandlers): void {
-    throw new Error('not implemented');
+  setHandlers(handlers: ArmRouterHandlers): void {
+    this.handlers = handlers;
   }
 
   stopAll(): void {
-    throw new Error('not implemented');
+    for (const armId of this.armIds) this.removeArm(armId);
   }
 }

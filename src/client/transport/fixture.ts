@@ -65,26 +65,76 @@ export class FixtureTransport implements InterpreterTransport {
   /** Chunks passed to sendAudio, in order (for fan-out assertions). */
   readonly received: Int16Array[] = [];
 
+  private readonly script: FixtureScriptEvent[];
+  private readonly failStart: boolean;
+  private handlers: TransportHandlers = {};
+  private timers: ReturnType<typeof setTimeout>[] = [];
+  private stopped = false;
+
   constructor(opts: FixtureTransportOptions) {
     this.armId = opts.armId;
     this.kind = opts.kind ?? 'cascade';
     this.label = opts.label ?? 'Fixture';
     this.costPerMinUsd = opts.costPerMinUsd ?? 0;
+    this.script = opts.script;
+    this.failStart = opts.failStart ?? false;
   }
 
   async start(_config: TransportConfig): Promise<void> {
-    throw new Error('not implemented');
+    if (this.failStart) {
+      this.handlers.onError?.({ message: 'fixture: start failed', opaque: true });
+      this.handlers.onConnectionState?.('disconnected');
+      return;
+    }
+    this.handlers.onConnectionState?.('connected');
+    const events = [...this.script].sort((a, b) => a.at - b.at);
+    for (const ev of events) {
+      this.timers.push(
+        setTimeout(() => {
+          if (!this.stopped) this.fire(ev);
+        }, ev.at),
+      );
+    }
+  }
+
+  private fire(ev: FixtureScriptEvent): void {
+    const h = this.handlers;
+    switch (ev.type) {
+      case 'sourceText':
+        h.onSourceText?.({ kind: ev.kind, text: ev.text, utt: ev.utt });
+        break;
+      case 'targetText':
+        h.onTargetText?.({ kind: ev.kind, text: ev.text, utt: ev.utt });
+        break;
+      case 'audio':
+        h.onAudio?.(ev.pcm, ev.utt);
+        break;
+      case 'timing':
+        h.onTiming?.({ event: ev.event, t: ev.t ?? Date.now(), utt: ev.utt, stage: ev.stage });
+        break;
+      case 'utteranceComplete':
+        h.onUtteranceComplete?.(ev.record);
+        break;
+      case 'error':
+        h.onError?.({ message: ev.message, opaque: ev.opaque, stage: ev.stage });
+        break;
+      case 'connection':
+        h.onConnectionState?.(ev.state, ev.attempt);
+        break;
+    }
   }
 
   stop(): void {
-    throw new Error('not implemented');
+    this.stopped = true;
+    for (const timer of this.timers) clearTimeout(timer);
+    this.timers = [];
   }
 
-  sendAudio(_pcm: Int16Array): void {
-    throw new Error('not implemented');
+  sendAudio(pcm: Int16Array): void {
+    this.received.push(pcm);
   }
 
-  setHandlers(_handlers: TransportHandlers): void {
-    throw new Error('not implemented');
+  setHandlers(handlers: TransportHandlers): void {
+    this.handlers = handlers;
   }
 }

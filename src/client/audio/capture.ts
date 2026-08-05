@@ -45,6 +45,8 @@
  * ==========================================================================
  */
 
+import { floatTo16, makeChunker, resampleTo24k, rms, rmsToBars } from './pcm';
+
 export interface MediaTrackLike {
   stop(): void;
 }
@@ -83,6 +85,44 @@ export interface StartCaptureOptions {
   onLevel: (bars: number) => void;
 }
 
-export async function startCapture(_opts: StartCaptureOptions): Promise<CaptureResult> {
-  throw new Error('not implemented');
+export async function startCapture(opts: StartCaptureOptions): Promise<CaptureResult> {
+  let stream: MediaStreamLike;
+  try {
+    stream = await opts.getUserMedia({ audio: true });
+  } catch (err) {
+    const name = err instanceof Error ? err.name : '';
+    return {
+      status: 'denied',
+      reason: name === 'NotAllowedError' ? 'blocked' : 'unavailable',
+    };
+  }
+
+  const context = opts.audioContextFactory();
+  const chunker = makeChunker(480);
+  let stopped = false;
+
+  const emit = (samples: Float32Array): void => {
+    if (stopped) return;
+    opts.onLevel(rmsToBars(rms(samples)));
+    const resampled = resampleTo24k(samples, context.sampleRate);
+    const frames = chunker.push(floatTo16(resampled));
+    for (const frame of frames) {
+      if (stopped) return;
+      opts.onChunk(frame);
+    }
+  };
+
+  const teardown = opts.pipeline({ context, stream, emit });
+
+  const handle: CaptureHandle = {
+    stop(): void {
+      if (stopped) return;
+      stopped = true;
+      for (const track of stream.getTracks()) track.stop();
+      teardown();
+      if (context.close) void context.close();
+    },
+  };
+
+  return { status: 'granted', handle };
 }

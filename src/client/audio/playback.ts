@@ -74,37 +74,108 @@ export interface ArmPlaybackOptions {
 }
 
 export class ArmPlayback {
-  constructor(_opts: ArmPlaybackOptions) {
-    throw new Error('not implemented');
+  private readonly opts: ArmPlaybackOptions;
+  private readonly now: () => number;
+  private context: PlaybackAudioContextLike | null = null;
+  private queuedAt: number | null = null;
+  private totalSamples = 0;
+  private buffered: { buffer: PlaybackBufferLike; length: number }[] = [];
+  private playing: boolean;
+  private startedCount = 0;
+  private endedCount = 0;
+  private endedCb: (() => void) | null = null;
+  private endedFired = false;
+  private nextStartTime = 0;
+
+  constructor(opts: ArmPlaybackOptions) {
+    this.opts = opts;
+    this.now = opts.now ?? (() => performance.now());
+    this.playing = opts.autoplay;
+  }
+
+  private getContext(): PlaybackAudioContextLike {
+    if (!this.context) this.context = this.opts.audioContextFactory();
+    return this.context;
   }
 
   /** Captured at the FIRST enqueue (per utterance); null before any audio. */
   get audioQueuedAt(): number | null {
-    throw new Error('not implemented');
+    return this.queuedAt;
   }
 
   /** Total enqueued audio in ms, from sample counts at 24 kHz. */
   get durationMs(): number {
-    throw new Error('not implemented');
+    return (this.totalSamples / 24000) * 1000;
   }
 
-  enqueue(_pcm: Int16Array): void {
-    throw new Error('not implemented');
+  enqueue(pcm: Int16Array): void {
+    if (this.queuedAt === null) this.queuedAt = this.now();
+    this.totalSamples += pcm.length;
+
+    const ctx = this.getContext();
+    const buffer = ctx.createBuffer(1, pcm.length, 24000);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) data[i] = pcm[i]! / 32768;
+
+    if (this.playing) {
+      this.startBuffer(buffer, pcm.length);
+    } else {
+      this.buffered.push({ buffer, length: pcm.length });
+    }
+  }
+
+  private startBuffer(buffer: PlaybackBufferLike, length: number): void {
+    const ctx = this.getContext();
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(ctx.destination);
+    this.startedCount++;
+    src.onended = () => {
+      this.endedCount++;
+      this.maybeFireEnded();
+    };
+    const when = Math.max(ctx.currentTime, this.nextStartTime);
+    src.start(when);
+    this.nextStartTime = when + length / 24000;
+  }
+
+  private maybeFireEnded(): void {
+    if (
+      !this.endedFired &&
+      this.startedCount > 0 &&
+      this.endedCount === this.startedCount &&
+      this.buffered.length === 0
+    ) {
+      this.endedFired = true;
+      this.endedCb?.();
+    }
   }
 
   play(): void {
-    throw new Error('not implemented');
+    const ctx = this.getContext();
+    void ctx.resume();
+    this.playing = true;
+    const pending = this.buffered;
+    this.buffered = [];
+    for (const { buffer, length } of pending) this.startBuffer(buffer, length);
   }
 
   pause(): void {
-    throw new Error('not implemented');
+    if (this.context) void this.context.suspend();
   }
 
-  onEnded(_cb: () => void): void {
-    throw new Error('not implemented');
+  onEnded(cb: () => void): void {
+    this.endedCb = cb;
   }
 
   reset(): void {
-    throw new Error('not implemented');
+    this.queuedAt = null;
+    this.totalSamples = 0;
+    this.buffered = [];
+    this.startedCount = 0;
+    this.endedCount = 0;
+    this.endedFired = false;
+    this.nextStartTime = 0;
+    this.playing = this.opts.autoplay;
   }
 }

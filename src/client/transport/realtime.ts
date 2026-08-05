@@ -65,11 +65,13 @@
  * ==========================================================================
  */
 
-import type {
-  InterpreterTransport,
-  TransportConfig,
-  TransportHandlers,
-  TransportKind,
+import { base64ToInt16 } from '../audio/pcm';
+import {
+  MAX_TRANSPORT_RECONNECT_ATTEMPTS,
+  type InterpreterTransport,
+  type TransportConfig,
+  type TransportHandlers,
+  type TransportKind,
 } from './types';
 
 export const TOKEN_ENDPOINT = '/api/realtime-token';
@@ -121,25 +123,210 @@ export class RealtimeTransport implements InterpreterTransport {
   readonly label: string;
   readonly costPerMinUsd: number;
 
-  constructor(opts: RealtimeTransportOptions, _deps: RealtimeDeps) {
+  private readonly model: string;
+  private readonly deps: RealtimeDeps;
+  private handlers: TransportHandlers = {};
+  private config: TransportConfig | null = null;
+  private pc: RtcPeerConnectionLike | null = null;
+  private channel: RtcDataChannelLike | null = null;
+  private stopped = false;
+  private reconnecting = false;
+
+  /** Client-assigned utterance counter (0-based). */
+  private utt = 0;
+  /** Accumulated input transcription deltas for the current utterance. */
+  private sourceAccum = '';
+  /** Whether first_audio_delta has fired for the current utterance. */
+  private firstAudioMarked = false;
+
+  constructor(opts: RealtimeTransportOptions, deps: RealtimeDeps) {
     this.armId = opts.armId;
     this.label = opts.label ?? 'Realtime';
     this.costPerMinUsd = opts.costPerMinUsd ?? 0;
+    this.model = opts.model ?? 'gpt-realtime-mini';
+    this.deps = deps;
   }
 
-  async start(_config: TransportConfig): Promise<void> {
-    throw new Error('not implemented');
+  async start(config: TransportConfig): Promise<void> {
+    this.config = config;
+    const ok = await this.connect();
+    if (ok) {
+      if (!this.stopped) this.handlers.onConnectionState?.('connected');
+    } else if (!this.stopped) {
+      this.handlers.onError?.({ message: REALTIME_OPAQUE_ERROR_MESSAGE, opaque: true });
+      this.handlers.onConnectionState?.('disconnected');
+    }
+  }
+
+  /** Runs the full token + offer/answer flow. Returns success; never throws. */
+  private async connect(): Promise<boolean> {
+    try {
+      const tokenRes = await this.deps.fetchImpl(TOKEN_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: this.model }),
+      });
+      if (!tokenRes.ok) return false;
+      const { value: ephemeral } = (await tokenRes.json()) as { value: string };
+
+      const pc = this.deps.rtcFactory();
+      const channel = pc.createDataChannel('oai-events');
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sdpRes = await this.deps.fetchImpl(
+        `${OPENAI_REALTIME_CALLS_URL}?model=${encodeURIComponent(this.model)}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${ephemeral}`,
+            'Content-Type': 'application/sdp',
+          },
+          body: offer.sdp,
+        },
+      );
+      if (!sdpRes.ok) return false;
+      const answer = await sdpRes.text();
+      await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+
+      if (this.stopped) {
+        channel.close();
+        pc.close();
+        return false;
+      }
+
+      this.pc = pc;
+      this.channel = channel;
+      channel.onopen = () => {
+        if (this.stopped || this.channel !== channel) return;
+        channel.send(JSON.stringify(this.sessionUpdate()));
+      };
+      channel.onmessage = (ev) => {
+        if (this.stopped || this.channel !== channel) return;
+        this.handleMessage(ev.data);
+      };
+      channel.onclose = () => {
+        if (this.stopped || this.channel !== channel) return;
+        void this.reconnect();
+      };
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private sessionUpdate(): unknown {
+    const targetLanguage = this.config?.targetLanguage ?? '';
+    return {
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        instructions:
+          `You are a professional simultaneous interpreter. ` +
+          `Translate everything the user says into ${targetLanguage}. ` +
+          `Speak only the ${targetLanguage} translation — no commentary.`,
+        audio: {
+          input: {
+            transcription: { model: 'gpt-4o-mini-transcribe' },
+            turn_detection: { type: 'server_vad', silence_duration_ms: 500 },
+          },
+        },
+      },
+    };
+  }
+
+  private handleMessage(data: string): void {
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const h = this.handlers;
+    switch (msg.type) {
+      case 'conversation.item.input_audio_transcription.delta': {
+        this.sourceAccum += String(msg.delta ?? '');
+        h.onSourceText?.({ kind: 'partial', text: this.sourceAccum, utt: this.utt });
+        break;
+      }
+      case 'conversation.item.input_audio_transcription.completed': {
+        this.sourceAccum = '';
+        h.onSourceText?.({ kind: 'final', text: String(msg.transcript ?? ''), utt: this.utt });
+        break;
+      }
+      case 'response.output_audio_transcript.delta': {
+        h.onTargetText?.({ kind: 'delta', text: String(msg.delta ?? ''), utt: this.utt });
+        break;
+      }
+      case 'response.output_audio_transcript.done': {
+        h.onTargetText?.({ kind: 'final', text: String(msg.transcript ?? ''), utt: this.utt });
+        break;
+      }
+      case 'input_audio_buffer.speech_stopped': {
+        h.onTiming?.({ event: 'server_speech_stopped', t: this.deps.now(), utt: this.utt });
+        break;
+      }
+      case 'response.output_audio.delta': {
+        if (!this.firstAudioMarked) {
+          this.firstAudioMarked = true;
+          h.onTiming?.({ event: 'first_audio_delta', t: this.deps.now(), utt: this.utt });
+        }
+        h.onAudio?.(base64ToInt16(String(msg.delta ?? '')), this.utt);
+        break;
+      }
+      case 'response.done': {
+        const response = msg.response as { usage?: unknown } | undefined;
+        h.onUtteranceComplete?.({ utt: this.utt, usage: response?.usage });
+        this.utt++;
+        this.sourceAccum = '';
+        this.firstAudioMarked = false;
+        break;
+      }
+      case 'error': {
+        h.onError?.({ message: REALTIME_OPAQUE_ERROR_MESSAGE, opaque: true });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  private async reconnect(): Promise<void> {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    this.pc = null;
+    this.channel = null;
+    try {
+      for (let attempt = 1; attempt <= MAX_TRANSPORT_RECONNECT_ATTEMPTS; attempt++) {
+        if (this.stopped) return;
+        this.handlers.onConnectionState?.('reconnecting', attempt);
+        const ok = await this.connect();
+        if (this.stopped) return;
+        if (ok) {
+          this.handlers.onConnectionState?.('connected');
+          return;
+        }
+      }
+      this.handlers.onConnectionState?.('disconnected');
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   stop(): void {
-    throw new Error('not implemented');
+    if (this.stopped) return;
+    this.stopped = true;
+    this.channel?.close();
+    this.pc?.close();
+    this.channel = null;
+    this.pc = null;
   }
 
   sendAudio(_pcm: Int16Array): void {
-    throw new Error('not implemented');
+    // NO-OP: realtime mic audio rides the WebRTC media track.
   }
 
-  setHandlers(_handlers: TransportHandlers): void {
-    throw new Error('not implemented');
+  setHandlers(handlers: TransportHandlers): void {
+    this.handlers = handlers;
   }
 }

@@ -51,11 +51,14 @@
  * ==========================================================================
  */
 
-import type {
-  InterpreterTransport,
-  TransportConfig,
-  TransportHandlers,
-  TransportKind,
+import { decodeTtsFrame } from '../../core/protocol';
+import {
+  MAX_TRANSPORT_RECONNECT_ATTEMPTS,
+  type InterpreterTransport,
+  type TransportConfig,
+  type TransportHandlers,
+  type TransportKind,
+  type UtteranceCompletion,
 } from './types';
 
 export const CASCADE_WS_PATH = '/ws/cascade';
@@ -90,25 +93,157 @@ export class CascadeTransport implements InterpreterTransport {
   readonly label: string;
   readonly costPerMinUsd: number;
 
-  constructor(opts: CascadeTransportOptions, _deps: CascadeDeps) {
+  private readonly baseUrl?: string;
+  private readonly deps: CascadeDeps;
+  private handlers: TransportHandlers = {};
+  private config: TransportConfig | null = null;
+  private ws: WsLike | null = null;
+  private open = false;
+  private stopped = false;
+  private reconnectAttempt = 0;
+  private resolveStart: (() => void) | null = null;
+
+  constructor(opts: CascadeTransportOptions, deps: CascadeDeps) {
     this.armId = opts.armId;
     this.label = opts.label ?? 'Cascade';
     this.costPerMinUsd = opts.costPerMinUsd ?? 0;
+    this.baseUrl = opts.baseUrl;
+    this.deps = deps;
   }
 
-  async start(_config: TransportConfig): Promise<void> {
-    throw new Error('not implemented');
+  private url(): string {
+    const base =
+      this.baseUrl ??
+      `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`;
+    return `${base}${CASCADE_WS_PATH}`;
+  }
+
+  private sessionStart(): unknown {
+    return {
+      type: 'session.start',
+      mode: 'cascade',
+      languagePair: this.config?.languagePair,
+      direction: this.config?.direction,
+      providers: this.config?.providers,
+    };
+  }
+
+  async start(config: TransportConfig): Promise<void> {
+    this.config = config;
+    await new Promise<void>((resolve) => {
+      this.resolveStart = resolve;
+      this.openSocket();
+    });
+  }
+
+  private openSocket(): void {
+    const ws = this.deps.wsFactory(this.url());
+    this.ws = ws;
+    this.open = false;
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      if (this.stopped || this.ws !== ws) return;
+      this.open = true;
+      this.reconnectAttempt = 0;
+      ws.send(JSON.stringify(this.sessionStart()));
+      this.handlers.onConnectionState?.('connected');
+      const resolve = this.resolveStart;
+      this.resolveStart = null;
+      resolve?.();
+    };
+    ws.onmessage = (ev) => {
+      if (this.stopped || this.ws !== ws) return;
+      this.handleMessage(ev.data);
+    };
+    ws.onclose = () => {
+      if (this.stopped || this.ws !== ws) return;
+      this.open = false;
+      this.handleClose();
+    };
+    ws.onerror = () => {
+      // errors are followed by close; the close path drives reconnect
+    };
+  }
+
+  private handleClose(): void {
+    if (this.reconnectAttempt >= MAX_TRANSPORT_RECONNECT_ATTEMPTS) {
+      this.ws = null;
+      this.handlers.onConnectionState?.('disconnected');
+      return;
+    }
+    this.reconnectAttempt++;
+    this.handlers.onConnectionState?.('reconnecting', this.reconnectAttempt);
+    this.openSocket();
+  }
+
+  private handleMessage(data: string | ArrayBuffer): void {
+    const h = this.handlers;
+    if (typeof data !== 'string') {
+      const { utt, pcm } = decodeTtsFrame(new Uint8Array(data));
+      h.onAudio?.(pcm, utt);
+      return;
+    }
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const utt = Number(msg.utt ?? 0);
+    switch (msg.type) {
+      case 'stt.partial':
+        h.onSourceText?.({ kind: 'partial', text: String(msg.text ?? ''), utt });
+        break;
+      case 'stt.final':
+        h.onSourceText?.({ kind: 'final', text: String(msg.text ?? ''), utt });
+        break;
+      case 'mt.delta':
+        h.onTargetText?.({ kind: 'delta', text: String(msg.text ?? ''), utt });
+        break;
+      case 'mt.final':
+        h.onTargetText?.({ kind: 'final', text: String(msg.text ?? ''), utt });
+        break;
+      case 'stage.timing':
+        h.onTiming?.({
+          event: String(msg.event ?? ''),
+          t: Number(msg.t ?? this.deps.now()),
+          utt,
+          stage: msg.stage as string | undefined,
+        });
+        break;
+      case 'utterance.complete':
+        h.onUtteranceComplete?.(msg.record as UtteranceCompletion);
+        break;
+      case 'error':
+        h.onError?.({
+          message: String(msg.message ?? ''),
+          opaque: false,
+          stage: msg.stage as string | undefined,
+        });
+        break;
+      default:
+        break;
+    }
   }
 
   stop(): void {
-    throw new Error('not implemented');
+    if (this.stopped) return;
+    this.stopped = true;
+    if (this.ws) {
+      if (this.open) this.ws.send(JSON.stringify({ type: 'session.end' }));
+      this.ws.close();
+      this.ws = null;
+    }
   }
 
-  sendAudio(_pcm: Int16Array): void {
-    throw new Error('not implemented');
+  sendAudio(pcm: Int16Array): void {
+    if (this.stopped || !this.ws || !this.open) return;
+    const bytes = new Uint8Array(pcm.byteLength);
+    bytes.set(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+    this.ws.send(bytes);
   }
 
-  setHandlers(_handlers: TransportHandlers): void {
-    throw new Error('not implemented');
+  setHandlers(handlers: TransportHandlers): void {
+    this.handlers = handlers;
   }
 }
