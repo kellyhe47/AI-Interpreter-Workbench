@@ -1,6 +1,5 @@
 /**
- * Ticket 012 — App shell (STUB — tests written first; the previous trivial
- * App.tsx was disposable and is replaced by this contract).
+ * Ticket 012 — App shell.
  *
  * `<App deps={sessionDeps} />` hosts TopBar + view switching between
  * SessionView and ResultsView over ONE shared deps bag (the ledger inside
@@ -18,10 +17,19 @@
  *   omitted, App builds the real-browser deps (getUserMedia capture,
  *   real AudioContexts, real transports, localStorage-backed RunLedger,
  *   Date.now). Tests always inject fakes.
+ *
+ * The session controller hook lives HERE (not inside SessionView) so the
+ * TopBar live dot reads the same machine state the session view renders,
+ * and session state survives tab switches.
  */
 
-import type { ReactElement } from 'react';
-import type { SessionDeps } from './views/useSessionController';
+import { useRef, useState, type ReactElement } from 'react';
+import { buildBrowserDeps } from './browserDeps';
+import TopBar, { type WorkbenchView } from './components/TopBar';
+import type { SessionStatus } from './state/sessionMachine';
+import ResultsView from './views/ResultsView';
+import SessionView from './views/SessionView';
+import { useSessionController, type SessionDeps } from './views/useSessionController';
 
 export type AppDeps = SessionDeps;
 
@@ -29,6 +37,47 @@ export interface AppProps {
   deps?: AppDeps;
 }
 
-export default function App(_props: AppProps): ReactElement {
-  throw new Error('App not implemented (ticket 012)');
+/** Statuses that count as "actively running" for the TopBar live dot. */
+const LIVE_STATUSES: readonly SessionStatus[] = ['listening', 'processing', 'ready', 'playing'];
+
+export default function App(props: AppProps): ReactElement {
+  const depsRef = useRef<AppDeps | null>(null);
+  if (depsRef.current === null) {
+    depsRef.current = props.deps ?? buildBrowserDeps();
+  }
+  const deps = depsRef.current;
+
+  const controller = useSessionController(deps);
+  const [view, setView] = useState<WorkbenchView>('session');
+
+  const live = view === 'session' && LIVE_STATUSES.includes(controller.state.status);
+  const provenance =
+    view === 'results'
+      ? `run ${new Date(deps.now()).toISOString().slice(0, 10)} · corpus v1`
+      : null;
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      <TopBar view={view} onViewChange={setView} live={live} provenance={provenance} />
+      <div
+        style={{
+          flex: 1,
+          padding: '24px 32px 48px',
+          maxWidth: 1060,
+          width: '100%',
+          margin: '0 auto',
+          boxSizing: 'border-box',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 16,
+        }}
+      >
+        {view === 'session' ? (
+          <SessionView controller={controller} />
+        ) : (
+          <ResultsView ledger={deps.ledger} />
+        )}
+      </div>
+    </div>
+  );
 }
