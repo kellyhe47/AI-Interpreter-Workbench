@@ -22,8 +22,12 @@
  *   generator RETURN cleanly.
  */
 
+import { ProviderError, RateLimitError } from '../../core/types';
 import type { MtProvider, ProviderCallOpts } from '../../core/types';
+import { ABORTED, defaultFetch, watchAbort } from './internal';
 import { envVar, type FetchLike } from './transport';
+
+const CHAT_COMPLETIONS_URL = 'https://api.openai.com/v1/chat/completions';
 
 export interface OpenAiMtConfig {
   apiKey?: string;
@@ -46,16 +50,81 @@ export class OpenAiMt implements MtProvider {
   /** Resolved at construction (config first, then OPENAI_API_KEY). */
   readonly apiKey: string | undefined;
 
+  private readonly deps: OpenAiMtDeps;
+
   constructor(config: OpenAiMtConfig = {}, deps: OpenAiMtDeps = {}) {
     this.config = config;
     this.apiKey = config.apiKey ?? envVar('OPENAI_API_KEY');
-    void deps;
+    this.deps = deps;
   }
 
-  translate(
-    _text: string,
-    _opts?: ProviderCallOpts,
+  async *translate(
+    text: string,
+    opts?: ProviderCallOpts,
   ): AsyncGenerator<string, void, void> {
-    throw new Error('not implemented');
+    const signal = opts?.signal;
+    if (signal?.aborted) return;
+    const fetchImpl = this.deps.fetchImpl ?? defaultFetch;
+
+    const targetLang = this.config.targetLang ?? 'Spanish';
+    const sourceHint = this.config.sourceLang ? ` from ${this.config.sourceLang}` : '';
+    const system =
+      `You are a professional translator. Translate the user's text${sourceHint} ` +
+      `into ${targetLang}. Output ONLY the translation, with no quotes or commentary.`;
+
+    const res = await fetchImpl(CHAT_COMPLETIONS_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey ?? ''}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.config.model ?? 'gpt-4o-mini',
+        stream: true,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: text },
+        ],
+      }),
+      signal,
+    });
+    if (res.status === 429) throw new RateLimitError('openai mt rate limited (429)');
+    if (!res.ok) throw new ProviderError(`openai mt HTTP ${res.status}`);
+    const body = res.body;
+    if (!body) return;
+
+    const reader = body.getReader();
+    const abortWatch = watchAbort(signal);
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      outer: while (true) {
+        if (signal?.aborted) return;
+        const step = await Promise.race([reader.read(), abortWatch.promise]);
+        if (step === ABORTED) return;
+        const { done, value } = step;
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        let newlineAt: number;
+        while ((newlineAt = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newlineAt).trim();
+          buffer = buffer.slice(newlineAt + 1);
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice('data:'.length).trim();
+          if (payload === '[DONE]') break outer;
+          let parsed: { choices?: Array<{ delta?: { content?: unknown } }> };
+          try {
+            parsed = JSON.parse(payload) as typeof parsed;
+          } catch {
+            continue; // tolerate malformed frames
+          }
+          const content = parsed.choices?.[0]?.delta?.content;
+          if (typeof content === 'string' && content.length > 0) yield content;
+        }
+        if (done) break;
+      }
+    } finally {
+      abortWatch.dispose();
+      reader.cancel().catch(() => {});
+    }
   }
 }

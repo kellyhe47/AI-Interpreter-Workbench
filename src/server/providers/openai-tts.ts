@@ -25,8 +25,12 @@
  *   RETURNS cleanly.
  */
 
+import { ProviderError, RateLimitError } from '../../core/types';
 import type { ProviderCallOpts, TtsProvider } from '../../core/types';
+import { ABORTED, Pcm16Assembler, defaultFetch, watchAbort } from './internal';
 import { envVar, type FetchLike } from './transport';
+
+const SPEECH_URL = 'https://api.openai.com/v1/audio/speech';
 
 export interface OpenAiTtsConfig {
   apiKey?: string;
@@ -47,16 +51,69 @@ export class OpenAiTts implements TtsProvider {
   /** Resolved at construction (config first, then OPENAI_API_KEY). */
   readonly apiKey: string | undefined;
 
+  private readonly deps: OpenAiTtsDeps;
+
   constructor(config: OpenAiTtsConfig = {}, deps: OpenAiTtsDeps = {}) {
     this.config = config;
     this.apiKey = config.apiKey ?? envVar('OPENAI_API_KEY');
-    void deps;
+    this.deps = deps;
   }
 
-  synthesize(
-    _text: AsyncIterable<string>,
-    _opts?: ProviderCallOpts,
+  async *synthesize(
+    text: AsyncIterable<string>,
+    opts?: ProviderCallOpts,
   ): AsyncGenerator<Int16Array, void, void> {
-    throw new Error('not implemented');
+    const signal = opts?.signal;
+    if (signal?.aborted) return;
+    const fetchImpl = this.deps.fetchImpl ?? defaultFetch;
+
+    // Non-streaming input: concatenate everything up front (PRD: less capable
+    // providers concatenate internally).
+    let input = '';
+    for await (const chunk of text) {
+      if (signal?.aborted) return;
+      input += chunk;
+    }
+    if (input === '') return; // no fetch, no audio
+    if (signal?.aborted) return;
+
+    const res = await fetchImpl(SPEECH_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey ?? ''}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.config.model ?? 'gpt-4o-mini-tts',
+        voice: this.config.voice ?? 'alloy',
+        input,
+        response_format: 'pcm',
+      }),
+      signal,
+    });
+    if (res.status === 429) throw new RateLimitError('openai tts rate limited (429)');
+    if (!res.ok) throw new ProviderError(`openai tts HTTP ${res.status}`);
+    const body = res.body;
+    if (!body) return;
+
+    const reader = body.getReader();
+    const abortWatch = watchAbort(signal);
+    const assembler = new Pcm16Assembler();
+    try {
+      while (true) {
+        if (signal?.aborted) return;
+        const step = await Promise.race([reader.read(), abortWatch.promise]);
+        if (step === ABORTED) return;
+        const { done, value } = step;
+        if (value !== undefined && value.length > 0) {
+          const samples = assembler.push(value);
+          if (samples !== null && samples.length > 0) yield samples;
+        }
+        if (done) break;
+      }
+    } finally {
+      abortWatch.dispose();
+      reader.cancel().catch(() => {});
+    }
   }
 }

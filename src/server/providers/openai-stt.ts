@@ -34,8 +34,18 @@
  *   the contract only requires numbers.
  */
 
+import { ProviderError } from '../../core/types';
 import type { ProviderCallOpts, SttEvent, SttProvider } from '../../core/types';
+import {
+  AsyncQueue,
+  bytesToBase64,
+  int16ToLeBytes,
+  loadDefaultWsFactory,
+  waitForOpen,
+} from './internal';
 import { envVar, type WsFactory } from './transport';
+
+const REALTIME_URL = 'wss://api.openai.com/v1/realtime?intent=transcription';
 
 export interface OpenAiSttConfig {
   apiKey?: string;
@@ -53,16 +63,144 @@ export class OpenAiStt implements SttProvider {
   /** Resolved at construction (config first, then OPENAI_API_KEY). */
   readonly apiKey: string | undefined;
 
+  private readonly deps: OpenAiSttDeps;
+
   constructor(config: OpenAiSttConfig = {}, deps: OpenAiSttDeps = {}) {
     this.config = config;
     this.apiKey = config.apiKey ?? envVar('OPENAI_API_KEY');
-    void deps;
+    this.deps = deps;
   }
 
-  transcribe(
-    _audio: AsyncIterable<Int16Array>,
-    _opts?: ProviderCallOpts,
+  async *transcribe(
+    audio: AsyncIterable<Int16Array>,
+    opts?: ProviderCallOpts,
   ): AsyncGenerator<SttEvent, void, void> {
-    throw new Error('not implemented');
+    const signal = opts?.signal;
+    if (signal?.aborted) return;
+
+    const wsFactory = this.deps.wsFactory ?? (await loadDefaultWsFactory());
+    if (signal?.aborted) return;
+    const ws = wsFactory(REALTIME_URL, {
+      headers: { Authorization: `Bearer ${this.apiKey ?? ''}` },
+    });
+
+    const queue = new AsyncQueue<SttEvent>();
+    let wsClosed = false;
+    const closeWs = (): void => {
+      if (wsClosed) return;
+      wsClosed = true;
+      try {
+        ws.close();
+      } catch {
+        // socket may already be gone
+      }
+    };
+    const onAbort = (): void => {
+      queue.abort();
+      closeWs();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    const t0 = Date.now();
+    let accumulated = '';
+    let turnStart = 0;
+    let sawFinal = false;
+    let pumpDone = false;
+    const maybeEnd = (): void => {
+      if (pumpDone && sawFinal) queue.end();
+    };
+
+    ws.on('message', (data) => {
+      let msg: { type?: string; delta?: string; transcript?: string; error?: unknown };
+      try {
+        msg = JSON.parse(String(data)) as typeof msg;
+      } catch {
+        return;
+      }
+      switch (msg.type) {
+        case 'conversation.item.input_audio_transcription.delta': {
+          if (accumulated === '') turnStart = Date.now() - t0;
+          accumulated += msg.delta ?? '';
+          queue.push({
+            type: 'partial',
+            text: accumulated,
+            tStart: turnStart,
+            tEnd: Date.now() - t0,
+          });
+          break;
+        }
+        case 'conversation.item.input_audio_transcription.completed': {
+          queue.push({
+            type: 'final',
+            text: msg.transcript ?? accumulated,
+            tStart: turnStart,
+            tEnd: Date.now() - t0,
+          });
+          accumulated = '';
+          sawFinal = true;
+          maybeEnd();
+          break;
+        }
+        case 'error': {
+          queue.fail(
+            new ProviderError(`openai stt error: ${JSON.stringify(msg.error ?? msg)}`),
+          );
+          break;
+        }
+        default:
+          break; // speech_started/speech_stopped/committed/session.updated/unknown
+      }
+    });
+    ws.on('error', (err) => {
+      queue.fail(new ProviderError(`openai stt transport error: ${String(err)}`));
+    });
+    ws.on('close', () => queue.end());
+
+    // Pump: session.update first, then one base64 append per audio chunk.
+    void (async () => {
+      await waitForOpen(ws);
+      if (wsClosed || queue.isDone) return;
+      ws.send(
+        JSON.stringify({
+          type: 'session.update',
+          session: {
+            type: 'transcription',
+            audio: {
+              input: {
+                // ALWAYS 24000 — the API rejects 16000 (regression-locked).
+                format: { type: 'audio/pcm', rate: 24000 },
+                transcription: { model: this.config.model ?? 'gpt-4o-transcribe' },
+                turn_detection: { type: 'server_vad', silence_duration_ms: 500 },
+              },
+            },
+          },
+        }),
+      );
+      for await (const chunk of audio) {
+        if (wsClosed || queue.isDone) return;
+        ws.send(
+          JSON.stringify({
+            type: 'input_audio_buffer.append',
+            audio: bytesToBase64(int16ToLeBytes(chunk)),
+          }),
+        );
+      }
+      pumpDone = true;
+      maybeEnd();
+    })().catch((err: unknown) => {
+      queue.fail(
+        err instanceof ProviderError
+          ? err
+          : new ProviderError(`openai stt input error: ${String(err)}`),
+      );
+    });
+
+    try {
+      for await (const event of queue) yield event;
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      queue.abort();
+      closeWs();
+    }
   }
 }
