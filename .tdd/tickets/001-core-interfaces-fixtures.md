@@ -1,10 +1,10 @@
 ---
 id: 001
 title: Core stage interfaces, timing vocabulary, protocol types, fixture providers
-status: pending
+status: green
 depends_on: []
 touches: [src/core/types.ts, src/core/timing.ts, src/core/protocol.ts, src/core/fixtures/*, src/core/registry.ts]
-test_files: []
+test_files: [src/core/fixtures/fixtures.test.ts, src/core/timing.test.ts, src/core/protocol.test.ts, src/core/registry.test.ts, src/core/contracts/contracts.test.ts, src/core/contracts/index.ts]
 iterations: 0
 ---
 

@@ -55,14 +55,29 @@ export interface RealtimeIntervals {
   endToEnd: number | null;
 }
 
+function diff(later: number | undefined, earlier: number | undefined): number | null {
+  if (later === undefined || earlier === undefined) return null;
+  return later - earlier;
+}
+
 export function deriveCascadeIntervals(t: CascadeTimestamps): CascadeIntervals {
-  void t;
-  throw new Error('not implemented');
+  return {
+    endpointing: diff(t.vad_fired, t.speech_end),
+    stt: diff(t.stt_final, t.vad_fired),
+    mt: diff(t.mt_first_token, t.stt_final),
+    tts: diff(t.tts_first_byte, t.mt_first_token),
+    queue: diff(t.audio_queued, t.tts_first_byte),
+    endToEnd: diff(t.audio_queued, t.speech_end),
+  };
 }
 
 export function deriveRealtimeIntervals(t: RealtimeTimestamps): RealtimeIntervals {
-  void t;
-  throw new Error('not implemented');
+  return {
+    endpointing: diff(t.server_speech_stopped, t.speech_end),
+    model: diff(t.first_audio_delta, t.server_speech_stopped),
+    queue: diff(t.audio_queued, t.first_audio_delta),
+    endToEnd: diff(t.audio_queued, t.speech_end),
+  };
 }
 
 export type Mode = 'cascade' | 'realtime';

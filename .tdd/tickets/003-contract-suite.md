@@ -1,10 +1,10 @@
 ---
 id: 003
 title: Shared provider contract suites (swappability proof)
-status: pending
+status: green
 depends_on: [001]
 touches: [src/core/contracts/*]
-test_files: []
+test_files: [src/core/contracts/contracts.test.ts, src/core/contracts/index.ts]
 iterations: 0
 ---
 

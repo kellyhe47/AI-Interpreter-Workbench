@@ -1,10 +1,10 @@
 ---
 id: 002
 title: withTiming / withRetry / withTimeout decorators
-status: pending
+status: green
 depends_on: [001]
 touches: [src/core/decorators/*]
-test_files: []
+test_files: [src/core/decorators/decorators.test.ts]
 iterations: 0
 ---
 

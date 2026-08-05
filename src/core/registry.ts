@@ -1,9 +1,6 @@
 /**
  * Provider registry.
  *
- * STUB — behavior not implemented yet.
- *
- * Pinned semantics (encoded in tests):
  * - createStt('fixture', opts) -> FixtureStt instance (opts forwarded to ctor).
  * - createMt('fixture', opts)  -> FixtureMt instance.
  * - createTts('fixture', opts) -> FixtureTts instance.
@@ -13,30 +10,39 @@
  */
 
 import type { MtProvider, SttProvider, TtsProvider } from './types';
+import { FixtureMt, FixtureStt, FixtureTts } from './fixtures/index';
+import type {
+  FixtureMtOptions,
+  FixtureSttOptions,
+  FixtureTtsOptions,
+} from './fixtures/index';
+
+function unknownProvider(kind: string, name: string, known: readonly string[]): Error {
+  return new Error(
+    `Unknown ${kind} provider "${name}". Known providers: ${known.join(', ')}`,
+  );
+}
 
 export function createStt(
   name: string,
   options?: Record<string, unknown>,
 ): SttProvider {
-  void name;
-  void options;
-  throw new Error('not implemented');
+  if (name === 'fixture') return new FixtureStt(options as FixtureSttOptions);
+  throw unknownProvider('STT', name, ['fixture']);
 }
 
 export function createMt(
   name: string,
   options?: Record<string, unknown>,
 ): MtProvider {
-  void name;
-  void options;
-  throw new Error('not implemented');
+  if (name === 'fixture') return new FixtureMt(options as FixtureMtOptions);
+  throw unknownProvider('MT', name, ['fixture']);
 }
 
 export function createTts(
   name: string,
   options?: Record<string, unknown>,
 ): TtsProvider {
-  void name;
-  void options;
-  throw new Error('not implemented');
+  if (name === 'fixture') return new FixtureTts(options as FixtureTtsOptions);
+  throw unknownProvider('TTS', name, ['fixture']);
 }
