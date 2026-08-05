@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/colors.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/typography.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/spacing.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/effects.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/styles.css">
+<script src="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/_ds_bundle.js"></script>
+<style>
+body{margin:0;background:var(--surface-app);color:var(--text-body);font-family:var(--font-sans)}
+a{color:var(--text-link);text-decoration:none}a:hover{color:var(--accent-strong);text-decoration:underline}
+@keyframes wb-pulse{from{transform:scaleY(.45)}to{transform:scaleY(1.05)}}
+@keyframes wb-dot{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes wb-fill{from{width:8%}to{width:92%}}
+</style>
+</helmet>
+
+<div style="min-height:100vh;display:flex;flex-direction:column">
+  <!-- top bar -->
+  <div style="display:flex;align-items:center;gap:16px;padding:0 24px;height:52px;background:var(--surface-card);border-bottom:1px solid var(--border-default);position:sticky;top:0;z-index:20">
+    <div style="display:flex;align-items:center;gap:9px;font:600 14px var(--font-sans);letter-spacing:-0.01em">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><path d="M12 19v3"></path></svg>
+      Interpreter workbench
+    </div>
+    <div style="display:flex;border:1px solid var(--border-default);border-radius:8px;overflow:hidden;font:500 12.5px var(--font-sans)">
+      <button onClick="{{ goSession }}" style="{{ tabSessionStyle }}" style-hover="background:var(--surface-hover)">Session</button>
+      <button onClick="{{ goResults }}" style="{{ tabResultsStyle }}" style-hover="background:var(--surface-hover)">Results</button>
+    </div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:10px;font:400 12px var(--font-sans);color:var(--text-secondary)">
+      <sc-if value="{{ isLive }}" hint-placeholder-val="{{ true }}">
+        <span style="display:inline-flex;align-items:center;gap:6px"><i style="width:7px;height:7px;border-radius:99px;background:var(--accent);animation:wb-dot 1.6s infinite"></i>live</span>
+      </sc-if>
+      <span style="font-family:var(--font-mono);font-size:11px">run 2026-08-05 · corpus v1</span>
+    </div>
+  </div>
+
+  <!-- ======================= SESSION VIEW ======================= -->
+  <sc-if value="{{ onSession }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1;padding:24px 32px 48px;max-width:1060px;width:100%;margin:0 auto;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+
+    <!-- state switcher (mock control) -->
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Mock state</span>
+      <sc-for list="{{ stateChips }}" as="chip" hint-placeholder-count="4">
+        <button onClick="{{ chip.select }}" style="{{ chip.style }}" style-hover="border-color:var(--border-strong)">{{ chip.label }}</button>
+      </sc-for>
+    </div>
+
+    <!-- controls row: always visible per PRD -->
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow-card, 0 1px 2px rgba(0,0,0,.05))">
+      <div style="display:flex;border:1px solid var(--border-default);border-radius:8px;overflow:hidden;font:500 12.5px var(--font-sans)">
+        <button onClick="{{ pickRealtime }}" style="{{ modeRealtimeStyle }}" style-hover="background:var(--surface-hover)">Realtime</button>
+        <button onClick="{{ pickCascade }}" style="{{ modeCascadeStyle }}" style-hover="background:var(--surface-hover)">Cascade</button>
+      </div>
+      <button onClick="{{ cycleLang }}" style="display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border-default);border-radius:8px;padding:7px 12px;background:var(--surface-card);font:400 13px var(--font-sans);color:var(--text-body);cursor:pointer" style-hover="background:var(--surface-hover)">
+        {{ langLabel }}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"></path></svg>
+      </button>
+      <button onClick="{{ swapDirection }}" title="Swap direction" style="display:inline-flex;align-items:center;border:1px solid var(--border-default);border-radius:8px;padding:7px 9px;background:var(--surface-card);cursor:pointer" style-hover="background:var(--surface-hover)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--gray-500)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4"></path><path d="M4 7h16"></path><path d="m16 21 4-4-4-4"></path><path d="M20 17H4"></path></svg>
+      </button>
+      <span style="{{ langSupportStyle }}">{{ langSupportLabel }}</span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <sc-if value="{{ singleArm }}" hint-placeholder-val="{{ true }}">
+          <label style="display:inline-flex;align-items:center;gap:7px;font:400 12px var(--font-sans);color:var(--text-secondary);cursor:pointer">
+            <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Switch" checked="{{ autoplay }}" onChange="{{ setAutoplay }}" hint-size="36px,20px"></x-import>
+            autoplay
+          </label>
+        </sc-if>
+        <sc-if value="{{ isStopped }}" hint-placeholder-val="{{ false }}">
+          <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" onClick="{{ startSession }}" hint-size="auto,32px">Start new session</x-import>
+        </sc-if>
+        <sc-if value="{{ notStopped }}" hint-placeholder-val="{{ true }}">
+          <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" variant="secondary" onClick="{{ stopSession }}" hint-size="auto,32px">Stop session</x-import>
+        </sc-if>
+      </div>
+    </div>
+
+    <!-- status strip -->
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;font:400 12px var(--font-sans);color:var(--text-secondary);padding:0 4px">
+      <span style="display:inline-flex;align-items:center;gap:6px;color:var(--positive)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path></svg>
+        mic allowed
+      </span>
+      <span style="{{ connStyle }}">{{ connLabel }}</span>
+      <span style="display:inline-flex;align-items:center;gap:6px">input
+        <span style="display:flex;gap:2px;align-items:flex-end;height:14px">
+          <sc-for list="{{ meterBars }}" as="bar" hint-placeholder-count="5">
+            <i style="{{ bar.style }}"></i>
+          </sc-for>
+        </span>
+      </span>
+      <span style="font-family:var(--font-mono);font-size:11px">{{ stateLabel }}</span>
+      <span style="margin-left:auto;font-family:var(--font-mono);font-size:11px">{{ elapsedLabel }} · {{ autoplayLabel }}</span>
+    </div>
+
+    <!-- banners -->
+    <sc-if value="{{ showReconnectBanner }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>
+        Reconnecting — attempt 2 of 5 · transcript history preserved
+      </div>
+    </sc-if>
+    <sc-if value="{{ showSwitchBanner }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>
+        {{ switchBannerText }}
+      </div>
+    </sc-if>
+    <sc-if value="{{ showCantoneseWarn }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+        Realtime does not list Cantonese as a supported output language — the run proceeds to observe the actual failure mode. Text may look correct while audio pronunciation is not.
+      </div>
+    </sc-if>
+    <sc-if value="{{ isStopped }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--positive-soft);color:var(--positive);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><path d="m9 11 3 3L22 4"></path></svg>
+        Session stopped · 5:02 · 32 utterances · 0 dropped · $0.71
+      </div>
+    </sc-if>
+
+    <!-- arms strip (comparison mode) -->
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 4px">
+      <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Arms</span>
+      <sc-for list="{{ armChips }}" as="a" hint-placeholder-count="2">
+        <span style="{{ a.style }}">{{ a.label }}
+          <sc-if value="{{ a.removable }}" hint-placeholder-val="{{ false }}">
+            <button onClick="{{ a.remove }}" style="border:none;background:none;cursor:pointer;padding:0;margin-left:5px;color:inherit;font:inherit;line-height:1">×</button>
+          </sc-if>
+        </span>
+      </sc-for>
+      <sc-if value="{{ canAddArm }}" hint-placeholder-val="{{ true }}">
+        <button onClick="{{ addArm }}" style="font:400 11.5px var(--font-sans);border:1px dashed var(--border-strong);color:var(--text-secondary);border-radius:99px;padding:4px 11px;background:none;cursor:pointer" style-hover="border-color:var(--accent);color:var(--accent)">{{ addArmLabel }}</button>
+      </sc-if>
+      <sc-if value="{{ multiArm }}" hint-placeholder-val="{{ false }}">
+        <span style="font:400 11.5px var(--font-sans);color:var(--text-muted);margin-left:auto">autoplay off — two arms would talk over each other</span>
+      </sc-if>
+    </div>
+
+    <!-- source card -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+        <span style="font:500 11px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Source · {{ srcLang }}{{ sharedSuffix }}</span>
+        <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">utterance {{ uttNum }}</span>
+      </div>
+      <div style="font:400 15px/1.6 var(--font-sans);margin-top:8px">{{ srcText }}</div>
+    </div>
+
+    <!-- arm cards -->
+    <div style="{{ armGridStyle }}">
+      <sc-for list="{{ armCards }}" as="arm" hint-placeholder-count="1">
+        <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.05);display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+            <span style="font:600 13px var(--font-sans)">{{ arm.name }}</span>
+            <span style="{{ arm.statusStyle }}">{{ arm.statusLabel }}</span>
+          </div>
+          <sc-if value="{{ arm.inFlight }}" hint-placeholder-val="{{ false }}">
+            <div style="height:5px;background:var(--gray-100);border-radius:3px;overflow:hidden"><i style="display:block;height:5px;border-radius:3px;background:var(--accent);animation:wb-fill 1.4s infinite alternate ease-in-out"></i></div>
+          </sc-if>
+          <sc-if value="{{ arm.showText }}" hint-placeholder-val="{{ true }}">
+            <div style="font:400 14px/1.6 var(--font-sans);min-height:44px">{{ arm.targetText }}</div>
+          </sc-if>
+          <sc-if value="{{ arm.failed }}" hint-placeholder-val="{{ false }}">
+            <div style="background:var(--negative-soft);color:var(--negative);border-radius:8px;padding:9px 12px;font:400 12px var(--font-sans)">{{ arm.failText }}</div>
+          </sc-if>
+          <sc-if value="{{ arm.showPlay }}" hint-placeholder-val="{{ true }}">
+            <button onClick="{{ arm.togglePlay }}" style="{{ arm.playStyle }}" style-hover="background:var(--surface-hover)">
+              <sc-if value="{{ arm.playing }}" hint-placeholder-val="{{ false }}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>
+              </sc-if>
+              <sc-if value="{{ arm.notPlaying }}" hint-placeholder-val="{{ true }}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5.5v13a1 1 0 0 0 1.54.84l10-6.5a1 1 0 0 0 0-1.68l-10-6.5A1 1 0 0 0 7 5.5z"></path></svg>
+              </sc-if>
+              {{ arm.playLabel }}
+              <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);margin-left:auto">{{ arm.audioDur }}</span>
+            </button>
+          </sc-if>
+          <sc-if value="{{ arm.showStages }}" hint-placeholder-val="{{ true }}">
+            <div style="display:grid;grid-template-columns:82px 1fr 58px;gap:6px 10px;align-items:center;font:400 11.5px var(--font-sans);border-top:1px solid var(--border-default);padding-top:10px">
+              <sc-for list="{{ arm.stages }}" as="st" hint-placeholder-count="3">
+                <span style="color:var(--text-secondary)">{{ st.label }}</span>
+                <span style="height:5px;background:var(--gray-100);border-radius:3px;overflow:hidden;display:block"><i style="{{ st.barStyle }}"></i></span>
+                <span style="text-align:right;font-family:var(--font-mono);font-size:11px">{{ st.ms }}</span>
+              </sc-for>
+            </div>
+          </sc-if>
+          <sc-if value="{{ arm.showFoot }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex;justify-content:space-between;align-items:center;font:400 11.5px var(--font-sans);color:var(--text-secondary);border-top:1px solid var(--border-default);padding-top:9px">
+              <span>total <b style="color:var(--text-body);font-weight:600;font-family:var(--font-mono);font-size:11.5px">{{ arm.total }}</b></span>
+              <span style="font-family:var(--font-mono);font-size:11px">{{ arm.cost }}</span>
+              <span style="color:var(--text-muted)">{{ arm.intervalsNote }}</span>
+            </div>
+          </sc-if>
+          <sc-if value="{{ arm.opaqueNote }}" hint-placeholder-val="{{ false }}">
+            <div style="background:var(--surface-sunken);border-radius:8px;padding:8px 11px;font:400 11px/1.5 var(--font-sans);color:var(--text-secondary)">model interval is opaque — recognition, translation and voice happen inside one model · source transcript comes from a parallel recognizer, not the model itself</div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+
+    <!-- blind compare -->
+    <sc-if value="{{ multiArm }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:10px;padding:0 4px">
+        <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" variant="secondary" onClick="{{ toggleBlind }}" hint-size="auto,32px">{{ blindBtnLabel }}</x-import>
+        <span style="font:400 11.5px var(--font-sans);color:var(--text-muted);margin-left:auto">utterance {{ uttNum }} · {{ armSummary }}</span>
+      </div>
+    </sc-if>
+    <sc-if value="{{ blindOpen }}" hint-placeholder-val="{{ false }}">
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:18px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px">
+          <span style="font:600 13px var(--font-sans)">Compare blind</span>
+          <span style="font:400 11.5px var(--font-sans);color:var(--text-muted)">{{ blindHint }}</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <sc-for list="{{ blindSamples }}" as="s" hint-placeholder-count="2">
+            <div style="border:1px solid var(--border-default);border-radius:10px;padding:14px">
+              <div style="font:600 12.5px var(--font-sans);margin-bottom:4px">{{ s.title }}</div>
+              <sc-if value="{{ s.revealed }}" hint-placeholder-val="{{ false }}">
+                <div style="font:400 11px var(--font-sans);color:var(--accent);margin-bottom:8px">{{ s.identity }}</div>
+              </sc-if>
+              <button style="display:flex;align-items:center;gap:7px;border:1px solid var(--border-default);border-radius:8px;padding:7px 12px;background:var(--surface-card);font:500 12px var(--font-sans);cursor:pointer;width:100%;margin-bottom:10px;color:var(--text-body)" style-hover="background:var(--surface-hover)">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5.5v13a1 1 0 0 0 1.54.84l10-6.5a1 1 0 0 0 0-1.68l-10-6.5A1 1 0 0 0 7 5.5z"></path></svg>
+                play
+              </button>
+              <div style="display:flex;gap:5px">
+                <sc-for list="{{ s.scores }}" as="sc" hint-placeholder-count="5">
+                  <button onClick="{{ sc.pick }}" style="{{ sc.style }}" style-hover="border-color:var(--accent)">{{ sc.n }}</button>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:14px">
+          <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" onClick="{{ submitBlind }}" hint-size="auto,32px">{{ blindSubmitLabel }}</x-import>
+          <span style="font:400 11.5px var(--font-sans);color:var(--text-muted)">rate fluency 1–5 · order randomized · scores append to the run ledger</span>
+        </div>
+      </div>
+    </sc-if>
+
+    <!-- session footer -->
+    <div style="display:flex;gap:18px;flex-wrap:wrap;font:400 11.5px var(--font-sans);color:var(--text-muted);border-top:1px solid var(--border-default);padding-top:12px;padding-left:4px">
+      <span>{{ uttNum }} utterances</span><span>p50 <span style="font-family:var(--font-mono)">1.02 s</span></span><span>p95 <span style="font-family:var(--font-mono)">1.31 s</span></span><span>session <span style="font-family:var(--font-mono)">$0.29</span></span>
+      <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font-size:10px;letter-spacing:.04em">figures illustrative</span>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ======================= RESULTS VIEW ======================= -->
+  <sc-if value="{{ onResults }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1;padding:24px 32px 48px;max-width:1060px;width:100%;margin:0 auto;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div>
+        <div style="font:600 22px var(--font-sans);letter-spacing:-0.01em">Results</div>
+        <div style="font:400 13px var(--font-sans);color:var(--text-secondary);margin-top:3px">Four questions, one run ledger. Every figure carries its provenance; nothing here comes from a fixture run.</div>
+      </div>
+      <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font:400 12px var(--font-sans);color:var(--text-secondary);cursor:pointer">
+        <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Switch" checked="{{ hasRuns }}" onChange="{{ setHasRuns }}" hint-size="36px,20px"></x-import>
+        show recorded runs (mock)
+      </label>
+    </div>
+
+    <!-- empty state -->
+    <sc-if value="{{ noRuns }}" hint-placeholder-val="{{ false }}">
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:56px 24px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round"><path d="M3 3v18h18"></path><circle cx="9" cy="13" r="1.2"></circle><circle cx="13" cy="9" r="1.2"></circle><circle cx="17" cy="12" r="1.2"></circle></svg>
+        <div style="font:600 14px var(--font-sans);margin-top:12px">No runs recorded</div>
+        <div style="font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:4px;margin-bottom:18px">Run a benchmark sweep to populate experiment 1. Result cards never show sample data as evidence.</div>
+        <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" onClick="{{ setHasRunsTrue }}" hint-size="auto,32px">Run sweep</x-import>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ hasRuns }}" hint-placeholder-val="{{ true }}">
+
+    <!-- exp 1 -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Track 1 of 3 · vendor held constant</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">Does the architecture itself cost latency?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">EN→ES · 12 utterances × 5 runs · endpointing pinned 500 ms · turn-final trigger · corpus v1 · run 2026-08-05</div>
+      <div style="display:grid;grid-template-columns:1.3fr 1fr 1fr .9fr;gap:0;margin-top:14px;font:400 13px var(--font-sans)">
+        <sc-for list="{{ exp1Rows }}" as="r" hint-placeholder-count="8">
+          <span style="{{ r.c0 }}">{{ r.metric }}</span>
+          <span style="{{ r.c1 }}">{{ r.a }}</span>
+          <span style="{{ r.c1 }}">{{ r.b }}</span>
+          <span style="{{ r.cd }}">{{ r.delta }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:14px">Latency is a wash. Cost is not.</div>
+    </div>
+
+    <!-- exp 2 -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Track 2 of 3 · architecture held constant</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">What does swapping providers buy?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">translation model held constant · only STT and TTS differ · not pooled with track 1</div>
+      <div style="display:grid;grid-template-columns:1.3fr 1fr 1fr .9fr;gap:0;margin-top:14px;font:400 13px var(--font-sans)">
+        <sc-for list="{{ exp2Rows }}" as="r" hint-placeholder-count="5">
+          <span style="{{ r.c0 }}">{{ r.metric }}</span>
+          <span style="{{ r.c1 }}">{{ r.a }}</span>
+          <span style="{{ r.c1 }}">{{ r.b }}</span>
+          <span style="{{ r.cd }}">{{ r.delta }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:14px">Cascade is not one point — it is a curve you can move along.</div>
+    </div>
+
+    <!-- stability -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Track 1 · extended along time</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">What changes as the conversation continues?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">5 min continuous · single arm, autoplay on · corpus loop · 32 utterances · run once per arm</div>
+      <div style="display:grid;grid-template-columns:1.3fr 1fr 1fr .9fr;gap:0;margin-top:14px;font:400 13px var(--font-sans)">
+        <sc-for list="{{ stabRows }}" as="r" hint-placeholder-count="9">
+          <span style="{{ r.c0 }}">{{ r.metric }}</span>
+          <span style="{{ r.c1a }}">{{ r.a }}</span>
+          <span style="{{ r.c1b }}">{{ r.b }}</span>
+          <span style="{{ r.cd }}">{{ r.delta }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:14px">The slope belongs to token billing, not to voice-to-voice — gpt-realtime-translate is duration-billed and flat at $0.034/min, for 13 output languages.</div>
+    </div>
+
+    <!-- cantonese / flexibility -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Track 3 of 3 · exploratory case study</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">What does provider choice actually let us reach?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">coverage verified by running each pair · qualitative, single native evaluator · never pooled with tracks 1 or 2</div>
+      <div style="display:grid;grid-template-columns:1.35fr 1fr .85fr .85fr .85fr;gap:0;margin-top:14px;font:400 12.5px var(--font-sans)">
+        <sc-for list="{{ coverageRows }}" as="r" hint-placeholder-count="5">
+          <span style="{{ r.c0 }}">{{ r.pair }}</span>
+          <span style="{{ r.rt }}">{{ r.realtime }}</span>
+          <span style="{{ r.s1 }}">{{ r.stt }}</span>
+          <span style="{{ r.s2 }}">{{ r.mt }}</span>
+          <span style="{{ r.s3 }}">{{ r.tts }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:12px 14px;margin-top:14px">
+        <div style="font:600 12px var(--font-sans);margin-bottom:5px">Observation · English → Cantonese on Realtime</div>
+        <div style="font:400 12.5px/1.6 var(--font-sans);color:var(--text-secondary)">Produced fluent, confident audio. The transcript read correctly. A native speaker identified the pronunciation as Mandarin, not Cantonese. No automated metric in the harness detected this.</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px">
+        <div style="background:var(--surface-sunken);border-radius:8px;padding:14px 16px"><div style="font:400 11px var(--font-sans);color:var(--text-secondary)">Add a pair providers cover</div><div style="font:600 21px var(--font-sans);letter-spacing:-0.01em;margin-top:3px">6 min</div><div style="font:400 11px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:10.5px">commit a4f21c · +11 lines, config only</div></div>
+        <div style="background:var(--surface-sunken);border-radius:8px;padding:14px 16px"><div style="font:400 11px var(--font-sans);color:var(--text-secondary)">Add a new provider</div><div style="font:600 21px var(--font-sans);letter-spacing:-0.01em;margin-top:3px">1h 48m</div><div style="font:400 11px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:10.5px">commit 9d0e77 · contract suite passed unchanged</div></div>
+        <div style="background:var(--surface-sunken);border-radius:8px;padding:14px 16px"><div style="font:400 11px var(--font-sans);color:var(--text-secondary)">Add a pair to Realtime</div><div style="font:600 21px var(--font-sans);letter-spacing:-0.01em;margin-top:3px">n/a</div><div style="font:400 11px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:10.5px">no mechanism exists at any price</div></div>
+      </div>
+    </div>
+
+    <!-- run ledger -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="font:600 15px var(--font-sans);letter-spacing:-0.01em">Run ledger</div>
+      <div style="font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:3px;margin-bottom:12px">One append-only ledger beneath every view. A metric cannot drift between screens or between a screen and the write-up.</div>
+      <div style="display:grid;grid-template-columns:110px 1fr 1.1fr .7fr .6fr .6fr;gap:0;font:400 12px var(--font-sans)">
+        <sc-for list="{{ ledgerRows }}" as="r" hint-placeholder-count="5">
+          <span style="{{ r.cs }}">{{ r.id }}</span>
+          <span style="{{ r.c }}">{{ r.what }}</span>
+          <span style="{{ r.c }}">{{ r.config }}</span>
+          <span style="{{ r.c }}">{{ r.pair }}</span>
+          <span style="{{ r.c }}">{{ r.n }}</span>
+          <span style="{{ r.c }}">{{ r.date }}</span>
+        </sc-for>
+      </div>
+    </div>
+
+    </sc-if>
+  </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;defaultView&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;session&quot;, &quot;results&quot;], &quot;default&quot;: &quot;session&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Behavior&quot;}}">
+class Component extends DCLogic {
+  state = {
+    view: this.props.defaultView ?? 'session', mode: 'realtime', langIdx: 0, reversed: false,
+    autoplay: true, arms: ['realtime'], sessionState: 'live',
+    blindOpen: false, blindRevealed: false, blindScores: {A: 0, B: 0},
+    playingArm: null, hasRuns: true,
+  };
+  renderVals() {
+    const S = this.state, set = p => this.setState(p);
+    const pairs = [
+      {src: 'English', tgt: 'Spanish', support: 'both modes', canto: false},
+      {src: 'English', tgt: 'Cantonese', support: 'cascade only', canto: true},
+    ];
+    const p = pairs[S.langIdx];
+    const src = S.reversed ? p.tgt : p.src, tgt = S.reversed ? p.src : p.tgt;
+    const canto = p.canto;
+    const stopped = S.sessionState === 'stopped';
+    const multi = S.arms.length > 1;
+    const singleArm = S.arms.length === 1 && !stopped;
+    const inFlight = S.sessionState === 'processing';
+    const reconnecting = S.sessionState === 'reconnecting';
+    const live = !stopped && !reconnecting;
+    const tab = on => `border:none;cursor:pointer;padding:7px 16px;font:inherit;color:${on ? 'var(--text-body)' : 'var(--text-secondary)'};background:${on ? 'var(--surface-selected)' : 'var(--surface-card)'}`;
+    const chipStyle = on => `font:400 11.5px var(--font-sans);border:1px solid ${on ? 'var(--accent)' : 'var(--border-default)'};color:${on ? 'var(--accent)' : 'var(--text-secondary)'};background:${on ? 'var(--accent-soft)' : 'var(--surface-card)'};border-radius:99px;padding:4px 11px;cursor:pointer`;
+    const states = [['live', 'live'], ['processing', 'processing'], ['reconnecting', 'reconnecting'], ['stopped', 'stopped']];
+    const srcTexts = {
+      English: 'I need to schedule an appointment for next Tuesday to review the test results.',
+      Spanish: 'Necesito programar una cita para el próximo martes para revisar los resultados.',
+      Cantonese: '我想約下星期二睇報告結果。',
+    };
+    const tgtTexts = {
+      Spanish: 'Necesito programar una cita para el próximo martes para revisar los resultados.',
+      English: 'I need to schedule an appointment for next Tuesday to review the test results.',
+      Cantonese: '我想預約下星期二嘅時間，覆診睇檢查報告。',
+    };
+    // arm definitions
+    const defs = {
+      realtime: {name: 'Realtime', stages: [['endpointing', 500, 'var(--gray-400)'], ['model', 471, 'var(--accent)'], ['queue', 9, 'var(--accent)']], total: '980 ms', cost: '$0.140/min', note: '3 intervals · 1 opaque', opaque: true, dur: '2.1 s'},
+      cascadeB: {name: 'Cascade · OpenAI', stages: [['endpointing', 500, 'var(--gray-400)'], ['stt', 42, 'var(--accent)'], ['mt', 298, 'var(--accent)'], ['tts', 201, 'var(--accent)'], ['queue', 12, 'var(--accent)']], total: '1053 ms', cost: '$0.021/min', note: '5 intervals · all visible', opaque: false, dur: '2.4 s'},
+      cascadeC: {name: 'Cascade · best-of-breed', stages: [['endpointing', 500, 'var(--gray-400)'], ['stt', 31, 'var(--accent)'], ['mt', 298, 'var(--accent)'], ['tts', 74, 'var(--accent)'], ['queue', 11, 'var(--accent)']], total: '914 ms', cost: '$0.055/min', note: '5 intervals · all visible', opaque: false, dur: '2.3 s'},
+    };
+    const activeArms = singleArm ? [S.mode === 'realtime' ? 'realtime' : 'cascadeB'] : S.arms;
+    const armCards = activeArms.map(key => {
+      const d = defs[key];
+      const failed = key === 'cascadeC' && S.sessionState === 'processing' && false;
+      const ready = !inFlight;
+      const playing = S.playingArm === key;
+      return {
+        name: d.name,
+        inFlight, failed,
+        statusStyle: `font:400 11px var(--font-sans);display:inline-flex;align-items:center;gap:5px;color:${inFlight ? 'var(--text-secondary)' : 'var(--positive)'}`,
+        statusLabel: inFlight ? 'in flight' : (playing ? 'playing' : 'ready'),
+        showText: ready,
+        targetText: canto && key === 'realtime' ? tgtTexts['Cantonese'] : tgtTexts[tgt] || '',
+        failText: '',
+        showPlay: ready && !stopped,
+        playing, notPlaying: !playing,
+        playLabel: playing ? 'pause' : 'play',
+        playStyle: `display:flex;align-items:center;gap:7px;border:1px solid ${playing ? 'var(--accent)' : 'var(--border-default)'};border-radius:8px;padding:7px 12px;background:var(--surface-card);font:500 12px var(--font-sans);cursor:pointer;width:100%;color:${playing ? 'var(--accent)' : 'var(--text-body)'}`,
+        audioDur: d.dur,
+        togglePlay: () => set({playingArm: playing ? null : key}),
+        showStages: ready,
+        stages: d.stages.map(([label, ms, color]) => ({label, ms: ms + ' ms', barStyle: `display:block;height:5px;border-radius:3px;background:${color};width:${Math.max(1, Math.round(ms / 10.5))}%`})),
+        showFoot: ready,
+        total: d.total, cost: d.cost, intervalsNote: d.note,
+        opaqueNote: ready && d.opaque,
+      };
+    });
+    const armChipDef = {realtime: 'Realtime', cascadeB: 'Cascade · OpenAI', cascadeC: 'Cascade · best-of-breed'};
+    const armChips = activeArms.map(key => ({
+      label: armChipDef[key],
+      style: `display:inline-flex;align-items:center;font:400 11.5px var(--font-sans);background:${key === 'realtime' ? 'var(--accent-soft)' : 'var(--surface-selected)'};color:${key === 'realtime' ? 'var(--accent)' : 'var(--text-body)'};border-radius:99px;padding:4px 11px`,
+      removable: multi,
+      remove: () => {
+        const arms = S.arms.filter(a => a !== key);
+        set({arms: arms.length ? arms : [S.mode === 'realtime' ? 'realtime' : 'cascadeB'], blindOpen: false});
+      },
+    }));
+    const nextArm = !activeArms.includes('cascadeB') ? 'cascadeB' : (!activeArms.includes('realtime') ? 'realtime' : 'cascadeC');
+    const addCost = {realtime: '$0.140/min', cascadeB: '$0.021/min', cascadeC: '$0.055/min'}[nextArm];
+    const meterHeights = [5, 9, 13, 7, 4];
+    const meterBars = meterHeights.map((h, i) => ({style: `width:3px;height:${h}px;border-radius:1px;background:${live && i < 4 ? 'var(--accent)' : 'var(--gray-300)'};display:block`}));
+    // blind compare
+    const mkScores = k => [1, 2, 3, 4, 5].map(n => ({
+      n,
+      pick: () => set({blindScores: {...S.blindScores, [k]: n}}),
+      style: `flex:1;text-align:center;border:1px solid ${S.blindScores[k] === n ? 'var(--accent)' : 'var(--border-default)'};border-radius:8px;padding:6px 0;font:500 12px var(--font-sans);cursor:pointer;background:${S.blindScores[k] === n ? 'var(--accent-soft)' : 'var(--surface-card)'};color:${S.blindScores[k] === n ? 'var(--accent)' : 'var(--text-body)'}`,
+    }));
+    const idA = armChipDef[activeArms[0]] || 'Realtime', idB = armChipDef[activeArms[1]] || 'Cascade · OpenAI';
+    // results tables
+    const c0 = 'color:var(--text-secondary);padding:9px 0;border-top:1px solid var(--border-default)';
+    const c1 = 'padding:9px 0;border-top:1px solid var(--border-default);font-family:var(--font-mono);font-size:12px';
+    const hd = 'font:500 10px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;padding-bottom:6px';
+    const d = tone => `padding:9px 0;border-top:1px solid var(--border-default);text-align:right;font-family:var(--font-mono);font-size:12px;color:${tone === 'good' ? 'var(--positive)' : tone === 'bad' ? 'var(--negative)' : 'var(--text-muted)'}`;
+    const row = (metric, a, b, delta, tone) => ({metric, a, b, delta, tone, c0, c1, cd: d(tone)});
+    const hrow = (metric, a, b, delta) => ({metric, a, b, delta, c0: hd, c1: hd, cd: hd + ';text-align:right'});
+    const exp1Rows = [
+      hrow('metric', 'realtime', 'cascade · OpenAI', 'delta'),
+      row('p50 latency', '1.02 s', '1.06 s', '+40 ms'),
+      row('p95 latency', '1.31 s', '1.28 s', '−30 ms', 'good'),
+      row('cost / min', '$0.140', '$0.021', '−85%', 'good'),
+      row('word error rate', '4.2% (sidecar)', '3.8%', 'n/a'),
+      row('adequacy 1–5', '4.6', '4.4', '−0.2'),
+      row('fluency 1–5', '4.7', '4.2', '−0.5'),
+      row('observable intervals', '3 · 1 opaque', '5 · 0 opaque', '+2', 'good'),
+    ];
+    const exp2Rows = [
+      hrow('metric', 'cascade · OpenAI', 'best-of-breed', 'delta'),
+      row('p50 latency', '1.06 s', '0.91 s', '−150 ms', 'good'),
+      row('cost / min', '$0.021', '$0.055', '+162%', 'bad'),
+      row('word error rate', '3.8%', '2.1%', '−45%', 'good'),
+      row('fluency 1–5', '4.2', '4.6', '+0.4', 'good'),
+    ];
+    const srow = (metric, a, b, delta, tone, aTone, bTone) => ({metric, a, b, delta, c0, cd: d(tone),
+      c1a: c1 + (aTone ? `;color:var(--${aTone})` : ''), c1b: c1 + (bTone ? `;color:var(--${bTone})` : '')});
+    const stabRows = [
+      {metric: 'metric', a: 'realtime', b: 'cascade · OpenAI', delta: 'delta', c0: hd, c1a: hd, c1b: hd, cd: hd + ';text-align:right'},
+      srow('utterances completed', '31 / 32', '32 / 32', '+1', 'good'),
+      srow('disconnects', '1', '0', '−1', 'good'),
+      srow('p50 · minute 1', '0.99 s', '1.05 s', '—'),
+      srow('p50 · minute 5', '1.14 s', '1.06 s', '−80 ms', 'good'),
+      srow('latency drift', '+150 ms', '+10 ms', '−140 ms', 'good', 'negative', 'positive'),
+      srow('cost · minute 1', '$0.09', '$0.021', '−77%', 'good'),
+      srow('cost · minute 5', '$0.31', '$0.021', '−93%', 'good', 'negative'),
+      srow('heap · start → end', '48 → 61 MB', '52 → 55 MB', '−10 MB', 'good'),
+      srow('context lost on drop', 'yes', 'n/a', '—', null, 'negative', 'positive'),
+    ];
+    const cell = tone => `padding:9px 0;border-top:1px solid var(--border-default);color:${tone === 'ok' ? 'var(--positive)' : tone === 'no' ? 'var(--negative)' : tone === 'warn' ? 'oklch(45% 0.12 75)' : 'var(--text-muted)'}`;
+    const cov = (pair, realtime, rt, stt, s1, mt, s2, tts, s3) => ({pair, realtime, stt, mt, tts, c0, rt: cell(rt), s1: cell(s1), s2: cell(s2), s3: cell(s3)});
+    const coverageRows = [
+      {pair: 'pair', realtime: 'realtime', stt: 'stt', mt: 'mt', tts: 'tts', c0: hd, rt: hd, s1: hd, s2: hd, s3: hd},
+      cov('English → Spanish', 'runs', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'),
+      cov('Spanish → English', 'runs', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'),
+      cov('English → Cantonese', 'not listed', 'no', '—', null, 'ok', 'ok', 'verify', 'warn'),
+      cov('Cantonese → English', 'not listed', 'no', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'),
+    ];
+    const lc = 'padding:8px 0;border-top:1px solid var(--border-default);color:var(--text-secondary)';
+    const lcs = lc + ';font-family:var(--font-mono);font-size:11px;color:var(--text-body)';
+    const lrow = (id, what, config, pair, n, date) => ({id, what, config, pair, n, date, c: lc, cs: lcs});
+    const ledgerRows = [
+      {id: 'run id', what: 'experiment', config: 'configuration', pair: 'pair', n: 'N', date: 'date', c: hd, cs: hd},
+      lrow('run-0805-a', 'exp 1 · arm A', 'gpt-realtime · vad 500ms', 'EN→ES', '60', '08-05'),
+      lrow('run-0805-b', 'exp 1 · arm B', 'OpenAI cascade · vad 500ms', 'EN→ES', '60', '08-05'),
+      lrow('run-0805-c', 'exp 2 · arm C', 'Deepgram + ElevenLabs', 'EN→ES', '60', '08-05'),
+      lrow('run-0806-s', 'stability · both arms', '5 min · autoplay · corpus loop', 'EN→ES', '2×32', '08-06'),
+      lrow('run-0807-y', 'track 3 · cantonese', 'cascade + realtime probe', 'EN↔YUE', '24', '08-07'),
+    ];
+    return {
+      onSession: S.view === 'session', onResults: S.view === 'results',
+      goSession: () => set({view: 'session'}), goResults: () => set({view: 'results'}),
+      tabSessionStyle: tab(S.view === 'session'), tabResultsStyle: tab(S.view === 'results'),
+      isLive: S.view === 'session' && live,
+      stateChips: states.map(([key, label]) => ({label, select: () => set({sessionState: key, playingArm: null}), style: chipStyle(S.sessionState === key)})),
+      pickRealtime: () => set({mode: 'realtime', arms: multi ? S.arms : ['realtime']}),
+      pickCascade: () => set({mode: 'cascade', arms: multi ? S.arms : ['cascadeB']}),
+      modeRealtimeStyle: tab(S.mode === 'realtime'), modeCascadeStyle: tab(S.mode === 'cascade'),
+      cycleLang: () => set({langIdx: (S.langIdx + 1) % pairs.length, reversed: false}),
+      swapDirection: () => set({reversed: !S.reversed}),
+      langLabel: `${src} → ${tgt}`,
+      langSupportStyle: `font:400 10.5px var(--font-sans);border-radius:99px;padding:3px 9px;background:${canto ? 'var(--warning-soft)' : 'var(--surface-selected)'};color:${canto ? 'oklch(45% 0.12 75)' : 'var(--text-secondary)'}`,
+      langSupportLabel: p.support,
+      autoplay: S.autoplay && singleArm, setAutoplay: v => set({autoplay: v}),
+      startSession: () => set({sessionState: 'live'}),
+      stopSession: () => set({sessionState: 'stopped', playingArm: null}),
+      isStopped: stopped, notStopped: !stopped,
+      connStyle: `display:inline-flex;align-items:center;gap:6px;color:${reconnecting ? 'oklch(45% 0.12 75)' : 'var(--positive)'}`,
+      connLabel: reconnecting ? 'reconnecting…' : 'connected',
+      meterBars,
+      stateLabel: S.sessionState,
+      elapsedLabel: stopped ? '05:02' : '02:14',
+      autoplayLabel: singleArm && S.autoplay ? 'autoplay on' : 'autoplay off',
+      showReconnectBanner: reconnecting,
+      showSwitchBanner: false, switchBannerText: '',
+      showCantoneseWarn: canto && (S.mode === 'realtime' || activeArms.includes('realtime')) && !stopped,
+      singleArm, multiArm: multi,
+      armChips,
+      canAddArm: activeArms.length < 3 && !stopped,
+      addArm: () => set({arms: [...activeArms, nextArm], autoplay: false, blindOpen: false}),
+      addArmLabel: `+ ${armChipDef[nextArm]} · ${addCost}`,
+      srcLang: src,
+      sharedSuffix: multi ? ' — shared by every arm' : '',
+      srcText: srcTexts[src] || srcTexts.English,
+      uttNum: 19,
+      armGridStyle: `display:grid;grid-template-columns:repeat(${Math.min(activeArms.length, 3)},1fr);gap:14px`,
+      armCards,
+      armSummary: activeArms.length + ' arms · all succeeded',
+      toggleBlind: () => set({blindOpen: !S.blindOpen, blindRevealed: false, blindScores: {A: 0, B: 0}}),
+      blindBtnLabel: S.blindOpen ? 'close blind compare' : 'compare blind',
+      blindOpen: S.blindOpen && multi,
+      blindHint: S.blindRevealed ? 'identity revealed — scores appended to ledger' : 'arm identity hidden until you submit',
+      blindSamples: [
+        {title: 'Sample A', revealed: S.blindRevealed, identity: idB, scores: mkScores('A')},
+        {title: 'Sample B', revealed: S.blindRevealed, identity: idA, scores: mkScores('B')},
+      ],
+      submitBlind: () => set({blindRevealed: true}),
+      blindSubmitLabel: S.blindRevealed ? 'submitted' : 'submit ratings',
+      hasRuns: S.hasRuns, noRuns: !S.hasRuns,
+      setHasRuns: v => set({hasRuns: v}), setHasRunsTrue: () => set({hasRuns: true}),
+      exp1Rows, exp2Rows, stabRows, coverageRows, ledgerRows,
+    };
+  }
+}
+</script>
+</body>
+</html>

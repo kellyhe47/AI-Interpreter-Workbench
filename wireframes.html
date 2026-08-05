@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Interpreter Workbench — UI wireframes</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
+<style>
+:root{
+--surface-0:#F5F4EF;--surface-1:#EFEDE7;--surface-2:#FFFFFF;
+--text-primary:#1F1F1D;--text-secondary:#5F5E5A;--text-muted:#888780;
+--border:rgba(0,0,0,.10);--border-strong:rgba(0,0,0,.18);
+--bg-accent:#E6F1FB;--text-accent:#185FA5;--border-accent:#85B7EB;--fill-accent:#378ADD;
+--bg-warning:#FAEEDA;--text-warning:#854F0B;
+--bg-danger:#FCEBEB;--text-danger:#A32D2D;--border-danger:#F09595;
+--text-success:#3B6D11;--bg-success:#EAF3DE;
+--fill-disabled:rgba(0,0,0,.14);
+--radius:8px;
+--purple-bg:#EEEDFE;--purple-tx:#3C3489;--purple-mid:#7F77DD;
+--teal-bg:#E1F5EE;--teal-tx:#085041;--teal-mid:#1D9E75;
+--gray-mid:#B4B2A9;
+}
+@media (prefers-color-scheme:dark){
+:root{
+--surface-0:#1A1A19;--surface-1:#242422;--surface-2:#2E2E2B;
+--text-primary:#EDEDE8;--text-secondary:#B4B2A9;--text-muted:#888780;
+--border:rgba(255,255,255,.12);--border-strong:rgba(255,255,255,.22);
+--bg-accent:#0C447C;--text-accent:#B5D4F4;--border-accent:#378ADD;--fill-accent:#378ADD;
+--bg-warning:#633806;--text-warning:#FAC775;
+--bg-danger:#791F1F;--text-danger:#F7C1C1;--border-danger:#E24B4A;
+--text-success:#C0DD97;--bg-success:#27500A;
+--fill-disabled:rgba(255,255,255,.16);
+--purple-bg:#3C3489;--purple-tx:#CECBF6;
+--teal-bg:#085041;--teal-tx:#9FE1CB;
+}
+}
+*{box-sizing:border-box}
+body{margin:0;padding:2.5rem 1.25rem 4rem;background:var(--surface-0);color:var(--text-primary);
+font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+font-size:16px;line-height:1.7;-webkit-font-smoothing:antialiased}
+.wrap{max-width:760px;margin:0 auto}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}
+.sub{font-size:13px;color:var(--text-muted);margin:0 0 2.5rem}
+.cap{font-size:12px;color:var(--text-muted);margin:0 0 6px}
+.card{background:var(--surface-2);border:.5px solid var(--border);border-radius:12px;padding:1rem 1.25rem;margin:0 0 1.75rem}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(228px,1fr));gap:10px}
+.arm{border:.5px solid var(--border);border-radius:var(--radius);padding:11px}
+.btn{display:inline-flex;align-items:center;gap:7px;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:6px 11px;font-size:12px}
+.seg{display:flex;border:.5px solid var(--border-strong);border-radius:var(--radius);overflow:hidden;font-size:12px}
+.seg span{padding:6px 14px;color:var(--text-secondary)}
+.stage{display:grid;grid-template-columns:74px 1fr 52px;gap:5px 9px;align-items:center;font-size:11px}
+.stage .lbl{color:var(--text-secondary)}
+.stage .ms{text-align:right;font-variant-numeric:tabular-nums}
+.trk{height:5px;background:var(--surface-1);border-radius:3px;overflow:hidden}
+.trk i{display:block;height:5px;border-radius:3px}
+.foot{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--text-muted);border-top:.5px solid var(--border);margin-top:10px;padding-top:9px}
+.note{background:var(--surface-1);border-radius:var(--radius);padding:8px 10px;font-size:11.5px;color:var(--text-secondary)}
+.banner{border-radius:var(--radius);padding:10px 12px;font-size:12px}
+.grid4{display:grid;gap:8px 10px;font-size:12px;align-items:center}
+.grid4 .hd{color:var(--text-muted);font-size:11px}
+.tl{border-top:.5px solid var(--border);padding-top:8px}
+.metric{background:var(--surface-1);border-radius:var(--radius);padding:11px}
+.metric .l{font-size:11px;color:var(--text-secondary);margin-bottom:3px}
+.metric .v{font-size:21px;font-weight:500;line-height:1.2}
+.metric .s{font-size:10.5px;color:var(--text-muted);margin-top:2px}
+.illus{display:inline-block;font-size:10px;letter-spacing:.04em;background:var(--bg-warning);color:var(--text-warning);border-radius:var(--radius);padding:2px 7px;margin-left:8px;vertical-align:2px}
+.states{width:100%;border-collapse:collapse;font-size:11.5px}
+.states td{border-bottom:.5px solid var(--border);padding:7px 4px;vertical-align:top}
+.states tr:last-child td{border-bottom:0}
+.states td:first-child{width:132px;color:var(--text-primary)}
+.states td:nth-child(2){color:var(--text-secondary)}
+i.ti{vertical-align:-2px}
+hr{border:none;border-top:.5px solid var(--border);margin:2.5rem 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>AI interpreter workbench — UI wireframes</h1>
+<p class="sub">Derived from PRD.md. Every figure shown is illustrative — real values come from benchmark runs, and result cards render empty until a run exists.</p>
+
+<p class="cap">1 · default view on load — single arm, autoplay on, voice in / voice out</p>
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:.5px solid var(--border);padding-bottom:11px;margin-bottom:11px">
+    <span style="font-size:14px;font-weight:500">Interpreter workbench</span>
+    <span class="seg"><span style="background:var(--surface-1);color:var(--text-primary)">Session</span><span>Results</span></span>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+    <span class="seg"><span style="background:var(--purple-bg);color:var(--purple-tx)">Realtime</span><span>Cascade</span></span>
+    <span style="display:flex;align-items:center;gap:8px;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:6px 10px;font-size:13px">English → Spanish <i class="ti ti-chevron-down" style="font-size:15px;color:var(--text-muted)"></i></span>
+    <span style="border:.5px solid var(--border-strong);border-radius:var(--radius);padding:6px 9px;line-height:1"><i class="ti ti-arrows-exchange" style="font-size:16px;color:var(--text-secondary)"></i></span>
+    <span class="btn" style="margin-left:auto"><i class="ti ti-player-stop" style="font-size:15px;color:var(--text-secondary)"></i>Stop session</span>
+  </div>
+
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-bottom:.5px solid var(--border);padding-bottom:11px;margin-bottom:11px;font-size:11px;color:var(--text-muted)">
+    <span style="color:var(--text-success)"><i class="ti ti-microphone" style="font-size:14px"></i> mic allowed</span>
+    <span style="color:var(--text-success)"><i class="ti ti-plug-connected" style="font-size:14px"></i> connected</span>
+    <span style="display:flex;align-items:center;gap:5px">input
+      <span style="display:flex;gap:2px;align-items:flex-end;height:11px">
+        <i style="width:3px;height:4px;background:var(--teal-mid);border-radius:1px"></i>
+        <i style="width:3px;height:7px;background:var(--teal-mid);border-radius:1px"></i>
+        <i style="width:3px;height:11px;background:var(--teal-mid);border-radius:1px"></i>
+        <i style="width:3px;height:6px;background:var(--teal-mid);border-radius:1px"></i>
+        <i style="width:3px;height:3px;background:var(--gray-mid);border-radius:1px"></i>
+      </span>
+    </span>
+    <span>listening</span>
+    <span style="margin-left:auto">02:14 · autoplay on</span>
+  </div>
+
+  <div class="row" style="margin-bottom:11px">
+    <div style="background:var(--surface-1);border-radius:var(--radius);padding:11px 12px">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">Source · English</div>
+      <div style="font-size:13px;line-height:1.6">I need to schedule an appointment for next Tuesday.</div>
+    </div>
+    <div style="background:var(--surface-1);border-radius:var(--radius);padding:11px 12px">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">Target · Spanish</div>
+      <div style="font-size:13px;line-height:1.6">Necesito programar una cita para el próximo martes.</div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-top:5px"><i class="ti ti-volume" style="font-size:14px"></i> playing</div>
+    </div>
+  </div>
+
+  <div style="border-top:.5px solid var(--border);padding-top:11px">
+    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:9px"><span style="color:var(--text-secondary)">Latency — last utterance <span class="illus">illustrative</span></span><span style="font-weight:500">980 ms</span></div>
+    <div class="stage">
+      <span class="lbl">endpointing</span><span class="trk"><i style="width:51%;background:var(--gray-mid)"></i></span><span class="ms">500 ms</span>
+      <span class="lbl">model</span><span class="trk"><i style="width:48%;background:var(--purple-mid)"></i></span><span class="ms">471 ms</span>
+      <span class="lbl">queue</span><span class="trk"><i style="width:1%;background:var(--purple-mid)"></i></span><span class="ms">9 ms</span>
+    </div>
+    <div class="note" style="margin-top:9px"><i class="ti ti-lock" style="font-size:14px"></i> model interval is opaque — speech recognition, translation and voice happen inside one model</div>
+    <div class="note" style="margin-top:7px"><i class="ti ti-alert-triangle" style="font-size:14px"></i> source transcript comes from a parallel recognizer, not from the model itself</div>
+  </div>
+  <div class="foot"><span>19 utterances</span><span>p50 1.02 s</span><span>p95 1.31 s</span><span>session $0.29</span><span style="margin-left:auto"><i class="ti ti-columns-2" style="font-size:14px"></i> add second arm to compare</span></div>
+</div>
+
+<p class="cap">2 · comparison mode — second arm added, autoplay off, play each on demand</p>
+<div class="card">
+  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;border-bottom:.5px solid var(--border);padding-bottom:11px;margin-bottom:11px">
+    <span style="font-size:11px;color:var(--text-muted);margin-right:2px">arms</span>
+    <span style="font-size:11px;background:var(--purple-bg);color:var(--purple-tx);border-radius:var(--radius);padding:3px 8px">Realtime <i class="ti ti-x" style="font-size:12px"></i></span>
+    <span style="font-size:11px;background:var(--teal-bg);color:var(--teal-tx);border-radius:var(--radius);padding:3px 8px">Cascade · OpenAI <i class="ti ti-x" style="font-size:12px"></i></span>
+    <span style="font-size:11px;border:.5px dashed var(--border-strong);color:var(--text-secondary);border-radius:var(--radius);padding:3px 8px">+ cascade · best-of-breed · $0.055/min</span>
+    <span style="font-size:11px;color:var(--text-muted);margin-left:auto">autoplay off — two arms would overlap</span>
+  </div>
+
+  <div style="background:var(--surface-1);border-radius:var(--radius);padding:11px 12px;margin-bottom:11px">
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">Source · English — shared by every arm</div>
+    <div style="font-size:13px;line-height:1.6">I need to schedule an appointment for next Tuesday.</div>
+  </div>
+
+  <div class="row">
+    <div class="arm">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-size:12px;font-weight:500">Realtime</span><span style="font-size:10.5px;color:var(--text-success)"><i class="ti ti-circle-check" style="font-size:13px"></i> ready</span></div>
+      <div style="font-size:12.5px;line-height:1.55;min-height:52px">Necesito programar una cita para el próximo martes.</div>
+      <div class="btn" style="display:flex;margin:8px 0"><i class="ti ti-player-play" style="font-size:15px;color:var(--text-secondary)"></i>play<span style="font-size:11px;color:var(--text-muted);margin-left:auto">2.1 s</span></div>
+      <div class="stage" style="grid-template-columns:66px 1fr 50px">
+        <span class="lbl">endpointing</span><span class="trk"><i style="width:51%;background:var(--gray-mid)"></i></span><span class="ms">500 ms</span>
+        <span class="lbl">model</span><span class="trk"><i style="width:48%;background:var(--purple-mid)"></i></span><span class="ms">471 ms</span>
+        <span class="lbl">queue</span><span class="trk"><i style="width:1%;background:var(--purple-mid)"></i></span><span class="ms">9 ms</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;border-top:.5px solid var(--border);margin-top:9px;padding-top:8px"><span style="color:var(--text-secondary)">total 980 ms</span><span style="color:var(--text-secondary)">$0.140/min</span></div>
+      <div style="font-size:10.5px;color:var(--text-muted);margin-top:4px">3 intervals · 1 opaque</div>
+    </div>
+    <div class="arm">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-size:12px;font-weight:500">Cascade · OpenAI</span><span style="font-size:10.5px;color:var(--text-success)"><i class="ti ti-circle-check" style="font-size:13px"></i> ready</span></div>
+      <div style="font-size:12.5px;line-height:1.55;min-height:52px">Necesito programar una cita para el próximo martes.</div>
+      <div class="btn" style="display:flex;margin:8px 0"><i class="ti ti-player-play" style="font-size:15px;color:var(--text-secondary)"></i>play<span style="font-size:11px;color:var(--text-muted);margin-left:auto">2.4 s</span></div>
+      <div class="stage" style="grid-template-columns:66px 1fr 50px">
+        <span class="lbl">endpointing</span><span class="trk"><i style="width:48%;background:var(--gray-mid)"></i></span><span class="ms">500 ms</span>
+        <span class="lbl">stt</span><span class="trk"><i style="width:4%;background:var(--teal-mid)"></i></span><span class="ms">42 ms</span>
+        <span class="lbl">mt</span><span class="trk"><i style="width:29%;background:var(--teal-mid)"></i></span><span class="ms">298 ms</span>
+        <span class="lbl">tts</span><span class="trk"><i style="width:19%;background:var(--teal-mid)"></i></span><span class="ms">201 ms</span>
+        <span class="lbl">queue</span><span class="trk"><i style="width:1%;background:var(--teal-mid)"></i></span><span class="ms">12 ms</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;border-top:.5px solid var(--border);margin-top:9px;padding-top:8px"><span style="color:var(--text-secondary)">total 1053 ms</span><span style="color:var(--text-secondary)">$0.021/min</span></div>
+      <div style="font-size:10.5px;color:var(--text-muted);margin-top:4px">5 intervals · all visible</div>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:8px;align-items:center;border-top:.5px solid var(--border);margin-top:11px;padding-top:11px">
+    <span class="btn"><i class="ti ti-eye-off" style="font-size:15px"></i>compare blind</span>
+    <span style="font-size:11px;color:var(--text-muted);margin-left:auto">utterance 19 · both arms succeeded</span>
+  </div>
+</div>
+
+<p class="cap">3 · session lifecycle — every state has a screen</p>
+<div class="card">
+  <table class="states">
+    <tr><td>idle</td><td>Start microphone button · no connection</td></tr>
+    <tr><td>requesting permission</td><td>browser prompt pending · cancel available</td></tr>
+    <tr><td>permission denied</td><td>recovery instructions · retry</td></tr>
+    <tr><td>listening</td><td>input level meter · elapsed timer · Stop session</td></tr>
+    <tr><td>processing</td><td>per-arm in-flight state · stage timings filling live</td></tr>
+    <tr><td>ready / playing</td><td>transcripts · labelled timings · playback controls</td></tr>
+    <tr><td>switch queued</td><td>banner naming pending mode or language pair</td></tr>
+    <tr><td>reconnecting</td><td>attempt count · transcript history preserved</td></tr>
+    <tr><td>disconnected</td><td>reason · Reconnect · history intact</td></tr>
+    <tr><td>stopping → stopped</td><td>final utterance flushed · session summary · Start new session</td></tr>
+  </table>
+</div>
+
+<p class="cap">4 · state banners and idle screen</p>
+<div style="display:grid;gap:8px;margin:0 0 1.75rem">
+  <div style="border:.5px solid var(--border);border-radius:var(--radius);padding:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--surface-2)">
+    <span class="btn" style="border-color:var(--border-accent);background:var(--bg-accent);color:var(--text-accent)"><i class="ti ti-microphone" style="font-size:15px"></i>Start microphone</span>
+    <span style="font-size:11.5px;color:var(--text-muted)">idle · English → Spanish · Realtime · autoplay on</span>
+  </div>
+  <div class="banner" style="background:var(--bg-warning);color:var(--text-warning)"><i class="ti ti-clock" style="font-size:15px"></i> switching to Cascade after this sentence finishes</div>
+  <div class="banner" style="background:var(--bg-warning);color:var(--text-warning)"><i class="ti ti-refresh" style="font-size:15px"></i> reconnecting — attempt 2 of 5 · transcript preserved</div>
+  <div class="banner" style="background:var(--bg-danger);color:var(--text-danger)"><i class="ti ti-alert-circle" style="font-size:15px"></i> cascade · mt stage timed out for this utterance — session still running</div>
+  <div class="banner" style="background:var(--bg-danger);color:var(--text-danger)"><i class="ti ti-microphone-off" style="font-size:15px"></i> microphone access is blocked. allow it in your browser settings, then retry</div>
+  <div class="banner" style="background:var(--bg-success);color:var(--text-success)"><i class="ti ti-circle-check" style="font-size:15px"></i> session stopped · 5:02 · 32 utterances · 0 dropped · $0.71</div>
+</div>
+
+<p class="cap">5 · blind compare — identity hidden until you submit</p>
+<div class="card">
+  <div class="row" style="margin-bottom:11px">
+    <div class="arm">
+      <div style="font-size:12px;font-weight:500;margin-bottom:9px">Sample A</div>
+      <div class="btn" style="display:flex;margin-bottom:9px"><i class="ti ti-player-play" style="font-size:15px;color:var(--text-secondary)"></i>play</div>
+      <div style="display:flex;gap:5px">
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">1</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">2</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">3</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-accent);border-radius:var(--radius);padding:5px 0;font-size:11px;background:var(--bg-accent);color:var(--text-accent)">4</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">5</span>
+      </div>
+    </div>
+    <div class="arm">
+      <div style="font-size:12px;font-weight:500;margin-bottom:9px">Sample B</div>
+      <div class="btn" style="display:flex;margin-bottom:9px"><i class="ti ti-player-play" style="font-size:15px;color:var(--text-secondary)"></i>play</div>
+      <div style="display:flex;gap:5px">
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">1</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">2</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">3</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">4</span>
+        <span style="flex:1;text-align:center;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:5px 0;font-size:11px">5</span>
+      </div>
+    </div>
+  </div>
+  <div style="font-size:11px;color:var(--text-muted)">rate fluency 1–5 for each · arm identity revealed after you submit · scores append to the run ledger</div>
+</div>
+
+<hr>
+
+<p class="cap">6 · results — empty state, before any run exists</p>
+<div class="card" style="text-align:center;padding:2rem 1.25rem">
+  <i class="ti ti-chart-dots" style="font-size:24px;color:var(--text-muted)"></i>
+  <div style="font-size:13px;margin-top:8px">No runs recorded</div>
+  <div style="font-size:11.5px;color:var(--text-muted);margin-top:3px;margin-bottom:12px">Run a benchmark sweep to populate experiment 1</div>
+  <span class="btn">Run sweep</span>
+</div>
+
+<p class="cap">7 · results — experiment 1 · track 1 of 3, vendor held constant</p>
+<div class="card">
+  <div style="font-size:14px;font-weight:500;margin-bottom:4px">Does the architecture itself cost latency?<span class="illus">illustrative</span></div>
+  <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:12px">EN → ES · 12 utterances × 5 runs · endpointing pinned 500 ms · turn-final trigger · corpus v1 · run 2026-08-05</div>
+  <div class="grid4" style="grid-template-columns:1.3fr 1fr 1fr .9fr">
+    <span class="hd">metric</span><span class="hd">realtime</span><span class="hd">cascade · OpenAI</span><span class="hd" style="text-align:right">delta</span>
+    <span class="tl" style="color:var(--text-secondary)">p50 latency</span><span class="tl">1.02 s</span><span class="tl">1.06 s</span><span class="tl" style="text-align:right;color:var(--text-secondary)">+40 ms</span>
+    <span style="color:var(--text-secondary)">p95 latency</span><span>1.31 s</span><span>1.28 s</span><span style="text-align:right;color:var(--text-success)">−30 ms</span>
+    <span style="color:var(--text-secondary)">cost / min</span><span>$0.140</span><span>$0.021</span><span style="text-align:right;color:var(--text-success)">−85%</span>
+    <span style="color:var(--text-secondary)">word error rate</span><span>4.2% <span style="font-size:10px;color:var(--text-muted)">sidecar</span></span><span>3.8%</span><span style="text-align:right;color:var(--text-muted)">n/a</span>
+    <span style="color:var(--text-secondary)">adequacy 1–5</span><span>4.6</span><span>4.4</span><span style="text-align:right;color:var(--text-secondary)">−0.2</span>
+    <span style="color:var(--text-secondary)">fluency 1–5</span><span>4.7</span><span>4.2</span><span style="text-align:right;color:var(--text-secondary)">−0.5</span>
+    <span style="color:var(--text-secondary)">observable intervals</span><span>3 · 1 opaque</span><span>5 · 0 opaque</span><span style="text-align:right;color:var(--text-success)">+2</span>
+  </div>
+  <div class="note" style="margin-top:12px">latency is a wash. cost is not.</div>
+</div>
+
+<p class="cap">8 · results — experiment 2 · track 2 of 3, architecture held constant</p>
+<div class="card">
+  <div style="font-size:14px;font-weight:500;margin-bottom:4px">What does swapping providers buy?<span class="illus">illustrative</span></div>
+  <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:12px">translation model held constant · only speech-to-text and voice differ · not pooled with track 1</div>
+  <div class="grid4" style="grid-template-columns:1.3fr 1fr 1fr .9fr">
+    <span class="hd">metric</span><span class="hd">cascade · OpenAI</span><span class="hd">cascade · best-of-breed</span><span class="hd" style="text-align:right">delta</span>
+    <span class="tl" style="color:var(--text-secondary)">p50 latency</span><span class="tl">1.06 s</span><span class="tl">0.91 s</span><span class="tl" style="text-align:right;color:var(--text-success)">−150 ms</span>
+    <span style="color:var(--text-secondary)">cost / min</span><span>$0.021</span><span>$0.055</span><span style="text-align:right;color:var(--text-danger)">+162%</span>
+    <span style="color:var(--text-secondary)">word error rate</span><span>3.8%</span><span>2.1%</span><span style="text-align:right;color:var(--text-success)">−45%</span>
+    <span style="color:var(--text-secondary)">fluency 1–5</span><span>4.2</span><span>4.6</span><span style="text-align:right;color:var(--text-success)">+0.4</span>
+  </div>
+  <div class="note" style="margin-top:12px">cascade is not one point — it's a curve you can move along</div>
+</div>
+
+<p class="cap">9 · results — cost over time, per arm</p>
+<div class="card">
+  <div style="font-size:14px;font-weight:500;margin-bottom:4px">What changes when the conversation keeps going?<span class="illus">illustrative</span></div>
+  <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:13px">5 min continuous · single arm, autoplay on · corpus loop · 32 utterances · run once per arm</div>
+  <div class="grid4" style="grid-template-columns:1.4fr 1fr 1fr .75fr">
+    <span class="hd">metric</span><span class="hd">realtime</span><span class="hd">cascade · OpenAI</span><span class="hd" style="text-align:right">delta</span>
+    <span class="tl" style="color:var(--text-secondary)">utterances completed</span><span class="tl">31 / 32</span><span class="tl">32 / 32</span><span class="tl" style="text-align:right;color:var(--text-success)">+1</span>
+    <span style="color:var(--text-secondary)">disconnects</span><span>1</span><span>0</span><span style="text-align:right;color:var(--text-success)">−1</span>
+    <span style="color:var(--text-secondary)">p50 · minute 1</span><span>0.99 s</span><span>1.05 s</span><span style="text-align:right;color:var(--text-muted)">—</span>
+    <span style="color:var(--text-secondary)">p50 · minute 5</span><span>1.14 s</span><span>1.06 s</span><span style="text-align:right;color:var(--text-success)">−80 ms</span>
+    <span style="color:var(--text-secondary)">latency drift</span><span style="color:var(--text-danger)">+150 ms</span><span style="color:var(--text-success)">+10 ms</span><span style="text-align:right;color:var(--text-success)">−140 ms</span>
+    <span style="color:var(--text-secondary)">cost · minute 1</span><span>$0.09</span><span>$0.021</span><span style="text-align:right;color:var(--text-success)">−77%</span>
+    <span style="color:var(--text-secondary)">cost · minute 5</span><span style="color:var(--text-danger)">$0.31</span><span>$0.021</span><span style="text-align:right;color:var(--text-success)">−93%</span>
+    <span style="color:var(--text-secondary)">heap · start → end</span><span>48 → 61 MB</span><span>52 → 55 MB</span><span style="text-align:right;color:var(--text-success)">−10 MB</span>
+    <span style="color:var(--text-secondary)">context lost on drop</span><span style="color:var(--text-danger)">yes</span><span style="color:var(--text-success)">n/a</span><span style="text-align:right;color:var(--text-muted)">—</span>
+  </div>
+  <div class="note" style="margin-top:13px">the slope belongs to token billing, not to voice-to-voice — gpt-realtime-translate is duration-billed and flat at $0.034/min, for 13 output languages</div>
+</div>
+
+<p class="cap">10 · results — track 3 of 3, Cantonese case study, exploratory</p>
+<div class="card">
+  <div style="font-size:14px;font-weight:500;margin-bottom:4px">What does provider choice actually let us reach?<span class="illus">illustrative</span></div>
+  <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:13px">coverage verified by running each pair · qualitative, single native evaluator · never pooled with tracks 1 or 2</div>
+  <div class="grid4" style="grid-template-columns:1.35fr 1fr .85fr .85fr .85fr;font-size:11.5px">
+    <span class="hd">pair</span><span class="hd">realtime</span><span class="hd">stt</span><span class="hd">mt</span><span class="hd">tts</span>
+    <span class="tl" style="color:var(--text-secondary)">English → Spanish</span><span class="tl" style="color:var(--text-success)">runs</span><span class="tl" style="color:var(--text-success)">ok</span><span class="tl" style="color:var(--text-success)">ok</span><span class="tl" style="color:var(--text-success)">ok</span>
+    <span style="color:var(--text-secondary)">Spanish → English</span><span style="color:var(--text-success)">runs</span><span style="color:var(--text-success)">ok</span><span style="color:var(--text-success)">ok</span><span style="color:var(--text-success)">ok</span>
+    <span style="color:var(--text-secondary)">English → Cantonese</span><span style="color:var(--text-danger)">not listed</span><span style="color:var(--text-muted)">—</span><span style="color:var(--text-success)">ok</span><span style="color:var(--text-warning)">verify</span>
+    <span style="color:var(--text-secondary)">Cantonese → English</span><span style="color:var(--text-danger)">not listed</span><span style="color:var(--text-success)">ok</span><span style="color:var(--text-success)">ok</span><span style="color:var(--text-success)">ok</span>
+  </div>
+  <div style="background:var(--surface-1);border-radius:var(--radius);padding:11px 12px;margin-top:13px">
+    <div style="font-size:11.5px;font-weight:500;margin-bottom:5px">Observation · English → Cantonese on realtime</div>
+    <div style="font-size:11.5px;color:var(--text-secondary);line-height:1.55">Produced fluent, confident audio. The transcript read correctly. A native speaker identified the pronunciation as Mandarin, not Cantonese. No automated metric in the harness detected this.</div>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px">
+    <div class="metric"><div class="l">add a pair providers cover</div><div class="v">6 min</div><div class="s">commit a4f21c · +11 lines, config only</div></div>
+    <div class="metric"><div class="l">add a new provider</div><div class="v">1h 48m</div><div class="s">commit 9d0e77 · one adapter, contract suite passed unchanged</div></div>
+    <div class="metric"><div class="l">add a pair to realtime</div><div class="v">n/a</div><div class="s">no mechanism exists at any price</div></div>
+  </div>
+</div>
+
+<p class="cap">11 · results index — one ledger beneath every view</p>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px">
+  <div class="card" style="margin:0">
+    <div style="font-size:10.5px;color:var(--text-muted);margin-bottom:4px">track 1 · vendor held constant</div>
+    <div style="font-size:13px;font-weight:500;margin-bottom:7px">Does the architecture itself cost latency?</div>
+    <div style="font-size:11.5px;color:var(--text-secondary);line-height:1.6">p50 · p95 · cost/min · WER · adequacy · fluency · observable intervals</div>
+    <div class="note" style="margin-top:9px">latency is a wash. cost is not.</div>
+  </div>
+  <div class="card" style="margin:0">
+    <div style="font-size:10.5px;color:var(--text-muted);margin-bottom:4px">track 2 · architecture held constant</div>
+    <div style="font-size:13px;font-weight:500;margin-bottom:7px">What does swapping providers buy?</div>
+    <div style="font-size:11.5px;color:var(--text-secondary);line-height:1.6">p50 · cost/min · WER · fluency, translation held constant</div>
+    <div class="note" style="margin-top:9px">cascade is a curve, not a point</div>
+  </div>
+  <div class="card" style="margin:0">
+    <div style="font-size:10.5px;color:var(--text-muted);margin-bottom:4px">track 1 · extended along time</div>
+    <div style="font-size:13px;font-weight:500;margin-bottom:7px">What changes as the conversation continues?</div>
+    <div style="font-size:11.5px;color:var(--text-secondary);line-height:1.6">completion · disconnects · latency drift · cost slope · heap · context loss</div>
+    <div class="note" style="margin-top:9px">the slope belongs to billing, not to architecture</div>
+  </div>
+  <div class="card" style="margin:0">
+    <div style="font-size:10.5px;color:var(--text-muted);margin-bottom:4px">track 3 · exploratory case study</div>
+    <div style="font-size:13px;font-weight:500;margin-bottom:7px">What does provider choice let us reach?</div>
+    <div style="font-size:11.5px;color:var(--text-secondary);line-height:1.6">coverage by stage · observation notes · time-to-add with commit hashes</div>
+    <div class="note" style="margin-top:9px">flexibility is not coverage</div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>

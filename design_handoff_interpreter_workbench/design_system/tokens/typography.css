@@ -1,0 +1,9 @@
+:root{
+--font-sans:"Geist",system-ui,-apple-system,sans-serif; --font-mono:"Geist Mono",ui-monospace,monospace;
+--text-xs:11px; --text-sm:12px; --text-base:13px; --text-md:14px; --text-lg:16px; --text-xl:20px; --text-2xl:24px; --text-kpi:28px;
+--weight-regular:400; --weight-medium:500; --weight-semibold:600; --weight-bold:700;
+--leading-tight:1.2; --leading-normal:1.5; --tracking-heading:-0.01em;
+}
+body{margin:0;font-family:var(--font-sans);font-size:var(--text-base);color:var(--text-body);background:var(--surface-app);-webkit-font-smoothing:antialiased}
+a{color:var(--text-link);text-decoration:none}
+a:hover{color:var(--accent-strong);text-decoration:underline}

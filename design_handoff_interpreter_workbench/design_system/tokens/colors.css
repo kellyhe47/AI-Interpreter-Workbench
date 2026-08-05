@@ -1,0 +1,13 @@
+:root{
+/* base neutrals (warm-tinted) */
+--gray-0:#FFFFFF; --gray-25:#FAFAF9; --gray-50:#F5F5F4; --gray-100:#EEEDEC; --gray-200:#E7E5E4; --gray-300:#D6D3D1; --gray-400:#A8A29E; --gray-500:#78716C; --gray-600:#57534E; --gray-700:#44403C; --gray-800:#292524; --ink:#18181B;
+/* accent — the only pop of color */
+--accent:oklch(54% 0.19 262); --accent-strong:oklch(48% 0.19 262); --accent-soft:oklch(95% 0.03 262); --accent-ring:oklch(54% 0.19 262 / .35);
+/* semantic status */
+--positive:oklch(55% 0.14 155); --positive-soft:oklch(95% 0.04 155); --negative:oklch(56% 0.19 25); --negative-soft:oklch(95% 0.03 25); --warning:oklch(70% 0.15 75); --warning-soft:oklch(96% 0.05 85);
+/* semantic aliases */
+--surface-app:var(--gray-25); --surface-card:var(--gray-0); --surface-sunken:var(--gray-50); --surface-hover:var(--gray-50); --surface-selected:var(--gray-100);
+--text-body:var(--ink); --text-secondary:var(--gray-500); --text-muted:var(--gray-400); --text-inverse:#FFFFFF; --text-link:var(--accent);
+--border-default:var(--gray-200); --border-strong:var(--gray-300);
+--btn-primary-bg:var(--ink); --btn-primary-bg-hover:var(--gray-800); --btn-accent-bg:var(--accent); --btn-accent-bg-hover:var(--accent-strong);
+}
