@@ -65,9 +65,13 @@
  */
 
 import type { MtProvider, SttProvider, TtsProvider } from '../../core/types';
+import { TimeoutError } from '../../core/types';
 import type { CascadeTimestamps, UtteranceRecord } from '../../core/timing';
 import type { CascadeStage } from '../../core/protocol';
+import { SAMPLE_RATE } from '../../core/protocol';
 import type { TimingMark, TimingSink } from '../../core/decorators/index';
+import { withRetry, withTimeout, withTiming } from '../../core/decorators/index';
+import { createMt, createStt, createTts } from '../../core/registry';
 
 export interface CascadeProviders {
   stt: SttProvider;
@@ -105,18 +109,263 @@ export interface RunCascadeOptions {
 }
 
 /**
+ * Minimal single-consumer async push-queue (channel). `push` enqueues,
+ * `close` ends the stream after queued items drain. Used for the MT->TTS
+ * token bridge and by the WS layer for the socket audio source.
+ */
+export interface PushChannel<T> {
+  push(value: T): void;
+  close(): void;
+  iterable: AsyncIterable<T>;
+}
+
+export function pushChannel<T>(): PushChannel<T> {
+  const items: T[] = [];
+  let closed = false;
+  let wake: (() => void) | undefined;
+  const kick = (): void => {
+    const w = wake;
+    wake = undefined;
+    w?.();
+  };
+  return {
+    push(value: T): void {
+      if (closed) return;
+      items.push(value);
+      kick();
+    },
+    close(): void {
+      closed = true;
+      kick();
+    },
+    iterable: {
+      async *[Symbol.asyncIterator](): AsyncGenerator<T, void, void> {
+        for (;;) {
+          if (items.length > 0) {
+            yield items.shift()!;
+            continue;
+          }
+          if (closed) return;
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+        }
+      },
+    },
+  };
+}
+
+/** The exact per-stage error copy (see FAILURE ISOLATION above). */
+function stageErrorMessage(stage: CascadeStage, err: unknown): string {
+  const reason = err instanceof TimeoutError ? 'timed out' : 'failed';
+  return `${stage} stage ${reason} for this utterance — session still running`;
+}
+
+/**
  * Run the cascade pipeline over `source` until the source is exhausted or
  * `opts.signal` aborts. See the module doc-comment for the full contract.
  */
-export function runCascade(
+export async function* runCascade(
   source: AsyncIterable<Int16Array>,
   providers: CascadeProviders,
   opts?: RunCascadeOptions,
 ): AsyncGenerator<CascadeEvent, void, void> {
-  void source;
-  void providers;
-  void opts;
-  throw new Error('not implemented');
+  const sessionSignal = opts?.signal;
+  const shared = source[Symbol.asyncIterator]();
+  let uttCounter = 0;
+
+  while (!sessionSignal?.aborted) {
+    // Peek one chunk; source exhaustion ends the session cleanly.
+    const peeked = await shared.next();
+    if (peeked.done) return;
+    if (sessionSignal?.aborted) return;
+
+    // Per-utterance abort: fires on session abort AND on failure teardown.
+    const uttAc = new AbortController();
+    const onSessionAbort = (): void => uttAc.abort();
+    sessionSignal?.addEventListener('abort', onSessionAbort, { once: true });
+
+    try {
+      // ---- STT phase -----------------------------------------------------
+      const peekedChunk = peeked.value;
+      const turnAudio: AsyncGenerator<Int16Array, void, void> = (async function* () {
+        yield peekedChunk;
+        for (;;) {
+          const r = await shared.next();
+          if (r.done) return;
+          yield r.value;
+        }
+      })();
+
+      const sourcePartials: string[] = [];
+      let sourceFinal: string | undefined;
+      let sttError: unknown;
+      let sttFailed = false;
+
+      const sttStream = providers.stt.transcribe(turnAudio, { signal: uttAc.signal });
+      try {
+        for await (const ev of sttStream) {
+          if (uttAc.signal.aborted) break;
+          if (ev.type === 'partial') {
+            sourcePartials.push(ev.text);
+            yield { type: 'stt.partial', utt: uttCounter, text: ev.text };
+          } else {
+            sourceFinal = ev.text;
+            break; // TURN-final ends the transcribe call
+          }
+        }
+      } catch (err) {
+        sttError = err;
+        sttFailed = true;
+      } finally {
+        await sttStream.return(undefined).catch(() => {});
+        await turnAudio.return(undefined).catch(() => {});
+      }
+
+      if (sessionSignal?.aborted) return;
+      if (sttFailed) {
+        yield {
+          type: 'error',
+          utt: uttCounter,
+          stage: 'stt',
+          message: stageErrorMessage('stt', sttError),
+        };
+        continue; // abandon this turn; session loop continues
+      }
+      if (sourceFinal === undefined) continue; // empty turn: consumes no utt
+
+      // ---- utt assigned at TURN-final ------------------------------------
+      const utt = uttCounter;
+      uttCounter += 1;
+      const timings: CascadeTimestamps = {};
+      const tFinal = Date.now();
+      timings.vad_fired = tFinal; // semantically weak; see doc-comment
+      timings.stt_final = tFinal;
+      const finalText = sourceFinal;
+      yield { type: 'stt.final', utt, text: finalText };
+
+      // ---- MT + TTS phase (streaming bridge, merged emission) ------------
+      const bridge = pushChannel<string>();
+      const queue: CascadeEvent[] = [];
+      let wake: (() => void) | undefined;
+      const kick = (): void => {
+        const w = wake;
+        wake = undefined;
+        w?.();
+      };
+      const push = (e: CascadeEvent): void => {
+        if (!uttAc.signal.aborted) queue.push(e);
+        kick();
+      };
+
+      let failure: { stage: CascadeStage; err: unknown } | undefined;
+      let settledCount = 0;
+      const targetPartials: string[] = [];
+      let totalSamples = 0;
+
+      const mtStream = providers.mt.translate(finalText, { signal: uttAc.signal });
+      const ttsStream = providers.tts.synthesize(bridge.iterable, { signal: uttAc.signal });
+
+      const mtTask = (async () => {
+        try {
+          for await (const token of mtStream) {
+            if (uttAc.signal.aborted) return;
+            if (timings.mt_first_token === undefined) timings.mt_first_token = Date.now();
+            targetPartials.push(token);
+            bridge.push(token); // into TTS before MT completes
+            push({ type: 'mt.delta', utt, text: token });
+          }
+          if (!uttAc.signal.aborted) {
+            push({ type: 'mt.final', utt, text: targetPartials.join('') });
+          }
+        } catch (err) {
+          failure ??= { stage: 'mt', err };
+          uttAc.abort(); // tear down the utterance's other stages
+        } finally {
+          bridge.close();
+          settledCount += 1;
+          kick();
+        }
+      })();
+
+      const ttsTask = (async () => {
+        try {
+          for await (const pcm of ttsStream) {
+            if (uttAc.signal.aborted) return;
+            if (timings.tts_first_byte === undefined) timings.tts_first_byte = Date.now();
+            timings.audio_queued = Date.now(); // updated per chunk => last chunk wins
+            totalSamples += pcm.length;
+            push({ type: 'tts.audio', utt, pcm });
+          }
+        } catch (err) {
+          failure ??= { stage: 'tts', err };
+          uttAc.abort();
+        } finally {
+          settledCount += 1;
+          kick();
+        }
+      })();
+
+      // Drain merged events in arrival order until both stage tasks settle.
+      for (;;) {
+        if (sessionSignal?.aborted) {
+          uttAc.abort();
+          await Promise.allSettled([mtTask, ttsTask]); // finally blocks run
+          return; // clean end, no further events
+        }
+        if (queue.length > 0) {
+          yield queue.shift()!;
+          continue;
+        }
+        if (settledCount === 2) break;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+      await Promise.allSettled([mtTask, ttsTask]);
+      if (sessionSignal?.aborted) return;
+
+      if (failure) {
+        yield {
+          type: 'error',
+          utt,
+          stage: failure.stage,
+          message: stageErrorMessage(failure.stage, failure.err),
+        };
+        continue; // utterance abandoned; session loop continues
+      }
+
+      opts?.onTimings?.(utt, timings);
+      const session = opts?.session;
+      const record: UtteranceRecord = {
+        id: `utt-${utt}`,
+        arm: session?.arm ?? '',
+        mode: 'cascade',
+        languagePair: session?.languagePair ?? '',
+        direction: session?.direction ?? '',
+        sourcePartials,
+        sourceFinal: finalText,
+        targetPartials,
+        targetFinal: targetPartials.join(''),
+        audioState: 'queued',
+        audioDurationMs: (totalSamples / SAMPLE_RATE) * 1000,
+        timings,
+        speechEndSource: 'vad',
+        providers: {
+          stt: providers.stt.name,
+          mt: providers.mt.name,
+          tts: providers.tts.name,
+        },
+        costUnits: 0,
+        corpusId: session?.corpusId ?? '',
+        runId: session?.runId ?? '',
+      };
+      yield { type: 'utterance.complete', utt, record };
+    } finally {
+      uttAc.abort(); // close any in-flight stage generators for this turn
+      sessionSignal?.removeEventListener('abort', onSessionAbort);
+    }
+  }
 }
 
 /** Config for buildPipeline: provider names resolved via the registry. */
@@ -151,6 +400,26 @@ export interface Pipeline {
  * registry's Error (message names the unknown provider).
  */
 export function buildPipeline(config: PipelineConfig): Pipeline {
-  void config;
-  throw new Error('not implemented');
+  const marks: TimingMark[] = [];
+  const sink: TimingSink = (mark) => {
+    marks.push(mark);
+  };
+
+  const decorate = <P extends SttProvider | MtProvider | TtsProvider>(
+    stage: CascadeStage,
+    provider: P,
+  ): P => {
+    let out = provider;
+    if (config.timeoutMs !== undefined) out = withTimeout(out, config.timeoutMs);
+    if (config.retry !== undefined) out = withRetry(out, config.retry);
+    return withTiming(stage, out, sink);
+  };
+
+  const providers: CascadeProviders = {
+    stt: decorate('stt', createStt(config.providers.stt, config.providerOptions?.stt)),
+    mt: decorate('mt', createMt(config.providers.mt, config.providerOptions?.mt)),
+    tts: decorate('tts', createTts(config.providers.tts, config.providerOptions?.tts)),
+  };
+
+  return { providers, marks, sink };
 }

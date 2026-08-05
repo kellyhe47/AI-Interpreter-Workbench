@@ -35,8 +35,18 @@
  */
 
 import type { Server as HttpServer } from 'node:http';
+import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
-import type { CascadeEvent, CascadeProviders, RunCascadeOptions } from './cascade/orchestrator';
+import { encodeTtsFrame } from '../core/protocol';
+import type { ClientToServerMessage } from '../core/protocol';
+import { createMt, createStt, createTts } from '../core/registry';
+import { pushChannel, runCascade } from './cascade/orchestrator';
+import type {
+  CascadeEvent,
+  CascadeProviders,
+  PushChannel,
+  RunCascadeOptions,
+} from './cascade/orchestrator';
 
 /** Path the cascade WebSocket endpoint is mounted on. */
 export const CASCADE_WS_PATH = '/ws/cascade';
@@ -61,8 +71,27 @@ export interface AttachCascadeWsOptions {
  * (fragments are concatenated in order). Throws on odd byte length.
  */
 export function bufferToPcm(data: Buffer | ArrayBuffer | Buffer[]): Int16Array {
-  void data;
-  throw new Error('not implemented');
+  let buf: Buffer;
+  if (Array.isArray(data)) buf = Buffer.concat(data);
+  else if (data instanceof ArrayBuffer) buf = Buffer.from(data);
+  else buf = data;
+
+  if (buf.byteLength % 2 !== 0) {
+    throw new Error(`PCM16 payload must be whole Int16 samples, got ${buf.byteLength} bytes`);
+  }
+  const pcm = new Int16Array(buf.byteLength / 2);
+  // Byte-exact copy honoring the Buffer's byteOffset into its pool.
+  new Uint8Array(pcm.buffer).set(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
+  return pcm;
+}
+
+interface SocketSession {
+  audio: PushChannel<Int16Array>;
+  ac: AbortController;
+}
+
+function sendJson(ws: WebSocket, msg: unknown): void {
+  if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
 /**
@@ -73,7 +102,101 @@ export function attachCascadeWs(
   server: HttpServer,
   opts?: AttachCascadeWsOptions,
 ): WebSocketServer {
-  void server;
-  void opts;
-  throw new Error('not implemented');
+  const createOrchestrator = opts?.createOrchestrator ?? runCascade;
+  const wss = new WebSocketServer({ server, path: CASCADE_WS_PATH });
+
+  wss.on('connection', (ws: WebSocket) => {
+    let session: SocketSession | null = null;
+
+    const endSession = (): void => {
+      if (!session) return;
+      session.audio.close();
+      session.ac.abort();
+      session = null;
+    };
+
+    ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+      if (isBinary) {
+        // Binary frames before session.start are ignored.
+        if (!session) return;
+        try {
+          session.audio.push(bufferToPcm(data));
+        } catch (err) {
+          sendJson(ws, { type: 'error', message: (err as Error).message });
+        }
+        return;
+      }
+
+      let msg: ClientToServerMessage;
+      try {
+        msg = JSON.parse(
+          Array.isArray(data)
+            ? Buffer.concat(data).toString('utf8')
+            : Buffer.from(data as ArrayBuffer).toString('utf8'),
+        ) as ClientToServerMessage;
+      } catch {
+        sendJson(ws, { type: 'error', message: 'invalid JSON message' });
+        return;
+      }
+
+      if (msg.type === 'session.start') {
+        let providers: CascadeProviders;
+        try {
+          providers = {
+            stt: createStt(msg.providers.stt),
+            mt: createMt(msg.providers.mt),
+            tts: createTts(msg.providers.tts),
+          };
+        } catch (err) {
+          // Unknown provider: report and keep the socket open for a retry.
+          sendJson(ws, { type: 'error', message: (err as Error).message });
+          return;
+        }
+
+        endSession(); // replace any previous session on this socket
+        const audio = pushChannel<Int16Array>();
+        const ac = new AbortController();
+        const current: SocketSession = { audio, ac };
+        session = current;
+
+        void (async () => {
+          try {
+            const events = createOrchestrator(audio.iterable, providers, {
+              signal: ac.signal,
+              session: { languagePair: msg.languagePair, direction: msg.direction },
+            });
+            for await (const ev of events) {
+              if (ws.readyState !== ws.OPEN) break;
+              if (ev.type === 'tts.audio') {
+                ws.send(encodeTtsFrame(ev.utt, ev.pcm));
+              } else if (ev.type === 'error') {
+                sendJson(ws, { type: 'error', stage: ev.stage, message: ev.message });
+              } else {
+                sendJson(ws, ev);
+              }
+            }
+          } catch (err) {
+            sendJson(ws, { type: 'error', message: (err as Error).message });
+          } finally {
+            if (session === current) session = null;
+          }
+        })();
+        return;
+      }
+
+      if (msg.type === 'session.end') {
+        // End the audio source; orchestrator drains and finishes.
+        session?.audio.close();
+      }
+    });
+
+    ws.on('error', () => {
+      /* surfaced via close */
+    });
+    ws.on('close', () => {
+      endSession(); // abort the session promptly on socket close
+    });
+  });
+
+  return wss;
 }
