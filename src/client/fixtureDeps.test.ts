@@ -230,6 +230,96 @@ describe('Ticket 021 — fixture scripts loop until stop()', () => {
   });
 });
 
+describe('Ticket 022 — fixture arms share ONE utterance timeline', () => {
+  interface Done {
+    armId: string;
+    id: string;
+    uttIndex: number;
+    sourceFinal: string;
+    /** Faked wall-clock completion time (vi.useFakeTimers mocks Date). */
+    completedAt: number;
+  }
+
+  /** Start a fixture arm and record every completion with its wall time. */
+  async function startArm(deps: SessionDeps, id: string, sink: Done[]) {
+    const transport = deps.transportFactory(armDef(id));
+    transport.setHandlers({
+      onUtteranceComplete: (completion) => {
+        const record = completion as UtteranceRecord;
+        sink.push({
+          armId: id,
+          id: record.id,
+          uttIndex: Number(record.id.replace('utt-', '')),
+          sourceFinal: record.sourceFinal,
+          completedAt: Date.now(),
+        });
+      },
+    });
+    await transport.start(CONFIG);
+    return transport;
+  }
+
+  it('an arm started mid-session joins at the NEXT shared utterance, not index 0', async () => {
+    const deps = buildFixtureDeps({ utterancesPerLoop: 2, utteranceSpacingMs: 1500 });
+    const done: Done[] = [];
+
+    const armA = await startArm(deps, 'cascade-openai', done);
+    await vi.advanceTimersByTimeAsync(2_250); // ~1.5 utterances into the shared timeline
+    const armB = await startArm(deps, 'cascade-best', done);
+    await vi.advanceTimersByTimeAsync(4_500); // several more shared utterances
+    armA.stop();
+    armB.stop();
+
+    const bDone = done.filter((d) => d.armId === 'cascade-best');
+    expect(bDone.length).toBeGreaterThan(0);
+    const first = bDone[0]!;
+
+    // The late arm does NOT replay the script from index 0…
+    expect(first.uttIndex).toBeGreaterThan(0);
+    // …it joins the SHARED timeline: the sibling arm was concurrently on the
+    // same utterance index with the SAME source sentence.
+    const sibling = done.find((d) => d.armId === 'cascade-openai' && d.id === first.id);
+    expect(sibling).toBeDefined();
+    expect(sibling!.sourceFinal).toBe(first.sourceFinal);
+    // And it continues contiguously from its join point.
+    expect(bDone.map((d) => d.uttIndex)).toEqual(bDone.map((_, i) => first.uttIndex + i));
+  });
+
+  it('shared-timeline invariant: utterances completed by both arms carry the identical source sentence, concurrently', async () => {
+    const deps = buildFixtureDeps({ utterancesPerLoop: 3, utteranceSpacingMs: 1500 });
+    const done: Done[] = [];
+
+    const armA = await startArm(deps, 'realtime', done);
+    await vi.advanceTimersByTimeAsync(2_000); // stagger the second arm's start
+    const armB = await startArm(deps, 'cascade-openai', done);
+    await vi.advanceTimersByTimeAsync(7_000);
+    armA.stop();
+    armB.stop();
+
+    const byUtt = new Map<string, Done[]>();
+    for (const d of done) byUtt.set(d.id, [...(byUtt.get(d.id) ?? []), d]);
+    const shared = [...byUtt.values()].filter(
+      (group) => new Set(group.map((d) => d.armId)).size === 2,
+    );
+    expect(shared.length).toBeGreaterThanOrEqual(2);
+
+    for (const group of shared) {
+      // Same utterance index → same source sentence on every arm…
+      expect(new Set(group.map((d) => d.sourceFinal)).size).toBe(1);
+      // …and the arms are on it CONCURRENTLY — completions of one shared
+      // utterance land within a single utterance slot of each other (per-arm
+      // timings may differ, whole-utterance offsets may not).
+      const times = group.map((d) => d.completedAt);
+      expect(Math.max(...times) - Math.min(...times)).toBeLessThan(1_500);
+    }
+  });
+
+  // Ticket 022 AC3 — looping, contiguous ids, single fail-mt injection, and
+  // stop() halting are already locked above ('Ticket 021 — fixture scripts
+  // loop until stop()' and the fail-mt test) and MUST stay green alongside
+  // the shared timeline; no restatement here.
+});
+
 describe('buildFixtureDeps — capture fake', () => {
   it('grants without getUserMedia and emits synthetic levels/chunks until stopped', async () => {
     const deps = buildFixtureDeps();

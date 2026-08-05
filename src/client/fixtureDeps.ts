@@ -38,6 +38,19 @@
  *   activity on a timer until handle.stop().
  * - playbackContextFactory: silent no-op PlaybackAudioContextLike.
  * - ledger: fresh in-memory RunLedger. now: options.now ?? Date.now.
+ *
+ * TICKET 022 — ONE SHARED UTTERANCE TIMELINE per buildFixtureDeps call:
+ * in the real product every arm hears the SAME mic audio, so fixture arms
+ * must never drift onto different sentences. All transports built by one
+ * deps bag share a single timeline anchored when the FIRST arm starts:
+ * utterance k begins at anchor + k·spacing and its source sentence is
+ * SENTENCES[k % SENTENCES.length] — identical across arms (arms may differ
+ * only in per-arm timings / translation shape, mock-faithful). An arm
+ * started mid-session JOINS the shared timeline at the next shared
+ * utterance (its first utt index > 0); it never replays from index 0, and
+ * its utt numbering continues contiguously from its join point. Everything
+ * else (looping, unique incrementing ids, every utterance settles, single
+ * fail-mt injection, stop() halts) is unchanged.
  * ==========================================================================
  */
 
