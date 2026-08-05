@@ -39,7 +39,9 @@ a{color:var(--text-link);text-decoration:none}a:hover{color:var(--accent-strong)
       <sc-if value="{{ isLive }}" hint-placeholder-val="{{ true }}">
         <span style="display:inline-flex;align-items:center;gap:6px"><i style="width:7px;height:7px;border-radius:99px;background:var(--accent);animation:wb-dot 1.6s infinite"></i>live</span>
       </sc-if>
-      <span style="font-family:var(--font-mono);font-size:11px">run 2026-08-05 · corpus v1</span>
+      <sc-if value="{{ onResults }}" hint-placeholder-val="{{ false }}">
+        <span style="font-family:var(--font-mono);font-size:11px">run 2026-08-05 · corpus v1</span>
+      </sc-if>
     </div>
   </div>
 
@@ -122,6 +124,27 @@ a{color:var(--text-link);text-decoration:none}a:hover{color:var(--accent-strong)
         Realtime does not list Cantonese as a supported output language — the run proceeds to observe the actual failure mode. Text may look correct while audio pronunciation is not.
       </div>
     </sc-if>
+    <sc-if value="{{ showCantoInputWarn }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+        Realtime does not document Cantonese speech input — recognition quality in this direction is unverified. The run proceeds to observe actual behavior.
+      </div>
+    </sc-if>
+    <sc-if value="{{ isDisconnected }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--negative-soft);color:var(--negative);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6"></path><path d="m15 9-6 6"></path></svg>
+        Disconnected — reconnect attempts exhausted (5 of 5) · transcript history intact
+        <button onClick="{{ reconnect }}" style="margin-left:auto;border:1px solid var(--negative);border-radius:8px;padding:5px 12px;background:none;color:var(--negative);font:500 12px var(--font-sans);cursor:pointer" style-hover="background:var(--negative-soft)">Reconnect</button>
+      </div>
+    </sc-if>
+    <sc-if value="{{ isIdle }}" hint-placeholder-val="{{ false }}">
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:56px 24px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><path d="M12 19v3"></path></svg>
+        <div style="font:600 14px var(--font-sans);margin-top:12px">No active session</div>
+        <div style="font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:4px;margin-bottom:18px">{{ langLabel }} · {{ idleModeLabel }} · autoplay on. Your browser will ask for microphone permission.</div>
+        <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" onClick="{{ startSession }}" hint-size="auto,36px">Start microphone</x-import>
+      </div>
+    </sc-if>
     <sc-if value="{{ isStopped }}" hint-placeholder-val="{{ false }}">
       <div style="display:flex;align-items:center;gap:9px;background:var(--positive-soft);color:var(--positive);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><path d="m9 11 3 3L22 4"></path></svg>
@@ -130,6 +153,7 @@ a{color:var(--text-link);text-decoration:none}a:hover{color:var(--accent-strong)
     </sc-if>
 
     <!-- arms strip (comparison mode) -->
+    <sc-if value="{{ sessionActive }}" hint-placeholder-val="{{ true }}">
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 4px">
       <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Arms</span>
       <sc-for list="{{ armChips }}" as="a" hint-placeholder-count="2">
@@ -252,6 +276,7 @@ a{color:var(--text-link);text-decoration:none}a:hover{color:var(--accent-strong)
       <span>{{ uttNum }} utterances</span><span>p50 <span style="font-family:var(--font-mono)">1.02 s</span></span><span>p95 <span style="font-family:var(--font-mono)">1.31 s</span></span><span>session <span style="font-family:var(--font-mono)">$0.29</span></span>
       <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font-size:10px;letter-spacing:.04em">figures illustrative</span>
     </div>
+    </sc-if>
   </div>
   </sc-if>
 
@@ -392,9 +417,9 @@ a{color:var(--text-link);text-decoration:none}a:hover{color:var(--accent-strong)
 class Component extends DCLogic {
   state = {
     view: this.props.defaultView ?? 'session', mode: 'realtime', langIdx: 0, reversed: false,
-    autoplay: true, arms: ['realtime'], sessionState: 'live',
-    blindOpen: false, blindRevealed: false, blindScores: {A: 0, B: 0},
-    playingArm: null, hasRuns: true,
+    autoplay: true, arms: ['realtime'], sessionState: 'idle',
+    blindOpen: false, blindRevealed: false, blindScores: {A: 0, B: 0}, blindOrder: false,
+    playingArm: null, hasRuns: false, pending: null,
   };
   renderVals() {
     const S = this.state, set = p => this.setState(p);
@@ -406,14 +431,24 @@ class Component extends DCLogic {
     const src = S.reversed ? p.tgt : p.src, tgt = S.reversed ? p.src : p.tgt;
     const canto = p.canto;
     const stopped = S.sessionState === 'stopped';
+    const idle = S.sessionState === 'idle';
+    const disconnected = S.sessionState === 'disconnected';
+    const failedState = S.sessionState === 'failed';
     const multi = S.arms.length > 1;
     const singleArm = S.arms.length === 1 && !stopped;
     const inFlight = S.sessionState === 'processing';
     const reconnecting = S.sessionState === 'reconnecting';
-    const live = !stopped && !reconnecting;
+    const live = !stopped && !reconnecting && !idle && !disconnected;
+    const active = !stopped && !idle && !disconnected;
+    const queue = (label, patch) => {
+      if (!active) { set(patch); return; }
+      clearTimeout(this._qt);
+      this.setState({pending: label});
+      this._qt = setTimeout(() => this.setState({...patch, pending: null}), 2600);
+    };
     const tab = on => `border:none;cursor:pointer;padding:7px 16px;font:inherit;color:${on ? 'var(--text-body)' : 'var(--text-secondary)'};background:${on ? 'var(--surface-selected)' : 'var(--surface-card)'}`;
     const chipStyle = on => `font:400 11.5px var(--font-sans);border:1px solid ${on ? 'var(--accent)' : 'var(--border-default)'};color:${on ? 'var(--accent)' : 'var(--text-secondary)'};background:${on ? 'var(--accent-soft)' : 'var(--surface-card)'};border-radius:99px;padding:4px 11px;cursor:pointer`;
-    const states = [['live', 'live'], ['processing', 'processing'], ['reconnecting', 'reconnecting'], ['stopped', 'stopped']];
+    const states = [['idle', 'idle'], ['live', 'live'], ['processing', 'processing'], ['failed', 'stage failed'], ['reconnecting', 'reconnecting'], ['disconnected', 'disconnected'], ['stopped', 'stopped']];
     const srcTexts = {
       English: 'I need to schedule an appointment for next Tuesday to review the test results.',
       Spanish: 'Necesito programar una cita para el próximo martes para revisar los resultados.',
@@ -431,19 +466,20 @@ class Component extends DCLogic {
       cascadeC: {name: 'Cascade · best-of-breed', stages: [['endpointing', 500, 'var(--gray-400)'], ['stt', 31, 'var(--accent)'], ['mt', 298, 'var(--accent)'], ['tts', 74, 'var(--accent)'], ['queue', 11, 'var(--accent)']], total: '914 ms', cost: '$0.055/min', note: '5 intervals · all visible', opaque: false, dur: '2.3 s'},
     };
     const activeArms = singleArm ? [S.mode === 'realtime' ? 'realtime' : 'cascadeB'] : S.arms;
+    const failKey = activeArms.includes('cascadeB') ? 'cascadeB' : activeArms[0];
     const armCards = activeArms.map(key => {
       const d = defs[key];
-      const failed = key === 'cascadeC' && S.sessionState === 'processing' && false;
-      const ready = !inFlight;
+      const failed = failedState && key === failKey;
+      const ready = !inFlight && !failed;
       const playing = S.playingArm === key;
       return {
         name: d.name,
         inFlight, failed,
-        statusStyle: `font:400 11px var(--font-sans);display:inline-flex;align-items:center;gap:5px;color:${inFlight ? 'var(--text-secondary)' : 'var(--positive)'}`,
-        statusLabel: inFlight ? 'in flight' : (playing ? 'playing' : 'ready'),
+        statusStyle: `font:400 11px var(--font-sans);display:inline-flex;align-items:center;gap:5px;color:${failed ? 'var(--negative)' : inFlight ? 'var(--text-secondary)' : 'var(--positive)'}`,
+        statusLabel: failed ? 'failed' : inFlight ? 'in flight' : (playing ? 'playing' : 'ready'),
         showText: ready,
-        targetText: canto && key === 'realtime' ? tgtTexts['Cantonese'] : tgtTexts[tgt] || '',
-        failText: '',
+        targetText: tgtTexts[tgt] || '',
+        failText: key === 'realtime' ? 'opaque failure — no stage attribution · session still running' : 'mt stage timed out for this utterance — session still running',
         showPlay: ready && !stopped,
         playing, notPlaying: !playing,
         playLabel: playing ? 'pause' : 'play',
@@ -451,7 +487,7 @@ class Component extends DCLogic {
         audioDur: d.dur,
         togglePlay: () => set({playingArm: playing ? null : key}),
         showStages: ready,
-        stages: d.stages.map(([label, ms, color]) => ({label, ms: ms + ' ms', barStyle: `display:block;height:5px;border-radius:3px;background:${color};width:${Math.max(1, Math.round(ms / 10.5))}%`})),
+        stages: (() => { const totalMs = d.stages.reduce((s, x) => s + x[1], 0); return d.stages.map(([label, ms, color]) => ({label, ms: ms + ' ms', barStyle: `display:block;height:5px;border-radius:3px;background:${color};width:${Math.max(1, Math.round(ms / totalMs * 100))}%`})); })(),
         showFoot: ready,
         total: d.total, cost: d.cost, intervalsNote: d.note,
         opaqueNote: ready && d.opaque,
@@ -464,7 +500,8 @@ class Component extends DCLogic {
       removable: multi,
       remove: () => {
         const arms = S.arms.filter(a => a !== key);
-        set({arms: arms.length ? arms : [S.mode === 'realtime' ? 'realtime' : 'cascadeB'], blindOpen: false});
+        const next = arms.length ? arms : [S.mode === 'realtime' ? 'realtime' : 'cascadeB'];
+        set({arms: next, blindOpen: false, autoplay: next.length === 1 ? true : S.autoplay});
       },
     }));
     const nextArm = !activeArms.includes('cascadeB') ? 'cascadeB' : (!activeArms.includes('realtime') ? 'realtime' : 'cascadeC');
@@ -542,27 +579,32 @@ class Component extends DCLogic {
       tabSessionStyle: tab(S.view === 'session'), tabResultsStyle: tab(S.view === 'results'),
       isLive: S.view === 'session' && live,
       stateChips: states.map(([key, label]) => ({label, select: () => set({sessionState: key, playingArm: null}), style: chipStyle(S.sessionState === key)})),
-      pickRealtime: () => set({mode: 'realtime', arms: multi ? S.arms : ['realtime']}),
-      pickCascade: () => set({mode: 'cascade', arms: multi ? S.arms : ['cascadeB']}),
+      pickRealtime: () => S.mode === 'realtime' || queue('Realtime', {mode: 'realtime', arms: multi ? S.arms : ['realtime']}),
+      pickCascade: () => S.mode === 'cascade' || queue('Cascade', {mode: 'cascade', arms: multi ? S.arms : ['cascadeB']}),
       modeRealtimeStyle: tab(S.mode === 'realtime'), modeCascadeStyle: tab(S.mode === 'cascade'),
-      cycleLang: () => set({langIdx: (S.langIdx + 1) % pairs.length, reversed: false}),
-      swapDirection: () => set({reversed: !S.reversed}),
+      cycleLang: () => { const np = pairs[(S.langIdx + 1) % pairs.length]; queue(`${np.src} → ${np.tgt}`, {langIdx: (S.langIdx + 1) % pairs.length, reversed: false}); },
+      swapDirection: () => queue(`${tgt} → ${src}`, {reversed: !S.reversed}),
       langLabel: `${src} → ${tgt}`,
+      idleModeLabel: S.mode === 'realtime' ? 'Realtime' : 'Cascade',
       langSupportStyle: `font:400 10.5px var(--font-sans);border-radius:99px;padding:3px 9px;background:${canto ? 'var(--warning-soft)' : 'var(--surface-selected)'};color:${canto ? 'oklch(45% 0.12 75)' : 'var(--text-secondary)'}`,
       langSupportLabel: p.support,
       autoplay: S.autoplay && singleArm, setAutoplay: v => set({autoplay: v}),
       startSession: () => set({sessionState: 'live'}),
-      stopSession: () => set({sessionState: 'stopped', playingArm: null}),
-      isStopped: stopped, notStopped: !stopped,
-      connStyle: `display:inline-flex;align-items:center;gap:6px;color:${reconnecting ? 'oklch(45% 0.12 75)' : 'var(--positive)'}`,
-      connLabel: reconnecting ? 'reconnecting…' : 'connected',
+      stopSession: () => set({sessionState: 'stopped', playingArm: null, pending: null}),
+      isStopped: stopped, notStopped: active,
+      isIdle: idle, sessionActive: !idle,
+      isDisconnected: disconnected,
+      reconnect: () => set({sessionState: 'live'}),
+      connStyle: `display:inline-flex;align-items:center;gap:6px;color:${reconnecting ? 'oklch(45% 0.12 75)' : (idle || disconnected || stopped) ? 'var(--text-muted)' : 'var(--positive)'}`,
+      connLabel: reconnecting ? 'reconnecting…' : disconnected ? 'disconnected' : (idle || stopped) ? 'no connection' : 'connected',
       meterBars,
-      stateLabel: S.sessionState,
-      elapsedLabel: stopped ? '05:02' : '02:14',
+      stateLabel: S.sessionState === 'failed' ? 'ready — one arm failed' : S.sessionState,
+      elapsedLabel: idle ? '00:00' : stopped ? '05:02' : '02:14',
       autoplayLabel: singleArm && S.autoplay ? 'autoplay on' : 'autoplay off',
       showReconnectBanner: reconnecting,
-      showSwitchBanner: false, switchBannerText: '',
-      showCantoneseWarn: canto && (S.mode === 'realtime' || activeArms.includes('realtime')) && !stopped,
+      showSwitchBanner: !!S.pending, switchBannerText: `switching to ${S.pending} after this sentence finishes`,
+      showCantoneseWarn: tgt === 'Cantonese' && (S.mode === 'realtime' || activeArms.includes('realtime')) && active,
+      showCantoInputWarn: src === 'Cantonese' && (S.mode === 'realtime' || activeArms.includes('realtime')) && active,
       singleArm, multiArm: multi,
       armChips,
       canAddArm: activeArms.length < 3 && !stopped,
@@ -575,14 +617,11 @@ class Component extends DCLogic {
       armGridStyle: `display:grid;grid-template-columns:repeat(${Math.min(activeArms.length, 3)},1fr);gap:14px`,
       armCards,
       armSummary: activeArms.length + ' arms · all succeeded',
-      toggleBlind: () => set({blindOpen: !S.blindOpen, blindRevealed: false, blindScores: {A: 0, B: 0}}),
+      toggleBlind: () => set({blindOpen: !S.blindOpen, blindRevealed: false, blindScores: {A: 0, B: 0}, blindOrder: Math.random() < 0.5}),
       blindBtnLabel: S.blindOpen ? 'close blind compare' : 'compare blind',
       blindOpen: S.blindOpen && multi,
       blindHint: S.blindRevealed ? 'identity revealed — scores appended to ledger' : 'arm identity hidden until you submit',
-      blindSamples: [
-        {title: 'Sample A', revealed: S.blindRevealed, identity: idB, scores: mkScores('A')},
-        {title: 'Sample B', revealed: S.blindRevealed, identity: idA, scores: mkScores('B')},
-      ],
+      blindSamples: (S.blindOrder ? [idB, idA] : [idA, idB]).map((identity, i) => ({title: 'Sample ' + 'AB'[i], revealed: S.blindRevealed, identity, scores: mkScores('AB'[i])})),
       submitBlind: () => set({blindRevealed: true}),
       blindSubmitLabel: S.blindRevealed ? 'submitted' : 'submit ratings',
       hasRuns: S.hasRuns, noRuns: !S.hasRuns,
