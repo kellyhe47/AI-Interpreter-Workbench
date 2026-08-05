@@ -1,7 +1,7 @@
 ---
 id: 014
 title: Blind compare — randomized persisted draw, 1–5 scoring, reveal
-status: pending
+status: green
 depends_on: [009, 012]
 touches: [src/client/components/BlindCompare.tsx]
 test_files: []
