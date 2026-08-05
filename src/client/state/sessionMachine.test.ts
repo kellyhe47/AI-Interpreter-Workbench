@@ -33,10 +33,12 @@ describe('createInitialState', () => {
     const s = createInitialState();
     expect(s.status).toBe('idle');
     expect(s.micPermission).toBe('not-requested');
-    expect(s.mode).toBe('cascade');
+    // Ticket 017: the design mock's initial state governs — Realtime default,
+    // seeded with the realtime catalog arm id.
+    expect(s.mode).toBe('realtime');
     expect(s.langIdx).toBe(0);
     expect(s.reversed).toBe(false);
-    expect(s.arms).toHaveLength(1);
+    expect(s.arms).toEqual(['realtime']);
     expect(s.autoplay).toBe(true);
     expect(s.pending).toBeNull();
     expect(s.reconnectAttempts).toBe(0);
@@ -57,7 +59,7 @@ describe('createInitialState', () => {
 describe('rule 1 — happy path', () => {
   const steps: Array<[SessionEvent, SessionStatus, MicPermission]> = [
     [{ type: 'START', now: 5_000 }, 'requesting-permission', 'requesting'],
-    [{ type: 'PERMISSION_GRANTED' }, 'listening', 'granted'],
+    [{ type: 'PERMISSION_GRANTED', now: 6_000 }, 'listening', 'granted'],
     [{ type: 'SPEECH_DETECTED' }, 'processing', 'granted'],
     [{ type: 'ARMS_SETTLED' }, 'ready', 'granted'],
     [{ type: 'PLAY', armId: 'arm-1' }, 'playing', 'granted'],
@@ -73,9 +75,21 @@ describe('rule 1 — happy path', () => {
     }
   });
 
-  it('START records startedAt from the event payload', () => {
+  // Ticket 016: startedAt belongs to a RUNNING session — START must NOT
+  // stamp it; PERMISSION_GRANTED stamps it from its own payload.
+  it('START leaves startedAt null (the session has not started yet)', () => {
     const s = reduce(createInitialState(), { type: 'START', now: 5_000 });
-    expect(s.startedAt).toBe(5_000);
+    expect(s.startedAt).toBeNull();
+  });
+
+  it('PERMISSION_GRANTED stamps startedAt on entering listening', () => {
+    const s = run(
+      createInitialState(),
+      { type: 'START', now: 5_000 },
+      { type: 'PERMISSION_GRANTED', now: 8_000 },
+    );
+    expect(s.status).toBe('listening');
+    expect(s.startedAt).toBe(8_000);
   });
 
   it('PLAY records the playing arm; PLAYBACK_ENDED clears it', () => {
@@ -109,6 +123,19 @@ describe('rule 2 — permission denied', () => {
     const denied = run(createInitialState(), { type: 'START', now: 1 }, { type: 'PERMISSION_DENIED' });
     const after = reduce(denied, { type: 'START', now: 2 });
     expect(after).toEqual(denied);
+  });
+
+  // Ticket 016: no session ever started, so nothing may feed an elapsed
+  // timer — startedAt stays null through the denied path.
+  it('permission-denied leaves startedAt null — elapsed derivation yields 0', () => {
+    const s = run(
+      createInitialState(),
+      { type: 'START', now: 31_000 },
+      { type: 'PERMISSION_DENIED' },
+    );
+    expect(s.status).toBe('permission-denied');
+    expect(s.startedAt).toBeNull();
+    expect(s.stoppedAt).toBeNull();
   });
 });
 
@@ -400,6 +427,23 @@ describe('rule 6 — stop, flush, new session', () => {
     const s = reduce(stopped, { type: 'NEW_SESSION', now: 10_000 });
     expect(s.status).toBe('requesting-permission');
     expect(s.micPermission).toBe('requesting');
+  });
+
+  // Ticket 016: same rule on the new-session path — startedAt stays null
+  // until the grant actually starts the session.
+  it('NEW_SESSION without granted mic leaves startedAt null until PERMISSION_GRANTED', () => {
+    const stopped = createInitialState({
+      status: 'stopped',
+      micPermission: 'not-requested',
+      startedAt: 1_000,
+      stoppedAt: 9_000,
+    });
+    const requesting = reduce(stopped, { type: 'NEW_SESSION', now: 10_000 });
+    expect(requesting.startedAt).toBeNull();
+
+    const granted = reduce(requesting, { type: 'PERMISSION_GRANTED', now: 12_000 });
+    expect(granted.status).toBe('listening');
+    expect(granted.startedAt).toBe(12_000);
   });
 });
 

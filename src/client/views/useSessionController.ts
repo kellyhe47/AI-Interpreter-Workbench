@@ -545,7 +545,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
     });
     if (result.status === 'granted') {
       store.captureHandle = result.handle;
-      dispatch({ type: 'PERMISSION_GRANTED' });
+      dispatch({ type: 'PERMISSION_GRANTED', now: depsRef.current.now() });
     } else {
       dispatch({ type: 'PERMISSION_DENIED' });
     }

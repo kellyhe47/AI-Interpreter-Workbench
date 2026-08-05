@@ -164,12 +164,17 @@ describe('AC3 — mode toggle queues at the utterance boundary', () => {
   });
 
   it('idle: mode applies instantly with no banner', () => {
+    // Ticket 017: default is Realtime, so the instant idle switch is → Cascade.
     renderApp();
-    fireEvent.click(screen.getByRole('button', { name: 'Realtime' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cascade' }));
     expect(screen.queryByText(/switching to/)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Realtime' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Cascade' })).toHaveAttribute(
       'aria-pressed',
       'true',
+    );
+    expect(screen.getByRole('button', { name: 'Realtime' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
     );
   });
 });
@@ -183,9 +188,8 @@ describe('AC4 — language cycle, direction swap, Cantonese warnings', () => {
     expect(screen.queryByText(COPY.cantoInputWarn)).not.toBeInTheDocument();
   });
 
-  it('cycling to EN↔YUE on realtime → cascade-only pill + exact target warning', () => {
-    renderApp();
-    fireEvent.click(screen.getByRole('button', { name: 'Realtime' })); // idle: instant
+  it('cycling to EN↔YUE on realtime (the 017 default) → cascade-only pill + exact target warning', () => {
+    renderApp(); // Ticket 017: Realtime is the default — no mode click needed
     fireEvent.click(screen.getByRole('button', { name: /English → Spanish/ }));
 
     expect(screen.getByRole('button', { name: /English → Cantonese/ })).toBeInTheDocument();
@@ -195,8 +199,7 @@ describe('AC4 — language cycle, direction swap, Cantonese warnings', () => {
   });
 
   it('reversed YUE→EN flips to the input warning; selection is never blocked', () => {
-    renderApp();
-    fireEvent.click(screen.getByRole('button', { name: 'Realtime' }));
+    renderApp(); // Ticket 017: Realtime default
     fireEvent.click(screen.getByRole('button', { name: /English → Spanish/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Swap direction' }));
 
@@ -208,7 +211,9 @@ describe('AC4 — language cycle, direction swap, Cantonese warnings', () => {
   });
 
   it('cascade-only pair on cascade mode warns about nothing', () => {
-    renderApp(); // mode stays cascade
+    renderApp();
+    // Ticket 017: default is Realtime — switch to cascade first (idle: instant).
+    fireEvent.click(screen.getByRole('button', { name: 'Cascade' }));
     fireEvent.click(screen.getByRole('button', { name: /English → Spanish/ }));
     expect(screen.getByText('cascade only')).toBeInTheDocument();
     expect(screen.queryByText(COPY.cantoTargetWarn)).not.toBeInTheDocument();
@@ -274,5 +279,52 @@ describe('AC5 — arms strip', () => {
 
     expect(armCardIds()).toEqual(['realtime', 'cascade-openai', 'cascade-best']);
     expect(screen.queryByRole('button', { name: /^\+ / })).not.toBeInTheDocument();
+  });
+});
+
+describe('Ticket 016 — elapsed timer must not run without a running session', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function elapsedText(): string {
+    const el = document.querySelector('[data-elapsed]');
+    return el?.textContent?.trim() ?? '';
+  }
+
+  it('permission-denied shows 00:00 and does not advance while the wall clock ticks', async () => {
+    let t = 0;
+    renderApp({ capture: makeDenyingCapture(), now: () => t });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Start microphone' }));
+    t = 31_000; // clock moves while the prompt is open / denial resolves
+    await flushMicrotasks();
+
+    expect(micIndicator()).toHaveAttribute('data-mic-indicator', 'denied');
+    expect(elapsedText()).toBe('00:00');
+
+    t = 53_000;
+    await advance(5_000); // any ticking interval would re-render here
+    expect(elapsedText()).toBe('00:00');
+  });
+});
+
+describe('Ticket 017 — default mode is Realtime', () => {
+  it('cold open pre-selects Realtime and the idle subline says Realtime', () => {
+    renderApp();
+    expect(screen.getByRole('button', { name: 'Realtime' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByRole('button', { name: 'Cascade' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+    expect(screen.getByText(COPY.idleSubline)).toBeInTheDocument();
+  });
+
+  it('a default session starts with the realtime catalog arm', async () => {
+    renderApp();
+    await clickStartMicrophone();
+    expect(armPillIds()).toEqual(['realtime']);
   });
 });

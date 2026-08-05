@@ -35,9 +35,16 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+// Ticket 017 flipped the DEFAULT mode to realtime, so cascade-arm flows pin
+// their session shape explicitly.
+const CASCADE_SESSION = { mode: 'cascade' as const, arms: ['cascade-openai'] };
+
 describe('AC6 — arm cards driven by the fixture script', () => {
   it('cascade card: in-flight bar, then ready with text, play + duration, labelled stage ms, footer', async () => {
-    renderApp({ scripts: { 'cascade-openai': cascadeUtteranceScript() } });
+    renderApp({
+      initialState: CASCADE_SESSION,
+      scripts: { 'cascade-openai': cascadeUtteranceScript() },
+    });
     await clickStartMicrophone();
 
     // First source partial arrived → utterance in flight.
@@ -124,7 +131,7 @@ describe('AC7 — failed arm keeps the session running', () => {
         stage: 'mt',
       },
     ];
-    renderApp({ scripts: { 'cascade-openai': script } });
+    renderApp({ initialState: CASCADE_SESSION, scripts: { 'cascade-openai': script } });
     await clickStartMicrophone();
     await advance(400);
 
@@ -161,7 +168,10 @@ describe('AC7 — failed arm keeps the session running', () => {
 
 describe('AC8 — live transcripts', () => {
   it('source shows accumulated partials then the final; target accumulates deltas', async () => {
-    renderApp({ scripts: { 'cascade-openai': cascadeUtteranceScript() } });
+    renderApp({
+      initialState: CASCADE_SESSION,
+      scripts: { 'cascade-openai': cascadeUtteranceScript() },
+    });
     await clickStartMicrophone();
 
     await advance(20); // first partial
@@ -192,6 +202,7 @@ describe('AC9 — reconnect and disconnect banners', () => {
 
   it('reconnecting banner carries the attempt count; transcript history preserved', async () => {
     renderApp({
+      initialState: CASCADE_SESSION,
       scripts: {
         'cascade-openai': [
           ...preamble,
@@ -212,6 +223,7 @@ describe('AC9 — reconnect and disconnect banners', () => {
 
   it('after exhaustion: red disconnected banner + Reconnect button, transcript intact', async () => {
     renderApp({
+      initialState: CASCADE_SESSION,
       scripts: {
         'cascade-openai': [
           ...preamble,
@@ -234,6 +246,7 @@ describe('AC10 — stop → stopped summary with REAL numbers; ledger-backed foo
   function twoUtteranceRun(now: () => number) {
     return renderApp({
       now,
+      initialState: CASCADE_SESSION,
       scripts: {
         'cascade-openai': [
           ...cascadeUtteranceScript({ utt: 0, base: 0 }),

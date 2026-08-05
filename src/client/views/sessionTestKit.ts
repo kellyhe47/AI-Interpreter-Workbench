@@ -36,8 +36,9 @@ import type { CaptureCallbacks, SessionDeps } from './useSessionController';
 
 export const COPY = {
   idleTitle: 'No active session',
+  // Ticket 017: default mode is Realtime (design-mock initial state governs).
   idleSubline:
-    'English → Spanish · Cascade · autoplay on. Your browser will ask for microphone permission.',
+    'English → Spanish · Realtime · autoplay on. Your browser will ask for microphone permission.',
   micNotRequested: 'mic not requested',
   micRequesting: 'mic prompt open…',
   micGranted: 'mic allowed',

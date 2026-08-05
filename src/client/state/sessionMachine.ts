@@ -16,6 +16,14 @@
  * - Happy path: idle →START→ requesting-permission (mic 'requesting')
  *   →PERMISSION_GRANTED→ listening (mic 'granted') →SPEECH_DETECTED→
  *   processing →ARMS_SETTLED→ ready →PLAY→ playing →PLAYBACK_ENDED→ ready.
+ * - TICKET 016 (elapsed belongs to a RUNNING session): `startedAt` stays
+ *   null through requesting-permission and permission-denied — START does
+ *   NOT stamp it. PERMISSION_GRANTED carries `now` and stamps `startedAt`
+ *   on entering 'listening'. Same rule for NEW_SESSION: it stamps
+ *   `startedAt` only when the mic is already granted (straight to
+ *   listening); otherwise startedAt stays null until PERMISSION_GRANTED.
+ *   Elapsed derivation is therefore `startedAt === null ? 0 : (stoppedAt ??
+ *   now) - startedAt` — permission-denied always shows 00:00.
  * - SPEECH_DETECTED is accepted from both 'listening' and 'ready' (the next
  *   utterance can begin while the previous result is on screen).
  * - PLAY carries `armId` (which arm's audio is playing, kept in
@@ -55,8 +63,11 @@
  *   utteranceCount, reconnectAttempts, pending, summary, stoppedAt,
  *   playingArm, and sets startedAt = now.
  * - Defaults (createInitialState): status 'idle', micPermission
- *   'not-requested', mode 'cascade', langIdx 0 (EN↔ES), reversed false,
- *   arms ['arm-1'], autoplay true, pending null, reconnectAttempts 0,
+ *   'not-requested', mode 'realtime' (TICKET 017 — the design mock's
+ *   initial state governs; was 'cascade'), langIdx 0 (EN↔ES), reversed
+ *   false, arms ['realtime'] (the catalog arm id for the default mode —
+ *   TICKET 017; was ['arm-1']), autoplay true, pending null,
+ *   reconnectAttempts 0,
  *   resumeStatus null, playingArm null, utteranceCount 0,
  *   startedAt/stoppedAt null, summary null. Accepts a Partial override for
  *   test setup.
@@ -143,7 +154,8 @@ export interface SessionState {
 /** Event shapes — see the design doc-comment above. */
 export type SessionEvent =
   | { type: 'START'; now: number }
-  | { type: 'PERMISSION_GRANTED' }
+  /** Carries `now` — startedAt is stamped HERE, not at START (ticket 016). */
+  | { type: 'PERMISSION_GRANTED'; now: number }
   | { type: 'PERMISSION_DENIED' }
   | { type: 'SPEECH_DETECTED' }
   | { type: 'ARMS_SETTLED' }
