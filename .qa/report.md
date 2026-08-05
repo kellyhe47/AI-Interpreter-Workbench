@@ -1,3 +1,26 @@
+# QA report — iterations 3 & 4
+
+Iteration 3 (post 019–021 fixes): **CLEAN PASS #1.** Re-walked: idle (Realtime default),
+deny (timer frozen 00:00), fixture session — switch-in-ready instant w/o banner + arm swap;
+switch-mid-stream banner → applied exactly at settle w/ continuous utterance numbering;
+per-utterance card reset; script loops past 8 (observed utterance 13); stop; Results empty;
+zero console errors. No new findings.
+
+Iteration 4 (full re-walk): deny/warnings/timer all hold; add-arm, blind compare full cycle
+(submit gated on both scores — reasonable, not filed), remove-arm autoplay restore, stop
+summary, Results empty — all pass. **One new finding:**
+
+### QA-7 [low, fixture-mode] Arm playlists unsynchronized — concurrent arms display different utterances
+- Repro: fixture session → add 2nd arm mid-session → arm cards show translations of two
+  DIFFERENT source sentences (each transport runs its own schedule; offset persists across
+  the session; blind compare pairs different sentences).
+- Expected: PRD §6 — the same source feeds every arm; fixture mode should present one shared
+  utterance timeline across arms (identical utt id + source concurrently), or QA of
+  comparison-mode semantics is misleading.
+- Ticket: 022-qa-fixture-shared-timeline.md
+
+---
+
 # QA report — iteration 2
 
 ```yaml
