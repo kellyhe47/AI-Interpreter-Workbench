@@ -1,7 +1,7 @@
 ---
 id: 018
 title: Dev-only browser fixture mode (?fixture=1) — fixture transports + fake capture in the real SPA
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/browserDeps.ts, src/client/main.tsx, src/client/fixtureDeps.ts]

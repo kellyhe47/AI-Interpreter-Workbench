@@ -1,7 +1,7 @@
 ---
 id: 016
 title: Elapsed timer must not run when no session has started (permission-denied)
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/views/useSessionController.ts, src/client/views/SessionView.tsx, src/client/state/sessionMachine.ts]

@@ -1,7 +1,7 @@
 ---
 id: 017
 title: Default mode should be Realtime (design mock initial state), not Cascade
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/state/sessionMachine.ts, src/client/views/sessionTestKit.ts]
