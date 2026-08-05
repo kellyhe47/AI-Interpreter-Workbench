@@ -1,10 +1,10 @@
 ---
 id: 013
 title: Results view — four question-titled cards, mandatory empty states, ledger table
-status: pending
+status: green
 depends_on: [009]
 touches: [src/client/views/ResultsView.tsx, src/client/components/results/*]
-test_files: []
+test_files: [src/client/components/results/derive.test.ts, src/client/views/ResultsView.test.tsx]
 iterations: 0
 ---
 
