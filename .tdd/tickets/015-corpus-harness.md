@@ -1,10 +1,10 @@
 ---
 id: 015
 title: Placeholder corpus + benchmark harness skeleton (fixture-driven, never reported)
-status: pending
+status: green
 depends_on: [004, 005]
 touches: [scripts/generate-placeholder-corpus.mjs, corpus/*, scripts/bench-fixture.mjs, benchmark-results/.gitkeep]
-test_files: []
+test_files: [src/harness/wav.test.ts, src/harness/corpus.test.ts, src/harness/bench.test.ts]
 iterations: 0
 ---
 
