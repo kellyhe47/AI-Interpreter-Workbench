@@ -33,7 +33,10 @@
  */
 
 import type { Server } from 'node:http';
-import type { UtteranceRecord } from '../core/timing';
+import { WebSocket } from 'ws';
+import { SAMPLE_RATE, decodeTtsFrame } from '../core/protocol';
+import type { ServerToClientMessage } from '../core/protocol';
+import type { CascadeTimestamps, UtteranceRecord } from '../core/timing';
 
 export interface BenchClip {
   id: string;
@@ -62,9 +65,128 @@ export interface RunFixtureBenchOptions {
   chunkMs?: number;
 }
 
+function serverPort(server: Server): number {
+  const addr = server.address();
+  if (addr === null || typeof addr === 'string') {
+    throw new Error('server must be listening on a TCP port');
+  }
+  return addr.port;
+}
+
+/** Convert ws RawData into a single Uint8Array view. */
+function toBytes(data: Buffer | ArrayBuffer | Buffer[]): Uint8Array {
+  if (Array.isArray(data)) return Buffer.concat(data);
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  return data;
+}
+
+async function runClip(
+  port: number,
+  clip: BenchClip,
+  opts: RunFixtureBenchOptions,
+): Promise<BenchRecord> {
+  const chunkMs = opts.chunkMs ?? 20;
+  const samplesPerChunk = Math.max(1, Math.round((SAMPLE_RATE * chunkMs) / 1000));
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/cascade`);
+
+  try {
+    const record = await new Promise<BenchRecord>((resolve, reject) => {
+      let clipStartMs = 0;
+      let done = false;
+      const ttsFramesByUtt = new Map<number, number>();
+
+      const finish = (fn: () => void): void => {
+        if (done) return;
+        done = true;
+        fn();
+      };
+
+      ws.on('error', (err) => finish(() => reject(err)));
+      ws.on('close', () =>
+        finish(() => reject(new Error(`socket closed before utterance.complete (clip ${clip.id})`))),
+      );
+
+      ws.on('open', () => {
+        ws.send(
+          JSON.stringify({
+            type: 'session.start',
+            mode: 'cascade',
+            languagePair: opts.languagePair ?? 'en-es',
+            direction: opts.direction ?? 'a->b',
+            providers: opts.providers,
+          }),
+        );
+
+        // Harness-clock clip start; ground-truth speech end is relative to it.
+        clipStartMs = Date.now();
+        for (let i = 0; i < clip.samples.length; i += samplesPerChunk) {
+          const chunk = clip.samples.subarray(i, i + samplesPerChunk);
+          ws.send(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+        }
+      });
+
+      ws.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary: boolean) => {
+        if (done) return;
+        if (isBinary) {
+          const { utt } = decodeTtsFrame(toBytes(data));
+          ttsFramesByUtt.set(utt, (ttsFramesByUtt.get(utt) ?? 0) + 1);
+          return;
+        }
+
+        let msg: ServerToClientMessage;
+        try {
+          const bytes = toBytes(data);
+          msg = JSON.parse(
+            Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('utf8'),
+          ) as ServerToClientMessage;
+        } catch (err) {
+          finish(() => reject(err as Error));
+          return;
+        }
+
+        if (msg.type === 'error') {
+          finish(() => reject(new Error(`server error (clip ${clip.id}): ${msg.message}`)));
+          return;
+        }
+
+        if (msg.type === 'utterance.complete') {
+          // Keep only the FIRST utterance's record for this clip.
+          const timings: CascadeTimestamps = {
+            ...(msg.record.timings as CascadeTimestamps),
+            speech_end: clipStartMs + clip.speechEndMs,
+          };
+          const augmented: BenchRecord = {
+            ...msg.record,
+            speechEndSource: 'corpus',
+            corpusId: opts.corpusId,
+            timings,
+            audioChunkCount: ttsFramesByUtt.get(msg.utt) ?? 0,
+          };
+          ws.send(JSON.stringify({ type: 'session.end' }));
+          finish(() => resolve(augmented));
+        }
+      });
+    });
+    return record;
+  } finally {
+    // Close the socket per clip and wait for it so no handles leak.
+    if (ws.readyState !== WebSocket.CLOSED) {
+      await new Promise<void>((resolve) => {
+        ws.once('close', () => resolve());
+        ws.close();
+      });
+    }
+    ws.removeAllListeners();
+  }
+}
+
 export async function runFixtureBench(
   opts: RunFixtureBenchOptions,
 ): Promise<BenchRecord[]> {
-  void opts;
-  throw new Error('not implemented');
+  const port = serverPort(opts.server);
+  const records: BenchRecord[] = [];
+  for (const clip of opts.clips) {
+    records.push(await runClip(port, clip, opts));
+  }
+  return records;
 }
