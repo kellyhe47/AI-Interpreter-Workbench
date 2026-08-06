@@ -1,11 +1,11 @@
 ---
 id: 017
 title: export-results script and npm entry
-status: pending
+status: green
 depends_on: [002]
 touches: [scripts/export-results.mjs, package.json]
 iterations: 0
-test_files: []
+test_files: [src/harness/exportResults.test.ts]
 branch: ""
 ---
 
@@ -57,3 +57,17 @@ logic). If the script is a thin wrapper, extract the logic into a testable expor
 and keep the `.mjs` as the CLI shell.
 
 ## Attempt log
+
+- iter 1: green. 9 tests.
+- LIVE CLI PROBE (orchestrator): seeded 3 runs (Arm-B sweep complete / sweep failed / manual
+  complete) -> bundle wrote all 3 record files, summary totals {runs:3, aggregated:1,
+  excluded:2}, Arm B {n:1, repsCompleted:1, repsIntended:5}. Failure path against an unwritable
+  root printed a plain message naming the path, confirmed data/ unmodified, exit code 1.
+- Nit logged, not fixed: the shell's shebang is `#!/usr/bin/env node` but the file imports
+  TypeScript and needs tsx. Both documented invocations (`npm run export-results`, `npx tsx
+  scripts/export-results.mjs`) are correct; only direct `./scripts/export-results.mjs` would
+  fail.
+- Presentation deviation from PRD §8: the summary reports each named arm EXACTLY ONCE
+  (exp1=[A,B], exp2=[C]) rather than repeating Arm B's aggregate under Experiment 2. The data
+  is complete and B's figures cannot drift between two copies; the in-app Results view still
+  renders Exp 2 as B vs C from the ledger.
