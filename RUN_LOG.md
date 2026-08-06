@@ -509,3 +509,113 @@ claims were verified independently and both were right:
    in place with all four absence assertions verbatim.
 
 **After iteration 1: 1,059 tests / 61 files green**, both typechecks and the production build clean.
+
+## QA loop — iterations 2–6: CONVERGED
+
+Six iterations, ten defects. Iterations 5 and 6 were both clean, which is the convergence
+condition. Final state: **1,085 tests / 62 files green**, both typechecks clean, production build
+clean.
+
+| iteration | outcome |
+|---|---|
+| 1 | 8 findings → tickets 018–025 (022 withdrawn as a QA sampling error) |
+| 2 | all 7 fixes verified live; **2 new** → 027 (MODERATE), 028 (HIGH) |
+| 3 | 027 + 028 verified live; full walk — clean |
+| 4 | **1 new** → 029 (MODERATE) |
+| 5 | 029 verified live; full walk — clean |
+| 6 | full walk, independent emphasis — clean |
+
+### 028 was the one that mattered
+
+Provenance could only ever report **"N of N"**. `AnnotatedRun`'s `annotations` envelope is read by
+every Results derivation and was written by **nothing outside test fixtures** — so
+`intendedReps` always fell back to `completedReps` and the denominator was structurally incapable
+of exceeding the numerator. A sweep that lost reps to failures would have reported as clean and
+complete: the exact failure mode this project exists to prevent, in the exact line meant to prevent
+it.
+
+It was invisible without a corpus. It would have surfaced only after the operator recorded one and
+ran sweeps — when the numbers were finally supposed to be trustworthy. Found by reading the write
+path, not by looking at a screen: 027's provenance symptom (`1 of 1` for two attempts) did not
+match 027's apparent cause, and following that mismatch upstream is what turned it up.
+
+Now verified end to end through the real server: five sweep reps with rep 3 failed renders
+`Arm B · 4 of 5 reps completed` with **p50 over the four survivors** (1.10 s — had the failed rep
+leaked into the samples it would read 1.05 s).
+
+**Deferred deliberately, and documented in the ticket rather than left implicit:** `utteranceId`,
+`category`, `corpusVersion` and `wer` have no source — a `Recording` carries no category or
+utterance identity on either side. So the by-category table stays empty and provenance lines still
+end `corpus version unrecorded`. 028's plumbing is the template for all three; its notes specify
+what a corpus-metadata model needs. **This should land with the operator's corpus work, not after
+it** — otherwise the corpus gets recorded and the analysis it was designed for still cannot run.
+
+### 027 and 029 — the same class, twice
+
+Both were **model-correct, view-wrong**: a derivation held the right answer and the view discarded
+it at the boundary.
+
+- **027** — a failed run is *absorbed* into its `(recording × configuration)` group, not dropped.
+  `runCount`, `failedCount` and `'failed'` were all in the row model; the view rendered only
+  `excludedFromExperiments`, which is `false` when the group also holds a gate-passing run. My first
+  draft of the ticket got this wrong and demanded a separate row — reading `derive.ts` before
+  dispatching showed the grouping is deliberate and a separate row would have fought it. Diagnose
+  before filing, even when the symptom looks unambiguous.
+- **029** — the provenance stamp was gated on ledger contents only, so a cached-but-stale ledger
+  plus a failed load produced `run 2026-08-06 · corpus v1` beside a panel reading *"this screen has
+  nothing to show."* Fixed by making the load status an **argument to the one shared predicate**;
+  App went from two provenance conditions to zero, so the shell now supplies an input rather than
+  contributing a rule that could drift from the panel.
+
+027 also turned up a second defect while being fixed: an all-failed group rendered **`$0.000`** for
+cost — a zero over zero samples, which reads as a measurement. Now dashed, gated on `n === 0`.
+
+### Test-writers earning their keep
+
+Three times a test-writer's survey changed the implementation rather than merely describing it:
+
+1. **027** — flagged that the ticket described the all-failed cost cell as existing behaviour when
+   it actually rendered `$0.000`, and asserted the fix. My ticket text was wrong; the test was right.
+2. **028** — deliberately annotated `Run` literals directly so the missing field was a **compile**
+   failure. Storage and the route pass unknown keys through untouched at runtime, so without that
+   nothing would have forced `types.ts` to change at all and the field would have "worked" while
+   being untyped everywhere. Worth reusing whenever a persist-this-field ticket has a permissive
+   runtime path.
+3. **029** — found the trap that would have cost an iteration: three locked tests pin the
+   **no-seam** case, where hydration is `null` and the stamp must still show. The gate had to be
+   `=== 'failed'`, never `!== 'ready'`. Mutation-checking in that direction fails **49 tests across
+   four files**.
+
+### Mutation checks (every load-bearing property, each killing its own test)
+
+| ticket | mutation | result |
+|---|---|---|
+| 027 | emit failure hooks unconditionally | guard test red — absence on clean ledgers is enforced |
+| 027 | gate the note on `excludedFromExperiments` (the original bug) | mixed-group test red |
+| 027 | revert cost dashing at `n = 0` | all-failed test red |
+| 028 | drop the `repIndex` stamp | 6 red; line collapses to `Arm C · 4 of 4` — the production bug, reproduced |
+| 028 | let an annotated run bypass `origin === 'sweep'` | 13 red across 4 files — no back door into the gate |
+| 029 | drop the `'failed'` condition | exactly the 2 target tests red |
+| 029 | hide whenever hydration `!== 'ready'` | 49 red — the no-seam contract is comprehensively defended |
+
+### Two QA process errors, recorded because they nearly cost findings
+
+- **Phantom defect from a bad fixture.** `POST /api/recordings` generates its own id and ignores a
+  supplied one, so hand-POSTed runs pointed at a nonexistent Recording and Replay correctly showed
+  "0 runs" — which read as a bug for several minutes.
+- **Runs are stored twice by design** — a queryable `data/runs/*.json` plus the append-only
+  `ledger.jsonl`. Editing only the ledger left the store unchanged, and a "fresh" server kept
+  serving the removed records. Not a caching bug; the separation is documented at
+  `storage/index.ts:34`.
+
+Both were my fixtures, not the product. Verify the fixture before believing the symptom.
+
+### Still blocked on the operator
+
+Unchanged, and none of it blocks convergence: the real corpus (and therefore sweeps, WER, blind
+scores, every reported number), a live smoke of the two new adapters, the ElevenLabs key scope for
+Scribe, the comparison write-up, and the AWS deploy.
+
+`data/` currently holds QA seed Recordings and Runs — including deliberately failed and ad-hoc ones
+— plus three blind comparisons. It is gitignored working state. **Clear it before recording the real
+corpus** so no seeded figure can ever be mistaken for a measurement.

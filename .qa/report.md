@@ -1,174 +1,170 @@
 ```yaml
-sha: 2d970b1
+sha: 24a3dbd
 branch: main
 tree: clean
-launched: preview_start "workbench" (npm run dev) → http://localhost:5173
-         + API on :8787 — bound correctly on its own this pass (see fix 021 below)
-iteration: 2 of max 6
+launched: preview_start "workbench" (npm run dev) → http://localhost:5173, API on :8787
+iterations: 6 of max 6 — converged on 5 and 6
+suite: 1085 tests / 62 files green · tsconfig.json + tsconfig.server.json clean · npm run build clean
 ```
 
-# Manual QA — AI Interpreter Workbench v2 · iteration 2
+# Manual QA — AI Interpreter Workbench v2 · final report
 
 **Spec:** `PRD.md` (§6, §7, §8, §10, §12).
-**Designs:** `design_handoff_interpreter_workbench/README.md` + `interpreter-workbench-v2.dc.html`. PRD wins on conflict.
-*(Iteration 1's report is archived at `.qa/report-iter1.md`; the v1 report at `.qa/report-v1.md`.)*
+**Designs:** `design_handoff_interpreter_workbench/`. PRD wins on conflict.
+*(Earlier reports archived: `.qa/report-v1.md`, `.qa/report-iter1.md`, `.qa/report-iter2.md`.)*
 
-**Verdict: NOT clean.** Two findings — **F10 HIGH** (ticket 028) and **F9 MODERATE** (ticket 027).
-All seven iteration-1 fixes verified in the running app. No regressions; both findings are
-pre-existing gaps this pass uncovered rather than anything the iteration-1 fixes broke.
+## Verdict: CONVERGED — two consecutive clean passes
 
-## Part A — re-verification of the seven fixes
+| iteration | outcome |
+|---|---|
+| 1 | 8 findings → tickets 018–025 (022 later withdrawn as a QA sampling error) |
+| 2 | all 7 fixes verified; **2 new findings** → tickets 027 (MODERATE), 028 (HIGH) |
+| 3 | 027 + 028 verified live; full walk — **clean** |
+| 4 | **1 new finding** → ticket 029 (MODERATE) |
+| 5 | 029 verified live; full walk — **clean** |
+| 6 | full walk, independent emphasis — **clean** |
 
-| # | Fix | Result |
-|---|---|---|
-| 018 | Fixture LiveSession must not produce a figure | ✅ after a 5-utterance `?fixture=1` session Results holds **0 digits**, empty state intact, no live card, no `0.98 s`, no provenance stamp |
-| 019 | Results reads server-persisted Runs | ✅ Experiments renders Exp 2 — Arm B vs Arm C, p50 1.05 s / 0.93 s, delta −0.13 s. Ad-hoc/manual run present in By Recording, marked `excluded · ad-hoc` (**failed run is not — finding F9**) |
-| 020 | Dead backend ≠ empty library | ✅ distinct error region: *"Couldn't load Recordings … This is not an empty library — the library is unknown until the load succeeds"*, `reported: HTTP 500`, Retry present, "No Recordings yet" absent. **Retry re-issues**: after restarting the API the error cleared and both Recordings loaded |
-| 021 | API binds 8787 under `PORT=5173` | ✅ `server listening on :8787` with the harness exporting `PORT=5173`; proxy clean, zero ECONNREFUSED |
-| 023 | Blind scores reach the server | ✅ new comparison read back from `GET /api/blind-comparisons` and on disk in `data/comparisons.jsonl`, carrying `runIds`, the **drawn `order`** (swapped relative to `runIds`), both dimensions for both samples, `evaluatorLanguage` |
-| 024 | Run/Batch gated on selection | ✅ both `disabled` with title *"Select a Recording in the library to run against"*; enabled once a Recording is selected |
-| 025 | No provenance stamp on empty Results | ✅ absent on an empty ledger; `run 2026-08-06 · corpus v1` returns once gate-passing runs exist |
+Ten defects found and fixed across the run. Everything filed this pass is green and verified in the
+running product, not just in tests.
 
-## Part B — full journey re-walk
+## What iterations 3–6 fixed
 
-| Flow | Journey | Result |
-|---|---|---|
-| A | Cold landing → all four tabs | pass |
-| B | Derived arm tag across both architectures and all three stages | pass |
-| C | Live fixture session, tab-switch mid-session | pass |
-| D | Language pair / Cantonese warning | pass |
-| E | Mic denied | pass |
-| F | Replay with the API down, then recovered | pass |
-| G | Replay with seeded data → runs list → blind compare → submit | pass |
-| H | Results, both tabs, empty and populated | **F9** |
-| I | Help | pass |
+### Ticket 027 — a failed run left no trace in Results · MODERATE
 
-### Verified in the running product this pass
+A `failed` Run was **absorbed** into its `(recordingId × configurationKey)` group rather than
+dropped — the grouping is deliberate and correct — but the view rendered only
+`excludedFromExperiments`, which is `false` for a group that also holds a gate-passing run. So every
+failure signal in the model (`runCount`, `failedCount`, `'failed'` in `exclusionReasons`) was
+discarded at the view boundary and the row read a clean `in experiments`.
 
-- **The derived arm tag never lies, on every axis.** Realtime → `A` (stage selectors hidden);
-  cascade default → `B`; then cycling **each** stage in turn:
-  `tts → eleven_flash_v2_5` = `C`, `→ eleven_multilingual_v2` = `ad-hoc`, `→ gpt-4o-mini-tts` = `B`;
-  `mt → claude-haiku-4-5` = `ad-hoc`, back = `B`; `stt → gpt-4o-mini-transcribe` = `ad-hoc`,
-  `→ scribe_v2_realtime` = `ad-hoc`, back = `B`. Every full cycle returns to B. The pill is a
-  `<span data-arm-tag>`; **no control anywhere sets a tag** (0 arm-labelled controls).
-  Replay's panel behaves identically.
-- **Derived beats declared.** `run-adhoc-1` is *stored* with `armTag: "B"` and an off-arm triple;
-  Results renders it `ad-hoc` / `excluded · ad-hoc`.
-- **Nothing autoplays in Replay.** With `AudioContext` and `HTMLMediaElement.play` instrumented,
-  selecting a Recording and rendering four run cards produced **0 AudioContexts, 0 media
-  elements, 0 play() calls**.
-- **Blind compare is blind.** Panel shows Sample A / Sample B, a `play` control each, adequacy and
-  fluency 1–5 each. Zero `[data-blind-identity]` nodes; no model id, arm label or transcript in the
-  panel before submit. Submit stayed disabled through the first three scores and enabled only on
-  the fourth. After submit: *"identity revealed — appended to ledger"*. Only the **three completed**
-  runs are offered as pair candidates — the failed run is correctly not scoreable.
-- **Corpus Recordings expose no delete control** — corpus row has edit only; the mic row has edit +
-  delete.
-- **Mic denial** — status `mic blocked`; the blocking card names **both** layers (*"Check the
-  browser site permission… look for the mic icon in the address bar"* and *"Check the OS microphone
-  setting: your system privacy settings must allow this browser"*), states *"Browsers do not
-  re-prompt after a denial — reset the site permission first, then retry"*, offers retry, and
-  Replay / Results / Help stay usable.
-- **Live indicator persists across tabs.** Session started under `?fixture=1`; the blue dot +
-  `live` remained in the top bar on Replay and on Results, and returning to Live showed the same
-  session still counting (`0:03 → 0:06 / 5:00`) — session state survives tab switches.
-- **Cantonese warns, never blocks, and is architecture-correct.** `English → Cantonese` flips the
-  pair pill to `cascade only`; under **Realtime** it adds *"Realtime does not list Cantonese as a
-  supported output language — the run proceeds to observe the actual failure mode. Text may look
-  correct while audio pronunciation is not."* with **Start microphone still enabled**. Under
-  Cascade there is no warning, which is correct — cascade supports the pair.
-- **Help** renders exactly six cards in order, carrying the three-entity explainer, the
-  *"you never label a run yourself"* statement, and the non-pooling rule.
+Verified live: the Arm B row now reads `in experiments` **and** `1 of 2 attempts failed`, carrying
+`data-failed-count` / `data-run-count`; rows with no failures carry neither. Figures did not move
+(`n = 1`, p50 1.05 s, cost unchanged).
+
+A second defect surfaced while fixing it: an all-failed group rendered **`$0.000`** for cost — a
+zero over zero samples, which AGENTS.md explicitly calls out as reading like a measurement. Now
+dashes, gated on `n === 0`.
+
+### Ticket 028 — run annotations were never persisted · HIGH
+
+Found by reading the write path when 027's provenance symptom did not match its apparent cause.
+
+`AnnotatedRun`'s `annotations` envelope is read by every Results derivation and was **written by
+nothing outside test fixtures**; the persisted `Run` had no such field. Consequently
+`intendedReps` always fell back to `completedReps` — **the denominator was structurally incapable of
+exceeding the numerator, so provenance could only ever read "N of N"**. A sweep that lost reps to
+failures would have reported as clean and complete. This is the exact failure mode AGENTS.md names.
+
+It was invisible without a corpus and would have surfaced only after the operator recorded one and
+ran sweeps — when the numbers were supposed to be trustworthy.
+
+Verified live through the real server: five sweep reps POSTed with `annotations.repIndex`, rep 3
+failed →
+
+```
+Arm B · 2 utterances · 4 of 5 reps completed · endpointing pinned 500 ms · turn-final trigger
+p50 1.10 s   p95 1.30 s
+```
+
+`4 of 5` — the denominator now exceeds the numerator — with **p50 computed over the four
+survivors** (the failed rep's 0 ms reached no figure; had it leaked in, p50 would read 1.05 s).
+Arm C, carrying no annotations, correctly still falls back to `1 of 1`. Replay's run cards now show
+`rep 1`–`rep 5`.
+
+**Deliberately still deferred**, documented in the ticket: `utteranceId`, `category`,
+`corpusVersion` and `wer` have no source — a `Recording` carries no category or utterance identity
+on either side. So the by-category table and WER stay empty and every provenance line still ends
+`corpus version unrecorded`. The plumbing 028 built is the template; ticket 028's notes specify what
+a corpus-metadata model needs. **This should land with the operator's corpus work, not after it.**
+
+### Ticket 029 — the provenance stamp survived a failed load · MODERATE
+
+The stamp was gated on ledger contents only. With the ledger populated from a previous load (it
+persists to localStorage) and hydration failing, the top bar asserted `run 2026-08-06 · corpus v1`
+beside a panel reading *"this screen has nothing to show."*
+
+Exactly one of four states was wrong. All four re-verified live after the fix:
+
+| ledger | hydration | stamp | |
+|---|---|---|---|
+| empty | ready | absent | ✅ |
+| populated | ready | present | ✅ |
+| empty | failed | absent | ✅ |
+| populated (cached, 9 runs) | failed | **absent** | ✅ fixed |
+
+Recovery verified without a page reload: reopening the tab with the API back re-hydrates and the
+stamp returns.
+
+## Properties re-verified in the running product (iterations 5 & 6)
+
+- **The derived arm tag never lies.** Realtime → `A` (stage selectors hidden); cascade default →
+  `B`; `eleven_flash_v2_5` → `C`; `eleven_multilingual_v2` → `ad-hoc`; `claude-haiku-4-5` →
+  `ad-hoc`; `gpt-4o-mini-transcribe` and `scribe_v2_realtime` → `ad-hoc`. Every cycle returns to
+  `B`. Replay's panel agrees. **No control anywhere sets a tag.**
+- **Derived beats declared** — a Run stored `armTag: "B"` with an off-arm triple renders `ad-hoc`.
+- **Nothing autoplays in Replay** — instrumented `AudioContext` and `HTMLMediaElement.play`:
+  **0 constructions, 0 media elements, 0 play calls** while rendering five run cards. Live is the
+  opposite: `autoplay on`.
+- **Blind compare is blind** — of five runs, only the **four completed** are offered as pair
+  candidates. Zero `[data-blind-identity]` nodes; no model id, arm label or transcript in the panel
+  before submit. Submit stayed disabled through three of four scores. Persisted server-side to
+  `data/comparisons.jsonl` with both run ids, the drawn order, both dimensions for both samples and
+  the evaluator language.
+- **Corpus Recordings expose no delete control**; mic rows have edit + delete.
+- **Run / Batch sweep gated on selection** — `disabled` with title *"Select a Recording in the
+  library to run against"*, enabled once selected.
+- **Mic denial** — `mic blocked`, both remediation layers named (browser site permission **and** OS
+  privacy setting), the no-re-prompt statement, a retry, and Replay/Results/Help still usable.
+- **Live indicator persists across tabs** — started under `?fixture=1`, the dot stayed on Replay
+  and Results, and the session kept counting (`0:06` → `0:08 / 5:00`).
+- **The fixture gate holds (018)** — after a 7-utterance `?fixture=1` session: no live card, no
+  stamp, **zero digits** in the Results body, no `0.98 s`.
+- **A dead backend still reads as an error, not emptiness (020)** — *"This is not an empty library
+  — the library is unknown until the load succeeds"*, `reported: HTTP 500`, working Retry. Results
+  has the matching copy: *"That is not the same as an empty ledger."*
+- **Help** — six cards, the three-entity explainer, the derived-tag statement, the non-pooling rule.
 - **Honest empties** — Exp 1 reads *"no sweep runs recorded for Arm A vs Arm B"*; WER, adequacy and
-  fluency read `not yet measured`; `corpus version unrecorded`. Nothing invents a figure.
+  fluency read `not yet measured` (8 cells).
 
-## Findings
+## Two QA process errors made this run, recorded because they nearly cost findings
 
-### F10 — Run annotations are never persisted · **HIGH** · ticket 028
+1. **Iteration 2's first draft of F9 was wrong.** I claimed the failed run was missing from the
+   table and drafted a ticket demanding a separate row. Reading `derive.ts` before dispatching
+   showed the `(recording × configuration)` grouping is deliberate and the run was absorbed, not
+   dropped. A separate row would have fought the model. **Diagnose before filing, even when the
+   symptom is unambiguous.**
+2. **Two seeding errors produced phantom defects.** `POST /api/recordings` generates its own id and
+   ignores a supplied one, so my runs pointed at a nonexistent Recording and Replay correctly showed
+   "0 runs" — which looked like a bug. Separately, runs are stored **twice by design** (a queryable
+   `data/runs/*.json` plus the append-only `ledger.jsonl`), so editing only the ledger left the
+   store unchanged. Neither was a product defect. **Verify the fixture before believing the
+   symptom.**
 
-*Found by reading the write path after F9's provenance symptom did not match its apparent cause,
-then confirmed against the running app.*
+*(Iteration 1's withdrawn F5 — spot-checking a transient per-utterance failure instead of polling —
+is recorded in `.qa/report-iter1.md`.)*
 
-**Expected** (PRD §8, and AGENTS.md's statement of it): *"Provenance reports ACTUAL N, never
-intended N. … A line that claims 5 while aggregating 4 is the failure mode this project exists to
-prevent."* PRD §9: the six utterance categories are the analytical grouping.
+## Checked and deliberately not filed
 
-**Observed:** `AnnotatedRun`'s `annotations` envelope — `repIndex`, `utteranceId`, `category`,
-`corpusVersion`, `wer` — is read by every derivation in Results and **written by nothing outside
-test fixtures**. The persisted `Run` has no `annotations` field, and `category` / `utteranceId` /
-`corpusVersion` appear nowhere in `src/server` or `src/core`.
+- **Empty adequacy / fluency** — legitimately blocked on the operator; blind scoring needs a human.
+- **Empty by-category table, `corpus version unrecorded`, absent WER** — NOT filed separately
+  because they are ticket 028's documented deferred scope, not independent defects.
+- **Ticket 026** (a LiveSession records configured rather than actual providers) — filed in v2 and
+  knowingly deferred; the reporting layer is already gated, so no wrong number reaches a screen.
+- **Run ids visible in `data-run` attributes** — seed ids encode the arm; production ids are opaque
+  and visible labels stay neutral (`Run 1/2/3`).
 
-Three consequences, all latent until the corpus exists:
-
-1. **Provenance can only ever read "N of N".** `intendedReps` falls back to `completedReps`
-   whenever no `repIndex` is present, which in production is always — the denominator is
-   structurally incapable of exceeding the numerator. Observed live: Arm B with one complete and
-   one failed sweep run reads `1 of 1 reps completed`. A sweep that loses reps to failures will
-   report as clean and complete.
-2. **The "By utterance category" table can never fill** — `groupByCategory` skips any run without
-   `annotations.category`, so it renders zero rows no matter how many real sweeps run.
-3. **`corpus version unrecorded` is permanent**, and WER has no write path at all.
-
-`repIndex` is fixable today and is the load-bearing one: `createRunOnceExecutor` already receives
-`request.repIndex` and already stamps `request.origin` onto the Run — it simply drops the index.
-The corpus-metadata fields need a model that does not yet exist; ticket 028 scopes the split.
-
-**This finding corrects two dismissals made earlier in this same report** (see "Checked and
-deliberately not filed", now amended): the empty category table and `corpus version unrecorded`
-are *not* test-data artifacts waiting on the corpus. The corpus alone will not fix either.
-
-### F9 — Failed runs are invisible in Results · **MODERATE** · ticket 027
-
-*Flow H.* **Repro:** seed four Runs against one corpus Recording — Arm B/sweep/complete,
-Arm C/sweep/complete, ad-hoc/manual/complete, and **Arm B/sweep/failed** — then open
-Results → **By Recording & category**.
-
-**Expected** (PRD §7): *"**Failed runs are saved, visible, and excluded from every aggregate.**"*
-
-**Observed:** the table renders **three** rows and nothing indicates a run against this Recording
-failed.
-
-**Diagnosis — a render gap, not a dropped record.** `groupByRecording` groups on
-`(recordingId × configurationKey)`, so `run-failed-1` — which shares Arm B's configuration — is
-**absorbed into the Arm B row**, not discarded. The row model already carries `runCount: 2` against
-`n: 1`, `failedCount: 1`, and `'failed'` in `exclusionReasons`. The view renders only
-`excludedFromExperiments`, which is `false` for this group because the complete Arm B run passes
-the gate — so the row prints `in experiments` and every failure signal in the model is discarded at
-the view boundary.
-
-*(My first pass at this finding claimed the row was missing entirely and demanded a separate
-`failed` row. Reading `derive.ts` before filing showed the grouping is deliberate and correct;
-ticket 027 was rewritten to the actual defect. A separate row would have fought the model.)*
-
-**Bounded:** no wrong number is reported and no data is lost. The figures on that row are right —
-`n = 1`, p50 over the one measured run, cost over measured runs only — and the aggregation gate
-correctly excludes the failed run from every percentile, cost and delta. Replay's runs list shows
-all four cards, the failed one carrying *"tts stage timed out — run saved as failed, excluded from
-every aggregate"*. The defect is that Results alone gives no sign a failure occurred.
-
-The provenance symptom in the same scenario (`1 of 1 reps completed` for two attempts) has a
-**different and deeper cause** and is filed separately as **F10 / ticket 028** — fixing this
-finding will not fix that line.
-
-## Checked and deliberately **not** filed
-
-- ~~**`corpus version unrecorded`** — test-data artifact.~~ **AMENDED: this was wrong.** No write
-  path exists for `corpusVersion`; the real corpus will not fix it. Rolled into **F10 / ticket 028**.
-- ~~**Empty by-category table and WER** — known-empty by design, blocked on the corpus.~~
-  **AMENDED: also wrong** for the category table and WER — neither has a write path, so neither
-  fills when the corpus arrives. Rolled into **F10 / ticket 028**. Empty **adequacy/fluency** *is*
-  legitimately blocked on the operator (blind scoring needs a human), and stays not-filed.
-- **Run ids visible in `data-run` attributes** — seed ids encode the arm; production ids are opaque.
-  Visible labels stay neutral (`Run 1/2/3`).
-- **Ticket 026** (LiveSession records configured rather than actual providers) — filed and
-  knowingly deferred; not re-filed.
-
-## Escalations
-
-Unchanged from iteration 1, and none of them blocks this pass:
+## Escalations — unchanged, none blocking
 
 - **Audible autoplay** — Live states `autoplay on` and drives the playback path, but this
   environment has no audio output. Needs a human with speakers.
-- **Real-provider smoke** for ElevenLabs Scribe and Anthropic MT — costs money and Scribe 401s
+- **Real-provider smoke** for ElevenLabs Scribe and Anthropic MT — costs money, and Scribe 401s
   until the key scope gains `speech_to_text`.
 - **A real microphone session** — needs a grantable mic and a human speaking.
+- **The corpus itself**, and everything downstream of it: sweeps, WER, blind scores, the write-up,
+  the AWS deploy.
+
+## Note on QA fixture data
+
+`data/` currently holds QA seed Recordings and Runs (including deliberately failed and ad-hoc ones)
+plus three blind comparisons. It is gitignored working state. **Clear it before recording the real
+corpus** so no seeded figure can be mistaken for a measurement.
