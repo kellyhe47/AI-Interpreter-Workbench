@@ -1,5 +1,5 @@
 /**
- * ElevenLabs Scribe v2 Realtime STT adapter. STUB — tests first (TDD).
+ * ElevenLabs Scribe v2 Realtime STT adapter.
  *
  * Structurally mirrors `openai-stt.ts` (the exemplar WS-based STT adapter):
  * WebSocket transport injected through `deps.wsFactory`, an `AsyncQueue`
@@ -47,11 +47,41 @@
  * - Abort: an already-aborted signal yields nothing and opens NO connection;
  *   abort mid-stream closes the socket and the generator RETURNS cleanly.
  * - A socket close ends the generator cleanly.
+ *
+ * CONCRETE WIRE THIS FILE SPEAKS (all of it ASSUMED — reconcile against the
+ * real API during the operator's live smoke test; everything below is one
+ * edit away from the truth because nothing here is duplicated elsewhere):
+ *
+ *   URL     wss://api.elevenlabs.io/v1/speech-to-text/realtime
+ *             ?model_id=<model>[&language_code=<lang>]
+ *   header  xi-api-key: <key>
+ *   frame 0 { type: 'conversation_config',
+ *             audio_format: { encoding: 'pcm_s16le', sample_rate: 24000 },
+ *             vad: { silence_duration_ms: 500 }[, language_code] }
+ *   frame n { type: 'audio', audio: '<base64 PCM16-LE>' }   (one per chunk)
+ *
+ * The model id appears ONLY in the URL, never in a frame, so overriding
+ * `config.model` leaves no trace of the default anywhere on the wire.
+ *
+ * - tStart/tEnd: milliseconds since transcription start (wall-clock based);
+ *   tStart is the start of the CURRENT turn. The contract only requires
+ *   numbers.
  */
 
 import { ProviderError } from '../../core/types';
 import type { ProviderCallOpts, SttEvent, SttProvider } from '../../core/types';
-import type { WsFactory } from './transport';
+import {
+  AsyncQueue,
+  bytesToBase64,
+  int16ToLeBytes,
+  loadDefaultWsFactory,
+  waitForOpen,
+} from './internal';
+import { envVar, type WsFactory } from './transport';
+
+export const ELEVENLABS_DEFAULT_STT_MODEL = 'scribe_v2_realtime';
+
+const REALTIME_BASE_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 
 export interface ElevenLabsSttConfig {
   apiKey?: string;
@@ -65,21 +95,161 @@ export interface ElevenLabsSttDeps {
   wsFactory?: WsFactory;
 }
 
+/** Server messages this adapter understands (both assumed encodings). */
+interface ScribeMessage {
+  type?: unknown;
+  text?: unknown;
+  is_final?: unknown;
+  error?: unknown;
+}
+
+/** null = ignore; otherwise the turn-relative role of the message. */
+function classify(msg: ScribeMessage): 'partial' | 'final' | null {
+  const type = typeof msg.type === 'string' ? msg.type : undefined;
+  if (type === 'partial_transcript') return 'partial';
+  if (type === 'committed_transcript') return 'final';
+  // Encoding B: a single 'transcript' type discriminated by the boolean flag.
+  if (type === 'transcript') return msg.is_final === true ? 'final' : 'partial';
+  return null;
+}
+
 export class ElevenLabsStt implements SttProvider {
   readonly name = 'elevenlabs';
   readonly config: ElevenLabsSttConfig;
+  /** Resolved at construction (config first, then ELEVENLABS_API_KEY). */
+  readonly apiKey: string | undefined;
 
   protected readonly deps: ElevenLabsSttDeps;
 
   constructor(config: ElevenLabsSttConfig = {}, deps: ElevenLabsSttDeps = {}) {
     this.config = config;
+    this.apiKey = config.apiKey ?? envVar('ELEVENLABS_API_KEY');
     this.deps = deps;
   }
 
   async *transcribe(
-    _audio: AsyncIterable<Int16Array>,
-    _opts?: ProviderCallOpts,
+    audio: AsyncIterable<Int16Array>,
+    opts?: ProviderCallOpts,
   ): AsyncGenerator<SttEvent, void, void> {
-    throw new ProviderError('stub: not implemented (ticket 004)');
+    const signal = opts?.signal;
+    if (signal?.aborted) return;
+
+    const wsFactory = this.deps.wsFactory ?? (await loadDefaultWsFactory());
+    if (signal?.aborted) return;
+
+    const model = this.config.model ?? ELEVENLABS_DEFAULT_STT_MODEL;
+    const lang = this.config.languageCode;
+    const url =
+      `${REALTIME_BASE_URL}?model_id=${encodeURIComponent(model)}` +
+      (lang === undefined ? '' : `&language_code=${encodeURIComponent(lang)}`);
+    const ws = wsFactory(url, { headers: { 'xi-api-key': this.apiKey ?? '' } });
+
+    const queue = new AsyncQueue<SttEvent>();
+    let wsClosed = false;
+    const closeWs = (): void => {
+      if (wsClosed) return;
+      wsClosed = true;
+      try {
+        ws.close();
+      } catch {
+        // socket may already be gone
+      }
+    };
+    const onAbort = (): void => {
+      queue.abort();
+      closeWs();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    const t0 = Date.now();
+    /** Start of the CURRENT turn; reset by every committed message. */
+    let turnStart: number | null = null;
+    let sawFinal = false;
+    let pumpDone = false;
+    const maybeEnd = (): void => {
+      if (pumpDone && sawFinal) queue.end();
+    };
+
+    ws.on('message', (data) => {
+      let msg: ScribeMessage;
+      try {
+        msg = JSON.parse(String(data)) as ScribeMessage;
+      } catch {
+        return;
+      }
+      // Both error shapes: {type:'error', error:{message}} and {error:'...'}.
+      if (msg.type === 'error' || (msg.error !== undefined && msg.error !== null)) {
+        queue.fail(
+          new ProviderError(`elevenlabs stt error: ${JSON.stringify(msg.error ?? msg)}`),
+        );
+        return;
+      }
+      const role = classify(msg);
+      if (role === null) return; // unknown/lifecycle messages are ignored
+      const now = Date.now() - t0;
+      if (turnStart === null) turnStart = now;
+      // Scribe sends the FULL running transcript per message — pass it through,
+      // never accumulate (accumulating would double the text).
+      queue.push({
+        type: role,
+        text: typeof msg.text === 'string' ? msg.text : '',
+        tStart: turnStart,
+        tEnd: now,
+      });
+      if (role === 'final') {
+        turnStart = null; // next turn starts fresh
+        sawFinal = true;
+        maybeEnd();
+      }
+    });
+    ws.on('error', (err) => {
+      queue.fail(new ProviderError(`elevenlabs stt transport error: ${String(err)}`));
+    });
+    ws.on('close', () => queue.end());
+
+    // Pump: config frame first, then one base64 audio frame per chunk AS THE
+    // CHUNK ARRIVES (the input iterable is never drained ahead of sending).
+    void (async () => {
+      await waitForOpen(ws);
+      if (wsClosed || queue.isDone) return;
+      ws.send(
+        JSON.stringify({
+          type: 'conversation_config',
+          audio_format: {
+            encoding: 'pcm_s16le',
+            // 24 kHz is pinned project-wide (PRD §8).
+            sample_rate: 24000,
+          },
+          // Endpointing pinned to 500 ms across every arm (PRD §8).
+          vad: { silence_duration_ms: 500 },
+          ...(lang === undefined ? {} : { language_code: lang }),
+        }),
+      );
+      for await (const chunk of audio) {
+        if (wsClosed || queue.isDone) return;
+        ws.send(
+          JSON.stringify({
+            type: 'audio',
+            audio: bytesToBase64(int16ToLeBytes(chunk)),
+          }),
+        );
+      }
+      pumpDone = true;
+      maybeEnd();
+    })().catch((err: unknown) => {
+      queue.fail(
+        err instanceof ProviderError
+          ? err
+          : new ProviderError(`elevenlabs stt input error: ${String(err)}`),
+      );
+    });
+
+    try {
+      for await (const event of queue) yield event;
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
+      queue.abort();
+      closeWs();
+    }
   }
 }
