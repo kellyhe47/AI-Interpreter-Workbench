@@ -1,13 +1,19 @@
 /**
  * Provider registry.
  *
- * - createStt: 'fixture' -> FixtureStt, 'openai' -> OpenAiStt.
- * - createMt:  'fixture' -> FixtureMt,  'openai' -> OpenAiMt.
+ * - createStt: 'fixture' -> FixtureStt, 'openai' -> OpenAiStt,
+ *              'elevenlabs' -> ElevenLabsStt.
+ * - createMt:  'fixture' -> FixtureMt,  'openai' -> OpenAiMt,
+ *              'anthropic' -> AnthropicMt.
  * - createTts: 'fixture' -> FixtureTts, 'openai' -> OpenAiTts,
  *              'elevenlabs' -> ElevenLabsTts.
  * - options argument is optional and forwarded to the constructor.
  * - Unknown name throws an Error whose message contains the unknown name AND
  *   lists ALL known provider names for that kind.
+ *
+ * Same-vendor model swaps are config-only and get NO registry name of their
+ * own: 'gpt-4o-mini-transcribe' is createStt('openai', {model}), and
+ * Multilingual v2 is createTts('elevenlabs', {modelId}).
  */
 
 import type { MtProvider, SttProvider, TtsProvider } from './types';
@@ -24,6 +30,11 @@ import {
   ElevenLabsTts,
   type ElevenLabsTtsConfig,
 } from '../server/providers/elevenlabs-tts';
+import {
+  ElevenLabsStt,
+  type ElevenLabsSttConfig,
+} from '../server/providers/elevenlabs-stt';
+import { AnthropicMt, type AnthropicMtConfig } from '../server/providers/anthropic-mt';
 
 function unknownProvider(kind: string, name: string, known: readonly string[]): Error {
   return new Error(
@@ -37,7 +48,8 @@ export function createStt(
 ): SttProvider {
   if (name === 'fixture') return new FixtureStt(options as FixtureSttOptions);
   if (name === 'openai') return new OpenAiStt(options as OpenAiSttConfig);
-  throw unknownProvider('STT', name, ['fixture', 'openai']);
+  if (name === 'elevenlabs') return new ElevenLabsStt(options as ElevenLabsSttConfig);
+  throw unknownProvider('STT', name, ['fixture', 'openai', 'elevenlabs']);
 }
 
 export function createMt(
@@ -46,7 +58,8 @@ export function createMt(
 ): MtProvider {
   if (name === 'fixture') return new FixtureMt(options as FixtureMtOptions);
   if (name === 'openai') return new OpenAiMt(options as OpenAiMtConfig);
-  throw unknownProvider('MT', name, ['fixture', 'openai']);
+  if (name === 'anthropic') return new AnthropicMt(options as AnthropicMtConfig);
+  throw unknownProvider('MT', name, ['fixture', 'openai', 'anthropic']);
 }
 
 export function createTts(
