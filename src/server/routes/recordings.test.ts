@@ -244,3 +244,132 @@ describe('AC6/AC7: storage failures map to status codes with a machine-readable 
     expect((await errorBody(res)).code).toBe(testCase.code);
   });
 });
+
+/**
+ * Ticket 030 — the PRD §9 corpus manifest on a Recording.
+ *
+ * A corpus Recording is a <=45 s take holding ~4 utterances, each with its OWN
+ * category and reference text (SS9: "categories are distributed across the
+ * recordings, not grouped"). Unlike the runs route, recordings VALIDATE the
+ * manifest rather than passing unknown keys through: a malformed manifest does
+ * not fail loudly later, it silently mis-attributes every category and WER
+ * figure derived from it.
+ */
+describe('ticket 030 — corpus utterance manifest', () => {
+  const MANIFEST = [
+    { id: 'en-1-1', index: 1, category: 'short-reply', trueSpeechEndMs: 4000, referenceText: 'Yes.' },
+    { id: 'en-1-2', index: 2, category: 'numbers-dates', trueSpeechEndMs: 16000, referenceText: 'Take 250 milligrams.' },
+    { id: 'en-1-3', index: 3, category: 'disfluency', trueSpeechEndMs: 27500, referenceText: 'I— sorry, Tuesday.' },
+    { id: 'en-1-4', index: 4, category: 'proper-nouns', trueSpeechEndMs: 41000, referenceText: 'Doctor Nguyen.' },
+  ];
+  const CORPUS = {
+    origin: 'corpus' as const,
+    durationMs: 45000,
+    speechEndMs: 41000,
+    utterances: MANIFEST,
+    corpusVersion: 'corpus-v1',
+  };
+
+  it('persists the manifest and returns it on the full round trip', async () => {
+    const api = await boot();
+    const created = await createRecording(api, CORPUS);
+
+    expect(created.utterances).toEqual(MANIFEST);
+    expect(created.corpusVersion).toBe('corpus-v1');
+
+    // Survives the store, not just the response body.
+    const onDisk = JSON.parse(
+      await fs.readFile(LAYOUT.recordingJson(api.dir, created.id), 'utf8'),
+    ) as Recording;
+    expect(onDisk.utterances).toEqual(MANIFEST);
+    expect(onDisk.corpusVersion).toBe('corpus-v1');
+
+    const fetched = (await (await fetch(`${api.base}/api/recordings/${created.id}`)).json()) as Recording;
+    expect(fetched.utterances).toEqual(MANIFEST);
+    expect(fetched.corpusVersion).toBe('corpus-v1');
+  });
+
+  it('a Cantonese take carries no referenceText — improvised, no written script (SS9)', async () => {
+    const api = await boot();
+    const yue = MANIFEST.map(({ referenceText: _drop, ...rest }) => rest);
+    const created = await createRecording(api, { ...CORPUS, sourceLanguage: 'yue', utterances: yue });
+    expect(created.utterances).toEqual(yue);
+    for (const u of created.utterances ?? []) expect(u).not.toHaveProperty('referenceText');
+  });
+
+  it('a mic Recording carries NO manifest key at all — not an empty array', async () => {
+    const api = await boot();
+    const created = await createRecording(api);
+    expect(created).not.toHaveProperty('utterances');
+    expect(created).not.toHaveProperty('corpusVersion');
+
+    const onDisk = JSON.parse(
+      await fs.readFile(LAYOUT.recordingJson(api.dir, created.id), 'utf8'),
+    ) as Recording;
+    expect(onDisk).not.toHaveProperty('utterances');
+  });
+
+  it('a corpus Recording with a manifest is still undeletable (SS17 25c)', async () => {
+    const api = await boot();
+    const created = await createRecording(api, CORPUS);
+    const res = await fetch(`${api.base}/api/recordings/${created.id}`, { method: 'DELETE' });
+    expect(res.status).toBe(409);
+  });
+
+  // Each rejection exists because breaking the rule yields a plausible WRONG
+  // number rather than an obvious failure.
+  const bad: Array<{ name: string; utterances: unknown; match: RegExp }> = [
+    { name: 'a non-array manifest', utterances: { id: 'x' }, match: /must be an array/ },
+    { name: 'an empty manifest', utterances: [], match: /must not be empty/ },
+    {
+      name: 'a duplicate utterance id',
+      utterances: [MANIFEST[0], { ...MANIFEST[1], id: 'en-1-1' }],
+      match: /duplicate utterance id/,
+    },
+    {
+      name: 'a gap in the indices',
+      utterances: [MANIFEST[0], { ...MANIFEST[1], index: 9 }],
+      match: /indices must be 1\.\.2/,
+    },
+    {
+      name: 'an unknown category',
+      utterances: [{ ...MANIFEST[0], category: 'numbers' }],
+      match: /unknown category/,
+    },
+    {
+      name: 'a boundary beyond the clip duration',
+      utterances: [{ ...MANIFEST[0], trueSpeechEndMs: 45001 }],
+      match: /beyond the clip duration/,
+    },
+    {
+      name: 'a non-monotonic boundary',
+      utterances: [MANIFEST[0], { ...MANIFEST[1], trueSpeechEndMs: 3000 }],
+      match: /does not advance past the previous speech end/,
+    },
+  ];
+
+  for (const { name, utterances, match } of bad) {
+    it(`rejects ${name} with 400 and a named reason`, async () => {
+      const api = await boot();
+      const res = await postRecording(api, { ...CORPUS, utterances });
+      expect(res.status).toBe(400);
+      const body = await errorBody(res);
+      expect(body.code).toBe('invalid-recording');
+      expect(body.message).toMatch(match);
+    });
+  }
+
+  it('rejects an empty corpusVersion rather than storing a blank provenance', async () => {
+    const api = await boot();
+    const res = await postRecording(api, { ...CORPUS, corpusVersion: '' });
+    expect(res.status).toBe(400);
+    expect((await errorBody(res)).message).toMatch(/corpusVersion/);
+  });
+
+  it('a rejected manifest writes NOTHING — no orphan wav, no metadata', async () => {
+    const api = await boot();
+    await postRecording(api, { ...CORPUS, utterances: [] });
+    const listed = (await (await fetch(`${api.base}/api/recordings`)).json()) as Recording[];
+    expect(listed).toEqual([]);
+  });
+});

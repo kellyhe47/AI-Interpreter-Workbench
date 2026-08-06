@@ -29,6 +29,7 @@
 import { json, Router } from 'express';
 import type { Request, Response } from 'express';
 
+import { validateManifest, type CorpusUtterance } from '../../core/corpus';
 import type { NewRecording, RecordingOrigin, Storage } from '../storage';
 import { handleAsync, JSON_BODY_LIMIT, sendBadRequest, sendWav } from './http';
 
@@ -45,6 +46,8 @@ interface RecordingUploadBody {
   origin?: unknown;
   createdAt?: unknown;
   audioBase64?: unknown;
+  utterances?: unknown;
+  corpusVersion?: unknown;
 }
 
 /** Thrown by `parseUpload` for a malformed body; mapped to 400 by the handler. */
@@ -62,6 +65,8 @@ function parseUpload(body: RecordingUploadBody | undefined): {
     origin,
     createdAt,
     audioBase64,
+    utterances,
+    corpusVersion,
   } = body ?? {};
 
   if (typeof label !== 'string') throw new InvalidUpload('label must be a string');
@@ -89,6 +94,22 @@ function parseUpload(body: RecordingUploadBody | undefined): {
     origin: origin as RecordingOrigin,
   };
   if (typeof createdAt === 'number') meta.createdAt = createdAt;
+
+  // Ticket 030. Unlike the runs route, recordings VALIDATE rather than pass
+  // unknown keys through: a malformed manifest does not fail loudly later, it
+  // silently mis-attributes every category and WER figure derived from it.
+  if (utterances !== undefined) {
+    if (!Array.isArray(utterances)) throw new InvalidUpload('utterances must be an array');
+    const reason = validateManifest(utterances as CorpusUtterance[], durationMs);
+    if (reason !== null) throw new InvalidUpload(reason);
+    meta.utterances = utterances as CorpusUtterance[];
+  }
+  if (corpusVersion !== undefined) {
+    if (typeof corpusVersion !== 'string' || corpusVersion.length === 0) {
+      throw new InvalidUpload('corpusVersion must be a non-empty string');
+    }
+    meta.corpusVersion = corpusVersion;
+  }
 
   return { meta, audio: new Uint8Array(Buffer.from(audioBase64, 'base64')) };
 }

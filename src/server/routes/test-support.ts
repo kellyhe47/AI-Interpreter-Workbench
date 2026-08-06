@@ -76,6 +76,10 @@ export interface RecordingUploadOverrides {
   speechEndMs?: number;
   origin?: 'mic' | 'corpus';
   audio?: Uint8Array;
+  /** Ticket 030 — the PRD §9 corpus manifest. `unknown` so a malformed-manifest
+   *  test can post anything at all and still exercise the route's validation. */
+  utterances?: unknown;
+  corpusVersion?: unknown;
 }
 
 /**

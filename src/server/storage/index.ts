@@ -239,6 +239,11 @@ export function createStorage(baseDir: string): Storage {
         origin: meta.origin,
         createdAt: meta.createdAt ?? Date.now(),
       };
+      // Ticket 030: additive and only when supplied, so a mic Recording — and
+      // every Recording written before 030 — carries no key at all rather than
+      // an empty manifest that would read as "a corpus take with no utterances".
+      if (meta.utterances !== undefined) rec.utterances = meta.utterances;
+      if (meta.corpusVersion !== undefined) rec.corpusVersion = meta.corpusVersion;
       await ensureDir(recordingsDir);
       // Audio first: a crash between the two writes leaves an orphan wav, which
       // is inert, rather than metadata pointing at audio that never landed.

@@ -101,6 +101,7 @@
  */
 
 import { deriveArmTag, type ArmTag, type ProviderTriple } from '../../core/arms';
+import type { CorpusUtterance } from '../../core/corpus';
 import type { RunOrigin } from '../../core/protocol';
 import type { Mode, UtteranceRecord } from '../../core/timing';
 
@@ -129,6 +130,12 @@ export interface Recording {
   speechEndMs: number;
   origin: RecordingOrigin;
   createdAt: number;
+  /**
+   * Ticket 030 — mirror of the server's PRD §9 corpus manifest. Per-utterance
+   * category and reference; a mic Recording has none. See src/core/corpus.ts.
+   */
+  utterances?: CorpusUtterance[];
+  corpusVersion?: string;
   deletedAt?: number;
 }
 

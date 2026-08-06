@@ -1,3 +1,5 @@
+import type { CorpusUtterance } from '../../core/corpus';
+
 /**
  * Entity vocabulary for the filesystem store (PRD §7). Server-only: this
  * module is compiled by tsconfig.server.json alone.
@@ -27,6 +29,15 @@ export interface Recording {
   speechEndMs: number;
   origin: RecordingOrigin;
   createdAt: number;
+  /**
+   * Ticket 030 — the PRD §9 corpus manifest. A corpus Recording is a ≤45 s take
+   * holding ~4 utterances, each with its OWN category and reference; a mic
+   * Recording has none. Optional at every layer: storage is append-only and
+   * every Recording written before 030 has no key at all.
+   */
+  utterances?: CorpusUtterance[];
+  /** Stamped when the corpus take is saved; feeds the provenance line. */
+  corpusVersion?: string;
   /** Set by the SOFT delete. Audio and JSON both survive. */
   deletedAt?: number;
 }
@@ -38,6 +49,8 @@ export interface NewRecording {
   durationMs: number;
   speechEndMs: number;
   origin: RecordingOrigin;
+  utterances?: CorpusUtterance[];
+  corpusVersion?: string;
   /** Optional; the store stamps one when omitted. */
   createdAt?: number;
 }
