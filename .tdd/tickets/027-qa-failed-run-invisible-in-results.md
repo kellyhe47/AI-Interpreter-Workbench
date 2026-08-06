@@ -1,7 +1,7 @@
 ---
 id: 027
 title: A failed run leaves no trace in Results — absorbed into its config row, failedCount never rendered
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/views/ResultsView.tsx, src/client/views/ResultsView.test.tsx]
@@ -84,3 +84,21 @@ Ticket **028** — the same failure is also invisible in the Experiments provena
 (`1 of 1 reps completed` for a cell with two attempts), but for an unrelated and deeper reason:
 nothing ever writes `repIndex` onto a persisted Run. That is a separate defect with a separate
 fix; this ticket is the view-layer one and does not resolve it.
+
+## Attempt log
+
+- iter 1: green, zero implementation retries. 53 tests in ResultsView.test.tsx; full suite 1063/61.
+- Test-writer caught a defect the ticket text understated: AC4 described the all-failed cost cell as
+  "existing treatment", but it rendered `$0.000` — a zero over zero samples, which AGENTS.md
+  explicitly calls out as reading like a measurement. Fixed as part of this ticket, gated on
+  `n === 0` rather than "has failed runs" so fixture/manual/ad-hoc n=0 rows behave consistently.
+- Mutation-checked, three properties, each killing exactly one test:
+  | mutation | result |
+  |---|---|
+  | emit failure hooks unconditionally | GUARD test fails — absence on clean ledgers is enforced |
+  | gate the note on `excludedFromExperiments` (the original bug) | MIXED test fails — the mixed group is the load-bearing case |
+  | revert cost dashing at n=0 | ALL-FAILED test fails |
+- `derive.ts` untouched, as required — no aggregate moved and no failed run got its own row.
+- Implementer note worth keeping: ResultsView's source-guard test greps the WHOLE file for
+  `/\$\s*\d/`, comments included, so even explanatory prose in that file must avoid money and
+  duration literals.
