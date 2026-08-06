@@ -27,7 +27,19 @@ These exist because a violation would produce a number that looks fine and is wr
   `isRealRun` enforce it; don't weaken them. Placeholder recording ids start with `placeholder`.
 - **Provenance reports ACTUAL N, never intended N.** `4 of 5 reps completed` — and the p50 beside
   it is computed over those 4. A line that claims 5 while aggregating 4 is the failure mode this
-  project exists to prevent.
+  project exists to prevent. **The denominator comes from `annotations.repIndex` over *attempted*
+  sweep runs of any status**, which is why the runner must stamp it (`createRunOnceExecutor`). With
+  no `repIndex` the denominator silently falls back to the numerator and every line reads a clean
+  `N of N` — it looks right, and it is the bug that hid until a real sweep would have run.
+- **A derivation holding the right answer is not the same as a screen showing it.** Three separate
+  defects were model-correct and view-wrong: `failedCount` computed and never rendered, the cost
+  cell showing `$0.000` over zero samples, the provenance stamp gated on ledger contents while the
+  panel showed a load failure. When you add a field to a row model, render it or explain why not.
+- **Zero is a measurement; absence is `—`.** Never print `0`, `$0.000` or `0 ms` for a cell with no
+  samples. Gate on `n === 0`, not on why `n` is 0.
+- **Excluded and failed are independent facts.** A group can be both `in experiments` and partially
+  failed; a row must show both rather than choose. Failed runs are absorbed into their
+  `(recording × configuration)` group by design — they do not get their own row.
 - **Replay is paced at 1× in 20 ms framing.** `src/client/replay/pacer.ts`, wall-clock anchored to
   `t0 + n*FRAME_MS`, never cumulative. Dumping the buffer invalidates VAD, endpointing and every
   latency figure — **and looks like it worked**. Any replay path must go through the pacer.
@@ -84,6 +96,16 @@ These exist because a violation would produce a number that looks fine and is wr
 - **Storage is append-only.** `ledger.jsonl` is written with the `a` flag, one JSON object per line,
   never read-modify-write: a crash mid-write must cost one line, not the benchmark history.
   `readLedger` is tolerant and skips an unparseable line.
+- **A Run is stored TWICE, deliberately** — one queryable `data/runs/<id>.json` (what `listRuns` and
+  `GET /api/runs` serve) plus one line in the append-only `ledger.jsonl` (the history). The
+  separation is documented at `storage/index.ts:34`. Editing one and not the other leaves the store
+  inconsistent, and a restarted server will still serve what you thought you removed.
+- **`POST /api/recordings` assigns its own id** and ignores one supplied in the body. Read the id
+  back from the response; seeding runs against an id you chose yourself silently orphans them.
+- **Storage and the run route pass unknown keys straight through** — `appendRun` stringifies the
+  whole object and the route casts `req.body`. So a new persisted field needs no runtime change and
+  will appear to work while being untyped everywhere. Force it with a **compile-level** test that
+  annotates a `Run` literal directly; a runtime assertion alone proves nothing here.
 - **Recording audio is immutable; deletion is soft; corpus Recordings are undeletable** — the
   operation is *disallowed* (no affordance, 409 from the API), not warned about. A Run must always
   be able to reach the input that produced it.
@@ -116,6 +138,14 @@ These exist because a violation would produce a number that looks fine and is wr
 
 - **Real corpus recording** — 9 Recordings / 36 utterances (EN + ES read verbatim, YUE improvised).
   Everything downstream is blocked on this: sweeps, WER, blind scoring, every reported number.
+  **Land ticket 028's deferred scope WITH this work, not after it.** `utteranceId`, `category`,
+  `corpusVersion` and `wer` still have no write path, so the "By utterance category" table renders
+  zero rows and every provenance line ends `corpus version unrecorded` no matter how many real
+  sweeps run. `repIndex` is already plumbed and is the template; 028's notes specify the rest.
+  Recording the corpus without this yields a corpus whose designed analysis cannot execute.
+- **Clear `data/` before recording the real corpus.** It holds QA seed Recordings and Runs,
+  including deliberately failed and ad-hoc ones, plus blind comparisons. Gitignored working state —
+  but a seeded figure sitting next to a real one is exactly the confusion this project forbids.
 - **ElevenLabs key scope** — currently TTS-only. Scribe STT needs `speech_to_text` (it will 401
   until then) and billing verification needs `user_read`. No ElevenLabs cost figure may be reported
   until aggregate-vs-per-chunk billing is verified.
