@@ -125,11 +125,23 @@ export function rmsToBars(value: number): number {
   return 5;
 }
 
-export function int16ToBase64(pcm: Int16Array): string {
-  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+/**
+ * Ticket 036 — base64 of ARBITRARY bytes, not only raw PCM. A recorded take
+ * travels to POST /api/recordings as a WAV (header included), so the encoder
+ * cannot assume an Int16Array. Chunked because a one-minute take is millions of
+ * bytes and `String.fromCharCode(...all)` would blow the argument limit.
+ */
+export function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
   let s = '';
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]!);
+  for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+    s += String.fromCharCode(...bytes.subarray(offset, offset + CHUNK));
+  }
   return btoa(s);
+}
+
+export function int16ToBase64(pcm: Int16Array): string {
+  return bytesToBase64(new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
 }
 
 export function base64ToInt16(b64: string): Int16Array {

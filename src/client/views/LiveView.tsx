@@ -54,7 +54,9 @@
  *
  * Permission-denied BLOCKING card [data-denied-card]: names BOTH the site
  * permission and the OS permission layers, says browsers do not re-prompt,
- * and offers 'Retry microphone' (a machine no-op while denied).
+ * and offers 'Retry microphone' (a machine no-op while denied). Ticket 036
+ * moved that remediation copy into src/client/copy/micDenial.ts, which Replay's
+ * record flow shows too — one wording of it exists in the product, not two.
  *
  * Session cards: [data-source-card]; exactly ONE [data-target-card] with
  * [data-target-status] in 'in-flight' | 'ready' | 'playing' | 'failed',
@@ -74,6 +76,12 @@ import {
   type CascadeTimestamps,
   type RealtimeTimestamps,
 } from '../../core/timing';
+import {
+  MIC_DENIED_HEADING,
+  MIC_DENIED_NO_REPROMPT,
+  MIC_DENIED_OS_SETTING,
+  MIC_DENIED_SITE_PERMISSION,
+} from '../copy/micDenial';
 import {
   LIVE_MAX_SESSION_MS,
   MAX_RECONNECT_ATTEMPTS,
@@ -1041,7 +1049,9 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
       {denied && (
         <div data-denied-card style={centeredCardStyle}>
           <MicIcon size={26} stroke="var(--negative)" />
-          <div style={{ font: '600 14px var(--font-sans)', marginTop: 12 }}>Microphone blocked</div>
+          <div style={{ font: '600 14px var(--font-sans)', marginTop: 12 }}>
+            {MIC_DENIED_HEADING}
+          </div>
           <div
             style={{
               font: '400 12.5px/1.7 var(--font-sans)',
@@ -1057,18 +1067,9 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
             <p style={{ margin: '0 0 8px' }}>
               This session cannot start until the microphone is unblocked.
             </p>
-            <p style={{ margin: '0 0 8px' }}>
-              Check the browser site permission: allow microphone access for this site (look for
-              the mic icon in the address bar).
-            </p>
-            <p style={{ margin: '0 0 8px' }}>
-              Check the OS microphone setting: your system privacy settings must allow this browser
-              to use the microphone.
-            </p>
-            <p style={{ margin: 0 }}>
-              Browsers do not re-prompt after a denial — reset the site permission first, then
-              retry.
-            </p>
+            <p style={{ margin: '0 0 8px' }}>{MIC_DENIED_SITE_PERMISSION}</p>
+            <p style={{ margin: '0 0 8px' }}>{MIC_DENIED_OS_SETTING}</p>
+            <p style={{ margin: 0 }}>{MIC_DENIED_NO_REPROMPT}</p>
           </div>
           <button onClick={() => actions.start()} style={primaryBtnStyle}>
             Retry microphone

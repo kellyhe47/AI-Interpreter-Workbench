@@ -44,10 +44,18 @@
  * production build.
  */
 
+import { CORPUS_VERSION } from '../core/corpus';
 import { readWav } from '../harness/wav';
 import { startCapture, type CapturePipeline, type CaptureResult } from './audio/capture';
 import { ArmPlayback, type PlaybackAudioContextLike } from './audio/playback';
 import { createRunOnceExecutor, startBatch, type BatchHandle } from './batch/runner';
+import {
+  startTake,
+  type CaptureDenied,
+  type RecordedTake,
+  type TakeRecorder,
+} from './replay/capture';
+import { segmentTake } from './replay/segment';
 import {
   createBlindComparisonsClient,
   createRecordingsClient,
@@ -62,7 +70,12 @@ import { RunLedger } from './state/ledger';
 import { CascadeTransport, type WsLike } from './transport/cascade';
 import { RealtimeTransport, type RtcPeerConnectionLike } from './transport/realtime';
 import type { InterpreterTransport } from './transport/types';
-import type { ReplayBatchRequest, ReplayDeps, ReplayRunRequest } from './views/ReplayView';
+import type {
+  ReplayBatchRequest,
+  ReplayDeps,
+  ReplayRunRequest,
+  ReplayTakeOptions,
+} from './views/ReplayView';
 import type { CaptureCallbacks, LiveRunConfig, SessionDeps } from './views/useSessionController';
 
 /**
@@ -195,6 +208,29 @@ export function buildReplayDeps(): ReplayDeps {
         playback.play();
       });
     },
+    // Ticket 036 — the record-a-clip seams, bound to the REAL browser. Same
+    // getUserMedia path Live uses (audio/capture.ts through replay/capture.ts),
+    // so there is still exactly one microphone path in the client.
+    startTake: (options: ReplayTakeOptions): Promise<TakeRecorder | CaptureDenied> =>
+      startTake({
+        getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
+        audioContextFactory: () => new AudioContext(),
+        pipeline: browserPipeline,
+        onLevel: options.onLevel,
+        onMaxDuration: options.onMaxDuration,
+        maxDurationMs: options.maxDurationMs,
+      }),
+    segmentTake,
+    // ON DEMAND ONLY, like playRun: a fresh context per press, never at render.
+    playTake: (take: RecordedTake): void => {
+      const playback = new ArmPlayback({
+        audioContextFactory: () => new AudioContext() as unknown as PlaybackAudioContextLike,
+        autoplay: false,
+      });
+      playback.enqueue(take.samples);
+      playback.play();
+    },
+    corpusVersion: CORPUS_VERSION,
     now: () => Date.now(),
     newId: () => crypto.randomUUID(),
   };

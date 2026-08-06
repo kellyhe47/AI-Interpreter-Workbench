@@ -22,6 +22,15 @@
  * Root [data-replay-view]. Header: 'Replay', the verbatim subline, and a
  * [data-record-new] button named 'Record new clip · max 1 min'.
  *
+ * RecordTake — ticket 036, PRD §7 step 1. [data-record-new] OPENS it; it is
+ * absent until then, so nothing goes near a microphone on arrival. Offered only
+ * when the host supplied BOTH capture seams (startTake, segmentTake): without
+ * them the button is disabled and says so, the same rule blind compare follows.
+ * The view owns opening, closing and the POST — the take, its segmentation and
+ * its manifest belong to the component. A save APPENDS the created Recording,
+ * so the clip is in the library without a reload. Its own DOM contract is in
+ * src/client/components/replay/RecordTake.tsx.
+ *
  * RecordingsLibrary [data-recordings-library]
  *   [data-recording-row][data-recording=<id>][data-origin='mic'|'corpus']
  *     [data-selected='true'|'false'], containing
@@ -100,12 +109,14 @@ import { useCallback, useEffect, useState, type CSSProperties, type ReactElement
 import { ARMS, DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL } from '../../core/arms';
 import BatchProgressPanel from '../components/replay/BatchProgress';
 import BlindCompare from '../components/replay/BlindCompare';
+import RecordTake from '../components/replay/RecordTake';
 import RecordingsLibrary from '../components/replay/RecordingsLibrary';
 import RunConfigPanel, { type ReplayConfigState } from '../components/replay/RunConfigPanel';
 import RunsList from '../components/replay/RunsList';
 import type { BatchConfiguration, BatchHandle, BatchProgress } from '../batch/runner';
 import type {
   BlindComparisonsClient,
+  NewRecordingInput,
   RecordingsClient,
   RunsClient,
 } from '../replay/recordingsClient';
@@ -219,10 +230,13 @@ const OPEN_BLIND = 'compare blind (pick 2 runs)';
 const CLOSE_BLIND = 'close blind compare';
 
 /**
- * Microphone capture lands with the Live view's recorder; until then the
- * affordance states the cap it will enforce rather than pretending to record.
+ * Ticket 036 — why the record affordance is refused on a host that supplied no
+ * capture seams (fixture bags, tests, a future headless embed). It is a fact
+ * about the HOST, not a promise about a feature: the flow exists, this bag just
+ * cannot reach a microphone.
  */
-const RECORD_NEW_HINT = 'Microphone capture is not wired into Replay yet';
+const NO_CAPTURE_HINT =
+  'This host supplied no microphone capture seams, so a clip cannot be recorded here.';
 
 /**
  * Retained repetitions per (recording × configuration) cell — PRD §17 22c.
@@ -266,18 +280,20 @@ const blindToggleStyle: CSSProperties = {
   cursor: 'pointer',
 };
 
-const recordButtonStyle: CSSProperties = {
-  marginLeft: 'auto',
-  border: '1px solid var(--border-default)',
-  borderRadius: 'var(--radius-md)',
-  background: 'var(--surface-card)',
-  color: 'var(--text-secondary)',
-  fontFamily: 'inherit',
-  fontSize: 'var(--text-sm)',
-  fontWeight: 'var(--weight-medium)',
-  padding: 'var(--space-2) var(--space-3)',
-  cursor: 'not-allowed',
-};
+function recordButtonStyle(enabled: boolean): CSSProperties {
+  return {
+    marginLeft: 'auto',
+    border: '1px solid var(--border-default)',
+    borderRadius: 'var(--radius-md)',
+    background: 'var(--surface-card)',
+    color: enabled ? 'var(--text-body)' : 'var(--text-secondary)',
+    fontFamily: 'inherit',
+    fontSize: 'var(--text-sm)',
+    fontWeight: 'var(--weight-medium)',
+    padding: 'var(--space-2) var(--space-3)',
+    cursor: enabled ? 'pointer' : 'not-allowed',
+  };
+}
 
 /* ----------------------------------------------------------------- state -- */
 
@@ -322,6 +338,8 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   const [config, setConfig] = useState<ReplayConfigState>(initialConfig);
   const [sweep, setSweep] = useState<SweepState | null>(null);
   const [blindOpen, setBlindOpen] = useState(false);
+  /** Ticket 036 — the record flow is OPENED, never standing: no panel, no mic. */
+  const [recordOpen, setRecordOpen] = useState(false);
 
   const refreshRuns = useCallback(async (): Promise<void> => {
     setRuns(await deps.runs.list());
@@ -487,6 +505,37 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
     }
   }
 
+  /**
+   * Ticket 036 — the record flow. Both capture seams or nothing: a panel with a
+   * Start button that cannot reach a microphone is worse than a refused button
+   * that says why, so the affordance is DISABLED (with the reason) rather than
+   * opening onto a dead end.
+   */
+  const { startTake, segmentTake } = deps;
+  const canRecord = startTake !== undefined && segmentTake !== undefined;
+
+  const saveTake = async (input: NewRecordingInput): Promise<void> => {
+    const created = await deps.recordings.create(input);
+    // Appended, not re-listed: the clip appears without a reload, and the rows
+    // already on screen are not thrown away to get it there.
+    setRecordings((previous) => [...previous, created]);
+    setRecordOpen(false);
+  };
+
+  const recordPanel =
+    recordOpen && startTake !== undefined && segmentTake !== undefined ? (
+      <RecordTake
+        startTake={startTake}
+        segmentTake={segmentTake}
+        playTake={deps.playTake}
+        corpusVersion={deps.corpusVersion}
+        now={deps.now}
+        newId={deps.newId}
+        onSave={saveTake}
+        onClose={() => setRecordOpen(false)}
+      />
+    ) : null;
+
   const batchProgress =
     sweep === null ? null : (
       <BatchProgressPanel
@@ -516,13 +565,16 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
         <button
           type="button"
           data-record-new=""
-          disabled
-          title={RECORD_NEW_HINT}
-          style={recordButtonStyle}
+          disabled={!canRecord}
+          title={canRecord ? undefined : NO_CAPTURE_HINT}
+          onClick={() => setRecordOpen(true)}
+          style={recordButtonStyle(canRecord)}
         >
           {RECORD_NEW}
         </button>
       </header>
+
+      {recordPanel}
 
       <div style={columnsStyle}>
         <RecordingsLibrary

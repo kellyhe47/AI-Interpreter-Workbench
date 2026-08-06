@@ -44,6 +44,15 @@ export const CORPUS_CATEGORIES = [
 
 export type CorpusCategory = (typeof CORPUS_CATEGORIES)[number];
 
+/**
+ * TICKET 036 — the provenance stamp the app writes onto every corpus Recording
+ * it records. It names the corpus a clip BELONGS to, so a later re-cut of the
+ * material is a new version rather than a silent edit of the one past numbers
+ * were measured against. It is a constant here and injected into the view
+ * through the host deps bag: provenance is the host's fact, not the form's.
+ */
+export const CORPUS_VERSION = 'corpus-v1';
+
 export interface CorpusUtterance {
   id: string;
   index: number;
