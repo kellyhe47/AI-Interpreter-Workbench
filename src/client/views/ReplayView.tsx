@@ -36,6 +36,11 @@
  *   Editing: [data-edit-label] swaps in [data-label-input] (a textbox named
  *   'Recording label'); Enter commits through recordings.patchLabel(id, next).
  *   Empty: [data-recordings-empty] and zero [data-recording-row].
+ *   FAILED (ticket 020, PRD §12): [data-recordings-error][data-error-code=…]
+ *     instead — never beside — the empty state, naming the failure, quoting
+ *     the underlying message, and holding [data-recordings-retry] which
+ *     re-issues recordings.list(). A failure must be distinguishable from
+ *     emptiness: they demand opposite next actions.
  *   Footer [data-library-footer] carries the lifecycle copy verbatim.
  *   Selection is idempotent: clicking the selected row keeps it selected.
  *
@@ -49,7 +54,9 @@
  *     panel state; never a control, and nothing anywhere sets a tag.
  *   [data-replay-context][data-locked='true'] — pinned to zero, contains NO
  *     enabled control of any kind.
- *   [data-pinned-note] verbatim; buttons 'Run' and 'Batch sweep…'.
+ *   [data-pinned-note] verbatim; buttons 'Run' and 'Batch sweep…', both
+ *     `disabled` with an explanatory `title` while no Recording is selected
+ *     (ticket 024) — and unaffected by a run already in flight.
  *   Defaults: architecture 'cascade', providers DEFAULT_CASCADE_TRIPLE, so an
  *   untouched panel derives Arm B.
  *
@@ -254,6 +261,13 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   const { deps } = props;
 
   const [recordings, setRecordings] = useState<Recording[]>([]);
+  /**
+   * Ticket 020 — the rejection the last recordings load ended in, or null.
+   * A load that FAILS and a load that returns zero Recordings are different
+   * facts (PRD §12), so they get different state and different renderings:
+   * this is what stops a dead backend reading as an empty store.
+   */
+  const [recordingsError, setRecordingsError] = useState<unknown>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
   const [config, setConfig] = useState<ReplayConfigState>(initialConfig);
@@ -264,21 +278,58 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
     setRuns(await deps.runs.list());
   }, [deps]);
 
+  /**
+   * The one path that reads the recordings store — mount AND retry, so the
+   * two can never drift apart. It CATCHES: an escaping rejection is what left
+   * the view rendering the empty state against a dead backend, and an
+   * unhandled rejection is not a UI state anyone can act on.
+   *
+   * `isLive` is how the mount effect abandons a load whose view has gone; the
+   * retry press supplies nothing and is always live.
+   */
+  const loadRecordings = useCallback(
+    async (isLive: () => boolean = () => true): Promise<void> => {
+      try {
+        const loaded = await deps.recordings.list();
+        if (!isLive()) return;
+        setRecordings(loaded);
+        setRecordingsError(null);
+      } catch (cause: unknown) {
+        if (!isLive()) return;
+        // The library is UNKNOWN, not empty — the rows go, the error stands in
+        // their place, and RecordingsLibrary renders one state or the other.
+        setRecordings([]);
+        setRecordingsError(() => cause);
+      }
+    },
+    [deps],
+  );
+
   useEffect(() => {
     let live = true;
+    const isLive = (): boolean => live;
     void (async () => {
-      const [loadedRecordings, loadedRuns] = await Promise.all([
-        deps.recordings.list(),
-        deps.runs.list(),
+      // Independent loads, each catching its own: an unreadable recordings
+      // store must not also blank the runs list, and NEITHER rejection may
+      // escape the effect. The escaping one is what this ticket is about.
+      await Promise.all([
+        loadRecordings(isLive),
+        (async () => {
+          try {
+            const loadedRuns = await deps.runs.list();
+            if (isLive()) setRuns(loadedRuns);
+          } catch {
+            // The runs list has no error surface of its own in this contract;
+            // it stays at its last known value rather than throwing the view
+            // away. What it must never do is reject into nowhere.
+          }
+        })(),
       ]);
-      if (!live) return;
-      setRecordings(loadedRecordings);
-      setRuns(loadedRuns);
     })();
     return () => {
       live = false;
     };
-  }, [deps]);
+  }, [deps, loadRecordings]);
 
   /** Every Run, failed included — a failure is a Run like any other. */
   const runCounts: Record<string, number> = {};
@@ -432,6 +483,10 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
           onSelect={setSelectedRecordingId}
           onRename={rename}
           onDelete={remove}
+          loadError={recordingsError}
+          onRetry={() => {
+            void loadRecordings();
+          }}
         />
 
         <div
