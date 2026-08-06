@@ -1,11 +1,11 @@
 ---
 id: 003
 title: Recordings & Runs REST routes, mounted; ws passes run identity
-status: pending
+status: green
 depends_on: [002]
 touches: [src/server/routes/, src/server/index.ts, src/server/index.test.ts, src/server/ws.ts, src/server/ws.test.ts]
 iterations: 0
-test_files: []
+test_files: [src/server/routes/recordings.test.ts, src/server/routes/runs.test.ts, src/server/routes/test-support.ts, src/server/index.test.ts, src/server/ws.test.ts]
 branch: ""
 ---
 
@@ -77,3 +77,13 @@ Extend `src/server/index.test.ts` (it already boots the app server on an ephemer
 into the repo's `data/`.
 
 ## Attempt log
+
+- iter 1: green. 24 ticket tests; full suite 41 files / 580 in-worktree, 654 post-merge.
+- LIVE BOOT PROBE (orchestrator, real server + real fs, not a unit test): POST /api/recordings
+  -> 201 with generated id; GET /:id/audio -> 200 audio/wav with byte-identical WAV; DELETE on
+  a corpus Recording -> 409 {"code":"corpus-undeletable"}; /api/health -> 200. The REST surface
+  works against a real process, not only under test doubles.
+- Minor deviation logged: GET /api/recordings/:id/audio for an UNKNOWN id answers
+  `recording-audio-missing` rather than `recording-not-found`. Both are machine-readable, both
+  map to 404, and the client behaviour (mark unplayable, block new runs — PRD §12) is identical,
+  so this was not worth an iteration.
