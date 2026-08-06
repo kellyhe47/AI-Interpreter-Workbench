@@ -1,7 +1,7 @@
 ---
 id: 007
 title: Replay pacer — 1× playback in 20 ms framing
-status: in-progress
+status: green
 depends_on: []
 touches: [src/client/replay/pacer.ts, src/client/replay/pacer.test.ts]
 iterations: 0
@@ -64,3 +64,5 @@ timers or an injected clock; **no real sleeping** — a test suite that waits a 
 case is a tax on every regression gate for the rest of the project.
 
 ## Attempt log
+
+- iter 1: green. 16 tests. Mutation-checked by the orchestrator: forcing `delay = 0` (the "dump the buffer" bug) turns all three 1x-pacing assertions red, so the test genuinely holds the line.
