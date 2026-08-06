@@ -6,7 +6,7 @@ source: v3-corpus
 depends_on: [030]
 touches: [src/client/replay/capture.ts, src/client/replay/segment.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/replay/capture.test.ts, src/client/replay/segment.test.ts]
 branch: ""
 ---
 
