@@ -77,6 +77,8 @@
  * - formatUsd(usd): null → '—'; otherwise '$' + usd.toFixed(3) ('$0.200').
  */
 
+import type { ArmTag } from '../../../core/arms';
+import type { CorpusCategory } from '../../../harness/corpus';
 import {
   deriveCascadeIntervals,
   deriveRealtimeIntervals,
@@ -84,7 +86,12 @@ import {
   type RealtimeTimestamps,
   type UtteranceRecord,
 } from '../../../core/timing';
-import { isRealRecord, type RunLedger } from '../../state/ledger';
+import {
+  isRealRecord,
+  type Run,
+  type RunLedger,
+  type RunOrigin,
+} from '../../state/ledger';
 
 /** Post-hoc quality annotations a record MAY carry (absent tonight). */
 export interface RecordAnnotations {
@@ -449,4 +456,209 @@ export function deriveResultsModel(ledger: RunLedger): ResultsModel {
   }
 
   return model;
+}
+
+/* =========================================================================
+ * Ticket 011 — v2 derivation over the Recording / Run / LiveSession entities.
+ *
+ * The v1 surface above (deriveResultsModel and friends) still classifies runs
+ * by runId substring and reads UtteranceRecords. It is retired by ticket 015
+ * and left in place only so ResultsView.test.tsx keeps passing between
+ * tickets. Everything below is the v2 model:
+ *
+ * - THE GATE IS THE LEDGER'S. Experiment figures come from
+ *   `ledger.runAggregates()` — derived armTag names an arm AND origin ===
+ *   'sweep' AND status === 'complete' AND the realness rule. The gate is NOT
+ *   reimplemented here; a run excluded from an aggregate is still listed in
+ *   the per-Recording grouping, marked with WHY it was excluded.
+ * - PROVENANCE REPORTS ACTUAL N. `completedReps` counts the distinct rep
+ *   indices that actually produced a gate-passing Run; `intendedReps` counts
+ *   the distinct rep indices the sweep attempted (any status). A sweep that
+ *   intended 5 and lost one reads `4 of 5`, and the percentiles are computed
+ *   over the surviving 4 — the number and the line agree.
+ * - TWO GROUPINGS, ONE LEDGER. groupByRecording and groupByCategory read the
+ *   same Runs as the aggregates. No second store, no recomputed gate.
+ * - LIVE IS SEPARATE. deriveLiveModel reads LiveSessions and nothing else;
+ *   a Run can never move a Live figure and vice versa.
+ * - EMPTY MEANS EMPTY. Every derivation has an explicit empty state; a zero
+ *   is a measurement, never a stand-in for "nothing recorded".
+ * ====================================================================== */
+
+/** The pinned endpointing control (PRD §8 register). Stated in every line. */
+export const PINNED_ENDPOINTING_MS = 500;
+
+/**
+ * Exp 2 compares Arm B with Arm C, which differ in the TTS stage alone. The
+ * STT transcript is byte-identical, so there is no WER delta to report — the
+ * cell says so instead of carrying a fabricated number.
+ */
+export const STT_UNCHANGED_CELL = '— (STT unchanged)';
+
+/** The six PRD §9 utterance categories — the meaningful analytical grouping. */
+export type UtteranceCategory = CorpusCategory;
+
+/**
+ * Utterance-level metadata a Run MAY carry. Declared here as an optional
+ * envelope (the v1 `annotations` pattern) rather than widening the stored Run
+ * type, which is the server's.
+ */
+export interface RunAnnotations {
+  /** Which corpus utterance this Run replayed. */
+  utteranceId?: string;
+  /** PRD §9 category tag — distributed across recordings, never grouped. */
+  category?: UtteranceCategory;
+  /** 1-based repetition index within the sweep. */
+  repIndex?: number;
+  /** Corpus version behind the sample. */
+  corpusVersion?: string;
+  /** Post-hoc word error rate as a fraction. */
+  wer?: number;
+}
+
+export type AnnotatedRun = Run & { annotations?: RunAnnotations };
+
+/** PRD §8: every figure carries its origin. A number without one is a claim. */
+export interface Provenance {
+  /** Distinct utterances behind the figure. */
+  utteranceCount: number;
+  /** ACTUAL reps that completed. NEVER the intended count. */
+  completedReps: number;
+  /** Reps the sweep set out to run. */
+  intendedReps: number;
+  /** The pinned endpointing control in ms — always PINNED_ENDPOINTING_MS. */
+  endpointingMs: number;
+  /** Corpus version; null when no contributing sample declares one. */
+  corpusVersion: string | null;
+  /** Rendered line. Exact wording is NOT locked — assert containment only. */
+  line: string;
+}
+
+/** One named arm's experiment aggregate. `n` is the ACTUAL sample count. */
+export interface ExperimentArmAggregate {
+  arm: ArmTag;
+  n: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  costUsd: number;
+  /** Cost per audio minute, normalized by the source Recordings' duration. */
+  costPerMinuteUsd: number | null;
+  provenance: Provenance;
+}
+
+export interface ExperimentAggregates {
+  /** Keyed by DERIVED arm tag; named arms only. Empty when nothing qualifies. */
+  perArm: { [arm: string]: ExperimentArmAggregate };
+  /** True when no Run passes the gate — an explicit empty state, not zeros. */
+  empty: boolean;
+}
+
+/** Why a Run is kept out of the experiment aggregates. */
+export type ExclusionReason = 'ad-hoc' | 'manual' | 'failed' | 'fixture';
+
+/** One row of the "By Recording" secondary tab: recording × configuration. */
+export interface RecordingGroupRow {
+  recordingId: string;
+  /** Recording label, or null when the Recording entity is not in the ledger. */
+  recordingLabel: string | null;
+  /** DERIVED arm tag — 'ad-hoc' for a free-exploration configuration. */
+  arm: ArmTag;
+  /** Stable configuration key; (recordingId, configuration) is unique. */
+  configuration: string;
+  origins: RunOrigin[];
+  /** Runs in the group, every status included. */
+  runCount: number;
+  /** Failed runs in the group. */
+  failedCount: number;
+  /** Samples actually backing the figures below (complete + real). */
+  n: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  costUsd: number;
+  /** True when NO run in the group reaches the experiment aggregates. */
+  excludedFromExperiments: boolean;
+  /** Why, for the runs that are excluded. Empty when nothing is excluded. */
+  exclusionReasons: ExclusionReason[];
+}
+
+/** One row of the "By utterance category" secondary tab: category × arm. */
+export interface CategoryGroupRow {
+  category: UtteranceCategory;
+  arm: ArmTag;
+  n: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  costUsd: number;
+}
+
+/** A head-to-head between two named arms, built from gate-passing Runs only. */
+export interface ComparisonModel {
+  armA: ArmTag;
+  armB: ArmTag;
+  /** p50 / p95 / cost rows, reusing the v1 MetricRow vocabulary. */
+  rows: MetricRow[];
+  /** STT_UNCHANGED_CELL when the two arms share an STT stage. */
+  werCell: string;
+  provenanceA: Provenance;
+  provenanceB: Provenance;
+}
+
+/** One column of the conversation-length screen. Sourced from LiveSessions. */
+export interface LiveArmColumn {
+  arm: ArmTag;
+  label: string;
+  sessions: number;
+  utterancesCompleted: number;
+  disconnects: number;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  driftMinute1ToEndMs: number | null;
+  costPerMinuteMinute1: number | null;
+  costPerMinuteFinalMinute: number | null;
+  /** ALWAYS null in Live — there is no reference text (PRD §7). */
+  wer: null;
+}
+
+export interface LiveModel {
+  columns: LiveArmColumn[];
+  empty: boolean;
+}
+
+/**
+ * True when `armA` and `armB` share an identical STT stage, so no STT-derived
+ * delta (WER) exists between them.
+ */
+export function sttUnchangedBetween(_armA: ArmTag, _armB: ArmTag): boolean {
+  throw new Error('not implemented');
+}
+
+/** Experiment aggregates over gate-passing Runs, with per-arm provenance. */
+export function deriveExperimentAggregates(_ledger: RunLedger): ExperimentAggregates {
+  throw new Error('not implemented');
+}
+
+/**
+ * "By Recording": one row per (recording × configuration), INCLUDING ad-hoc
+ * and manual runs, each marked excluded-from-experiments with the reason.
+ */
+export function groupByRecording(_ledger: RunLedger): RecordingGroupRow[] {
+  throw new Error('not implemented');
+}
+
+/** "By utterance category": grouped on the category tag, never the recording. */
+export function groupByCategory(_ledger: RunLedger): CategoryGroupRow[] {
+  throw new Error('not implemented');
+}
+
+/** Head-to-head for two named arms; null when either arm has no samples. */
+export function deriveComparison(
+  _ledger: RunLedger,
+  _armA: ArmTag,
+  _armB: ArmTag,
+): ComparisonModel | null {
+  throw new Error('not implemented');
+}
+
+/** The conversation-length screen. LiveSessions only — Runs never contribute. */
+export function deriveLiveModel(_ledger: RunLedger): LiveModel {
+  throw new Error('not implemented');
 }
