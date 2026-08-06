@@ -1,11 +1,11 @@
 ---
 id: 004
 title: ElevenLabs Scribe v2 Realtime STT adapter
-status: in-progress
+status: green
 depends_on: []
 touches: [src/server/providers/elevenlabs-stt.ts, src/server/providers/elevenlabs-stt.test.ts]
 iterations: 0
-test_files: []
+test_files: [src/server/providers/elevenlabs-stt.test.ts]
 branch: "tdd/004"
 ---
 
@@ -80,3 +80,5 @@ New `src/server/providers/elevenlabs-stt.test.ts`, modelled on
 `src/server/providers/test-support.ts` via `recordingWsFactory`. **No network.**
 
 ## Attempt log
+
+- iter 1: green. 17 tests. Wire format assumed (documented in the adapter header); ticket 006 runs it through the shared contract suite unmodified.
