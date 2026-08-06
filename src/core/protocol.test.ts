@@ -61,6 +61,82 @@ describe('cascade wire protocol', () => {
     expect(down).toHaveLength(8);
   });
 
+  // ---------------------------------------------------------------------
+  // Ticket 002 — run identity on session.start.
+  // These are COMPILE-TIME assertions: TypeScript types are erased before
+  // vitest sees them, so their red/green signal comes from
+  // `npx tsc --noEmit` (both tsconfig programs), not from the runner.
+  // ---------------------------------------------------------------------
+  type SessionStart = Extract<ClientToServerMessage, { type: 'session.start' }>;
+
+  it('session.start carries optional recordingId / runId / origin', () => {
+    const base = {
+      type: 'session.start',
+      mode: 'cascade',
+      languagePair: 'en-es',
+      direction: 'en->es',
+      providers: { stt: 'fixture', mt: 'fixture', tts: 'fixture' },
+    } as const;
+
+    // Live sends none of the three — the message still typechecks.
+    const live = { ...base } satisfies SessionStart;
+
+    // Replay / sweep stamps run identity onto the same message.
+    const replay = {
+      ...base,
+      recordingId: 'rec-1',
+      runId: 'run-1',
+      origin: 'sweep',
+    } satisfies SessionStart;
+
+    // Partial identity is legal too — each field is independently optional.
+    const partial = { ...base, recordingId: 'rec-2' } satisfies SessionStart;
+
+    expect(live.type).toBe('session.start');
+    expect(replay.recordingId).toBe('rec-1');
+    expect(replay.runId).toBe('run-1');
+    expect(replay.origin).toBe('sweep');
+    expect(partial.recordingId).toBe('rec-2');
+  });
+
+  it('origin is the closed run vocabulary "sweep" | "manual", not a free string', () => {
+    type Origin = NonNullable<SessionStart['origin']>;
+
+    const sweep: Origin = 'sweep';
+    const manual: Origin = 'manual';
+
+    // @ts-expect-error — origin is a closed vocabulary
+    const bogus: Origin = 'whatever';
+
+    // Exactly 'sweep' | 'manual' — neither narrower nor widened to string.
+    type Exact = ['sweep' | 'manual'] extends [Origin]
+      ? [Origin] extends ['sweep' | 'manual']
+        ? true
+        : false
+      : false;
+    const exact: Exact = true;
+
+    expect([sweep, manual, bogus, exact]).toHaveLength(4);
+  });
+
+  it('cascade is context-free: session.start has NO context-policy field', () => {
+    // PRD §7 — adding one would imply a control that does not exist.
+    const keys: Array<keyof SessionStart> = [
+      'type',
+      'mode',
+      'languagePair',
+      'direction',
+      'providers',
+      'recordingId',
+      'runId',
+      'origin',
+    ];
+    type Extra = Exclude<keyof SessionStart, (typeof keys)[number]>;
+    const noExtraMembers: [Extra] extends [never] ? true : false = true;
+
+    expect(noExtraMembers).toBe(true);
+  });
+
   describe('downstream binary framing (4-byte LE utt header + PCM16)', () => {
     it('round-trips utt and samples byte-exactly', () => {
       const pcm = Int16Array.from([0, 1, -1, 32767, -32768, 12345, -12345]);
