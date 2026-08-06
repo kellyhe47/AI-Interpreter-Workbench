@@ -73,10 +73,19 @@ import {
   type RecordingGroupRow,
   type Tone,
 } from '../components/results/derive';
+import type { LedgerHydrationSource } from '../state/hydrateLedger';
 import type { RunLedger } from '../state/ledger';
 
 export interface ResultsViewProps {
   ledger: RunLedger;
+  /**
+   * TICKET 019 — the injected seam that loads server-persisted Recordings and
+   * Runs into `ledger` before anything is derived. OPTIONAL: a host that omits
+   * it gets exactly today's behaviour (client-local ledger only) and renders
+   * no hydration state at all, which is what keeps every pre-019 caller — and
+   * the locked App shared-deps-bag guard — byte-identical.
+   */
+  hydrate?: LedgerHydrationSource;
 }
 
 /* ------------------------------------------------------------------ copy -- */

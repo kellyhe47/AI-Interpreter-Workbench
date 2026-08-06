@@ -340,6 +340,27 @@ export function isRealRun(run: Run): boolean {
 }
 
 /**
+ * TICKET 018 — the realness rule for a LiveSession: the third sibling of
+ * `isRealRecord` and `isRealRun`, deliberately sitting beside them so the
+ * three read as ONE rule with three shapes rather than three that can drift.
+ *
+ * PRD §8: "No number reported in the write-up may come from a fixture run.
+ * Fixture latency is a configured constant." The Run path enforced that; the
+ * LiveSession path did not, so a `?fixture=1` soak rendered p50/p95 in the
+ * conversation-length card as though they were measurements.
+ *
+ * A LiveSession carries no `recordingId` and no `corpusId`, so the rule is
+ * the two clauses the shape supports: false iff any of
+ * providerTriple.stt/mt/tts === 'fixture', OR any modelSnapshots value ===
+ * 'fixture'.
+ *
+ * STUB (ticket 018, red): returns true for everything — today's behaviour.
+ */
+export function isRealLiveSession(_session: LiveSession): boolean {
+  return true;
+}
+
+/**
  * The aggregation gate (PRD §7, §8, §17 22d): derived armTag is a named arm
  * AND origin === 'sweep' AND status === 'complete' — then the realness rule
  * on top.

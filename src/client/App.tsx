@@ -46,6 +46,7 @@ import { useMemo, useRef, useState, type ReactElement } from 'react';
 import { buildBrowserDeps } from './browserDeps';
 import { buildFixtureDeps, isFixtureMode } from './fixtureDeps';
 import TopBar, { type WorkbenchView } from './components/TopBar';
+import type { LedgerHydrationSource } from './state/hydrateLedger';
 import type { SessionStatus } from './state/sessionMachine';
 import HelpView from './views/HelpView';
 import ResultsView from './views/ResultsView';
@@ -65,6 +66,17 @@ import { useSessionController, type SessionDeps } from './views/useSessionContro
  */
 export interface AppDeps extends SessionDeps {
   replay?: ReplayDeps;
+  /**
+   * TICKET 019 — the Results hydration seam (server Recordings + Runs → the
+   * shared ledger), forwarded verbatim to <ResultsView hydrate={...} />.
+   *
+   * It is its OWN field rather than being derived from `deps.replay`: a host
+   * that wires Replay has not thereby asked Results to go to the network, and
+   * the locked App suite renders a fully-wired Replay bag while asserting
+   * Results still reads the client ledger alone. Production (buildBrowserDeps)
+   * supplies it; test bags that omit it get today's behaviour exactly.
+   */
+  hydrate?: LedgerHydrationSource;
 }
 
 export interface AppProps {
