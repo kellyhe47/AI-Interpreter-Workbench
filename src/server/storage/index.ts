@@ -68,6 +68,7 @@ export type {
   Recording,
   RecordingOrigin,
   Run,
+  RunAnnotations,
   RunOrigin,
   RunStatus,
   StorageErrorCode,

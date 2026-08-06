@@ -138,8 +138,7 @@ function configOf(run: Run): string {
 
 /** Sweep runs carry a repetition index; manual runs do not. */
 function repIndexOf(run: Run): number | undefined {
-  const annotated = run as Run & { annotations?: { repIndex?: number } };
-  return annotated.annotations?.repIndex;
+  return run.annotations?.repIndex;
 }
 
 function metaOf(run: Run): string {

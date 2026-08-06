@@ -472,13 +472,25 @@ export function startBatch(options: BatchOptions): BatchHandle {
  * stamps the requested origin on the record on its way to `create()`. The
  * ledger therefore receives exactly one Run per executed run, already carrying
  * the origin the summary reports.
+ *
+ * TICKET 028 — the executed `repIndex` rides the same stamp, in the Run's
+ * `annotations` envelope. It is the only record of which repetition produced
+ * the row: without it `buildProvenance`'s denominator (the distinct rep indices
+ * a sweep ATTEMPTED) collapses onto its numerator and provenance can only ever
+ * read "N of N", so a sweep that lost reps reports as clean. Every execution is
+ * stamped, warmup included — the warmup as repIndex 0, which is not one of the
+ * retained reps and stays out of the aggregate on its 'manual' origin.
  */
 export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
   return async (request: BatchExecutorRequest): Promise<RunOnceResult> => {
     let stamped: Run | undefined;
     const runs: RunsClient = {
       create: async (run: Run) => {
-        stamped = { ...run, origin: request.origin };
+        stamped = {
+          ...run,
+          origin: request.origin,
+          annotations: { ...run.annotations, repIndex: request.repIndex },
+        };
         return deps.runs.create(stamped);
       },
       list: (recordingId?: string) => deps.runs.list(recordingId),
@@ -494,6 +506,14 @@ export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
 
     // A cancelled run is never POSTed (ticket 008), so there may be nothing
     // stamped; the returned record still reports the origin it ran under.
-    return { ...result, run: stamped ?? { ...result.run, origin: request.origin } };
+    return {
+      ...result,
+      run:
+        stamped ?? {
+          ...result.run,
+          origin: request.origin,
+          annotations: { ...result.run.annotations, repIndex: request.repIndex },
+        },
+    };
   };
 }

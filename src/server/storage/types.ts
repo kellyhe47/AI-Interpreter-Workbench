@@ -42,6 +42,19 @@ export interface NewRecording {
   createdAt?: number;
 }
 
+/**
+ * Ticket 028 — the additive annotation envelope a Run carries into the ledger.
+ * Mirrors src/client/state/ledger.ts's RunAnnotations field-for-field, for the
+ * same reason the Recording/Run shapes are mirrored.
+ *
+ * Optional at every layer: a line written before this change has no
+ * `annotations` key at all and must still read back.
+ */
+export interface RunAnnotations {
+  /** 1-based repetition index within the sweep; 0 is the discarded warmup. */
+  repIndex?: number;
+}
+
 export interface Run {
   id: string;
   recordingId: string;
@@ -57,6 +70,11 @@ export interface Run {
   cost: number;
   errors: string[];
   createdAt: number;
+  /**
+   * Ticket 028 — measurement metadata about the execution, stored verbatim
+   * with the rest of the record. Absent on every Run written before it.
+   */
+  annotations?: RunAnnotations;
 }
 
 /**

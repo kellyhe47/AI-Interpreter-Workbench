@@ -132,6 +132,20 @@ export interface Recording {
   deletedAt?: number;
 }
 
+/**
+ * Ticket 028 — the additive annotation envelope a Run carries. Mirrors
+ * src/server/storage/types.ts's RunAnnotations field-for-field, for the same
+ * reason the Recording/Run shapes are mirrored: neither side may import the
+ * other.
+ *
+ * DATA, NEVER A GATE. `isAggregatableRun` does not read it: the warmup carries
+ * repIndex 0 and is excluded by its 'manual' origin exactly as before.
+ */
+export interface RunAnnotations {
+  /** 1-based repetition index within the sweep; 0 is the discarded warmup. */
+  repIndex?: number;
+}
+
 export interface Run {
   id: string;
   recordingId: string;
@@ -148,6 +162,11 @@ export interface Run {
   cost: number;
   errors: string[];
   createdAt: number;
+  /**
+   * Ticket 028 — measurement metadata about the execution. Absent on every Run
+   * written before it; the Results derivations read it through `AnnotatedRun`.
+   */
+  annotations?: RunAnnotations;
 }
 
 export interface LiveSessionUtterance {
