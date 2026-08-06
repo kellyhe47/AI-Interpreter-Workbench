@@ -1,176 +1,205 @@
-# QA report — iterations 5 & 6 — CONVERGED (two consecutive clean passes)
-
-Iteration 5 (post-022): idle Realtime default · deny path w/ frozen 00:00 timer ·
-fixture session: instant ready-switch (arm swap, no banner), continuous numbering, add arm
-mid-session joins the SHARED utterance timeline (both cards translate the same sentence —
-verified concurrently mid-stream and at ready), blind compare full cycle, remove-arm autoplay
-restore, stop summary real numbers, Results still empty, zero console errors. **CLEAN.**
-
-Iteration 6: fail-mt journey — cascade card 'failed' with exact copy "mt stage timed out for
-this utterance — session still running" at the injected utterance, session recovers and
-streams the next utterance normally; shared timeline holds under the fault; stop; Results
-empty; zero console errors. Deny + idle re-checked. **CLEAN.**
-
-Verdict: the QA loop converged at iteration 6 (findings across the run: 7 filed, 7 fixed and
-verified in-browser). Standing escalations: real-microphone journeys and real-provider
-end-to-end audio remain unverified in a browser (pane blocks capture; provider paths were
-smoke-tested at the adapter level). These need the operator.
-
----
-
-# QA report — iterations 3 & 4
-
-Iteration 3 (post 019–021 fixes): **CLEAN PASS #1.** Re-walked: idle (Realtime default),
-deny (timer frozen 00:00), fixture session — switch-in-ready instant w/o banner + arm swap;
-switch-mid-stream banner → applied exactly at settle w/ continuous utterance numbering;
-per-utterance card reset; script loops past 8 (observed utterance 13); stop; Results empty;
-zero console errors. No new findings.
-
-Iteration 4 (full re-walk): deny/warnings/timer all hold; add-arm, blind compare full cycle
-(submit gated on both scores — reasonable, not filed), remove-arm autoplay restore, stop
-summary, Results empty — all pass. **One new finding:**
-
-### QA-7 [low, fixture-mode] Arm playlists unsynchronized — concurrent arms display different utterances
-- Repro: fixture session → add 2nd arm mid-session → arm cards show translations of two
-  DIFFERENT source sentences (each transport runs its own schedule; offset persists across
-  the session; blind compare pairs different sentences).
-- Expected: PRD §6 — the same source feeds every arm; fixture mode should present one shared
-  utterance timeline across arms (identical utt id + source concurrently), or QA of
-  comparison-mode semantics is misleading.
-- Ticket: 022-qa-fixture-shared-timeline.md
-
----
-
-# QA report — iteration 2
-
 ```yaml
-sha: (post 016-018 fixes)
+sha: 06276b4
 branch: main
-tree: dirty (RUN_LOG only)
-launched: npm run dev (reused) → http://localhost:5173 (+ ?fixture=1 / ?fixture=fail-mt)
+tree: clean
+launched: preview_start "workbench" (npm run dev) → http://localhost:5173
+         + API server started separately with PORT=8787 (see F4 — it does not come up correctly on its own)
 ```
 
-## Verified fixed from iteration 1
-- QA-1 (016): denied-state elapsed frozen at 00:00 over 3+ s. ✓
-- QA-2 (017): cold open defaults Realtime; subline '… · Realtime · autoplay on.' ✓
-- QA-3 (018): ?fixture=1 drives the full live UI with no mic and no keys. ✓
+# Manual QA — AI Interpreter Workbench v2 (Replay flow)
 
-## Flows walked (all via fixture mode unless noted)
-- Idle → deny (real block) → remediation card ✓ · Idle → fixture grant → listening →
-  transcripts streaming (partials then finals, target deltas) ✓ · arm card in-flight →
-  ready with labelled mono ms (realtime 3 rows + opaque note; cascade 5 rows) ✓ ·
-  add arm (2-col, priced pill, autoplay-off note, shared suffix) ✓ · blind compare full
-  cycle (hidden → score 4/5 → submit → identities revealed, hints/labels exact) ✓ ·
-  remove arm restores autoplay ✓ · stop → green summary with real numbers, frozen elapsed,
-  history intact ✓ · fail-mt → cascade card 'failed' with EXACT stage-attributed copy,
-  session continues ✓ · Results after fixture session → still 'No runs recorded' ✓ ·
-  console: zero errors throughout.
+**Spec:** `PRD.md` (§6, §7, §8, §10, §12).
+**Designs:** `design_handoff_interpreter_workbench/README.md` + `interpreter-workbench-v2.dc.html`. PRD wins on conflict.
+*(The v1 QA report is archived at `.qa/report-v1.md`.)*
 
-## New findings
-
-### QA-4 [medium] Queued mode switch never applies; banner stuck indefinitely
-- Repro A: fixture session, single arm, state `ready` between utterances → click Cascade →
-  banner 'switching to Cascade after this sentence finishes' → banner persists ≥60 s across
-  later utterance completions; mode never changes.
-- Repro B: same but clicked while an utterance was actively streaming → utterance settled →
-  banner still present, mode unchanged.
-- Expected: PRD §6 — switch "queues and applies at the next utterance boundary"; and when no
-  utterance is in flight there is no sentence to finish, so the switch should apply
-  immediately.
-- Ticket: 019-qa-switch-never-applies.md
-
-### QA-5 [low] Arm card shows a previous utterance's translation labelled 'ready'
-- Repro: fixture session; when an arm has produced nothing for the current utterance, its card
-  keeps the prior utterance's target text + 'ready' while the source card has advanced (seen
-  3 utterances apart).
-- Expected: per-arm state is per-utterance (PRD §6 table); a card should show in-flight/empty
-  for the current utterance, not stale content labelled ready.
-- Ticket: 020-qa-stale-arm-card.md
-
-### QA-6 [low, fixture-mode] Script exhaustion wedges the session in 'processing'
-- Repro: let the 8-utterance fixture script run out mid-utterance → status strip stays
-  'processing' forever; no settle, no error.
-- Expected: fixture transport should loop its script (QA needs continuous utterances) or end
-  the last utterance cleanly.
-- Ticket: 021-qa-fixture-script-loop.md
-
-Escalations: unchanged (real-mic + real-provider journeys).
-
----
-
-# QA report — iteration 1
-
-```yaml
-sha: aa9a6c0
-branch: main
-tree: dirty            # only .gitignore/RUN_LOG/.claude launch config — no source changes
-launched: npm run dev via .claude/launch.json → http://localhost:5173
-```
-
-Screenshot note: the embedded browser pane does not export image files; the screenshot trail
-for this iteration lives in the run session (one screenshot per screen listed below). Paths in
-`.qa/screens/` will populate in later iterations if a file-exporting browser is available.
+**Note on screenshots.** The browser tool returns images inline rather than writing files, so `.qa/screens/`
+holds captured **DOM-state evidence** for the load-bearing findings rather than PNGs. Every figure quoted
+below was read out of the running app, not inferred.
 
 ## Flows walked
 
-1. **Cold open → idle → Results → back** — WALKED. Idle card (copy exact), status strip
-   (mic not requested / no connection / gray meter / idle / 00:00 · autoplay on), footer real
-   (0 utterances, p50 —, p95 —, $0.00; no illustrative pill), no Mock-state chips. Results:
-   empty state exact, disabled Run sweep, no sample figures, provenance mono only on Results.
-   Live dot absent. ✓ except finding QA-2 (default mode).
-2. **Start microphone (deny) → blocking card** — WALKED (pane hard-blocks mic → real
-   NotAllowedError). Four-value indicator went not-requested → mic blocked (red);
-   state mono `permission-denied`; blocking card "Microphone blocked" with site-permission
-   layer, OS layer, and no-re-prompt guidance + Retry microphone. ✓ except finding QA-1
-   (elapsed timer ticking).
-3. **Language cycle → EN↔YUE warnings; direction swap** — WALKED. EN→Cantonese applied
-   instantly while sessionless ✓; pill amber 'cascade only' ✓; Realtime + EN→YUE target warn
-   banner copy exact ✓; swap → Cantonese→English input warn copy exact ✓; never blocked ✓.
-4. **Mode toggle (idle/denied: instant apply)** — WALKED. Realtime↔Cascade applies instantly
-   with no banner when sessionless. ✓
-5. **Start (grant) → live session → transcripts → mid-session switch banner → stop summary** —
-   HALTED at mic grant: pane cannot grant capture. See Escalations + finding QA-3.
-6. **Comparison mode (arms strip, 2-col cards, labelled ms, blind compare)** — HALTED: requires
-   an active session (arms strip is hidden while idle by design). Same blocker.
-7. **Reconnect banners** — HALTED: requires live transport. Same blocker.
+| Flow | Journey | Result |
+|---|---|---|
+| A | Cold landing → all four tabs | pass |
+| B | Live config, derived arm tag A→B→C→ad-hoc, language + Cantonese | pass |
+| C | Full Live session (fixture), tab-switch mid-session, stop | pass, but exposed **F1** |
+| D | Live stage failure via `?fixture=fail-mt` | **halted — F5**, fault never injected |
+| E | Mic denied | pass |
+| F | Replay config panel without data | pass, but exposed **F3, F4, F7** |
+| G | Replay with seeded data → runs list → blind compare | pass, but exposed **F6** |
+| H | Results, both tabs, empty and populated | **F1, F2, F8** |
 
-Console: zero errors across all walked screens.
+Every UI requirement in §6/§7/§8/§10/§12 was touched by at least one flow.
+
+## What is solid
+
+These were checked hardest and hold in the running product:
+
+- **The derived arm tag never lies.** Live: Realtime+`gpt-realtime` → `this is Arm A`; cascade default triple
+  → `Arm B`; swap **only** TTS to `eleven_flash_v2_5` → `Arm C` (PRD Exp 2's single-stage swap falling out of
+  the UI); `eleven_multilingual_v2` → `ad-hoc`; MT → `claude-haiku-4-5` → `ad-hoc`; a full cycle returns to B.
+  The Replay panel behaves identically. The pill is a `<span>`, and **no interactive control anywhere mentions
+  "arm"**.
+- **Derived beats declared.** A Run *stored* with `armTag: "B"` but an off-arm triple renders **`ad-hoc`** on
+  its card, and reveals as `ad-hoc` after blind submit. The stored tag is never trusted.
+- **Results empty state.** With an empty ledger the panel contains **zero digits** on both tabs, "Run sweep"
+  is disabled with the title *"Sweeps require the real corpus to be loaded"*, and the mock's
+  "show recorded runs (mock)" switch does not exist.
+- **Blind compare is genuinely blind.** With two runs picked: Sample A/B, adequacy+fluency each, **zero**
+  `[data-blind-identity]` nodes, and no model id, arm label or transcript in the visible text. Submit stays
+  disabled until all four scores are set. After submit the hint flips to *"identity revealed — appended to the
+  ledger"* and the persisted record carries the two run ids, **the drawn order**, both dimensions for both
+  samples, and the evaluator language.
+- **Corpus Recordings expose no delete control at all** — the corpus row has only an edit affordance, the mic
+  row has edit + delete. Disallowed, not warned about.
+- **Nothing autoplays in Replay** — rendering four run cards created no media element and triggered no
+  playback. The failed run card has no play control and no stage figures.
+- **Mic denial** (graded, PRD §7 requirements 1–5): status flips to `mic blocked` / `permission-denied`, a
+  blocking card names **both** the browser site permission and the OS privacy setting, states *"Browsers do
+  not re-prompt after a denial — reset the site permission first, then retry"*, and Replay/Results/Help stay
+  usable.
+- **Live indicator persists across tabs.** Started a session, navigated to Replay — the dot stayed. Returning
+  to Live showed the same session still running at `1:18 / 5:00`, mic still granted.
+- **Cantonese warns, never blocks**, and correctly fires on **target** only: `English → Cantonese` shows the
+  banner; swapping to `Cantonese → English` removes it while the pair-level pill still reads "cascade only".
+  Pill and warning legitimately disagree, exactly as §7 requires.
+- **Observability asymmetry is legible**: Realtime renders 3 intervals with `model` labelled **opaque** plus
+  the sidecar note; Cascade renders **5 intervals, all visible**.
 
 ## Findings
 
-### QA-1 [medium] Elapsed timer runs while no session exists (permission-denied)
-- Repro: open app → click Start microphone (mic blocked environment) → observe status strip.
-- Observed: elapsed counts up (00:31 → 00:53 → 01:08) while state is `permission-denied` and
-  no session ever started.
-- Expected: PRD §6 lifecycle — elapsed timer belongs to `listening`+ states; idle shows 00:00
-  (mock). A session that never started has no elapsed time.
-- Ticket: 016-qa-elapsed-timer-denied.md
+### F1 — Results reports fixture-sourced figures as measurements · **HIGH**
 
-### QA-2 [low] Default mode is Cascade; design mock initializes to Realtime
-- Repro: cold open → controls card.
-- Observed: Cascade selected; idle subline "… · Cascade · autoplay on."
-- Expected: mock logic class `state = {mode: 'realtime', arms: ['realtime']}`; handoff README
-  presents Realtime as the default arm pill; PRD is silent → mock governs visuals/UX.
-- Ticket: 017-qa-default-mode-realtime.md
+*Flow C→H.* **Repro:** open `/?fixture=1` → Live → Start microphone → let ~20 utterances run → Stop session →
+Results.
 
-### QA-3 [medium] No browser-drivable fixture mode — live-session journeys untestable without a real mic + live keys
-- Repro: any journey needing `listening`+ (flows 5–7) in a browser without grantable mic.
-- Observed: production deps only; all live-session UI is unreachable. RTL tests cover the flows
-  with injected fakes, but no real-browser walk can observe them.
-- Expected: PRD §7 "Fixtures … are used for development, CI, error-path tests, and long-running
-  stability runs" and §7 benchmark harness drives the real SPA in a browser (fake audio
-  device). A dev-only fixture mode (e.g. `?fixture=1` wiring FixtureTransport + fake capture
-  through the existing deps seam) is the missing enabler for QA and the future Playwright
-  harness.
-- Ticket: 018-qa-browser-fixture-mode.md
+**Expected** (PRD §8): *"No number reported in the write-up may come from a fixture run. Fixture latency is a
+configured constant."* Plus §17 15g: mandatory empty states exist so *"polished placeholders can never be
+mistaken for measured evidence."*
 
-### Noted, not filed
-- Cantonese warnings render while idle/denied (mock gates them on an active session). Logged
-  during build as a deliberate deviation: PRD only requires warn-never-block, and warning
-  before start is more informative. Flagging for operator awareness only.
+**Observed:** the conversation-length card leaves its empty state and renders **p50 0.98 s, p95 0.98 s,
+20 utterances completed, 0 disconnects**, under a mono provenance line reading *"LiveSessions only · 1
+sessions · 20 utterances completed"* — with **no "illustrative" badge** and nothing indicating the source was
+a fixture. Panel digit count goes 0 → 29.
+
+The Run path enforces the realness rule correctly (Exp 1 and Exp 2 both say "no sweep runs recorded"). The
+**LiveSession path has no equivalent gate**. `?fixture=1` is the documented QA/demo path, so this is easy to
+hit, and 0.98 s appearing as both p50 and p95 is the signature of a constant-delay fixture.
+
+Evidence: `.qa/screens/F1-results-fixture-livesession.txt`
+
+### F2 — Results never sees server-persisted Runs · **HIGH**
+
+*Flow G→H.* **Repro:** POST two Recordings and four Runs to the real API → Replay → select the corpus
+Recording (all four render correctly) → Results.
+
+**Expected** (PRD §8): *"**One ledger under every view.** Every screen reads from a single append-only run
+ledger… the ledger is the source of truth, so a metric cannot drift between screens or between a screen and
+the write-up."*
+
+**Observed:** Results says **"No runs recorded"** while four Runs exist on the server, two of which pass the
+aggregation gate (`run-b-sweep-1` B/sweep/complete, `run-c-sweep-1` C/sweep/complete). The client ledger blob
+holds `runs: 0, recordings: 0, liveSessions: 0`. Replay reads the server over REST; Results reads a disjoint
+browser-local ledger.
+
+Consequence: after a real batch sweep — which writes Runs server-side — the Results view, the project's
+primary deliverable, would still be empty. Combined with F1, Results currently shows **fixture-sourced Live
+data and omits real server Runs**, the exact inversion of the intent.
+
+Evidence: `.qa/screens/F2-results-blind-to-server-runs.txt`
+
+### F3 — A dead backend renders as a normal empty state · **HIGH**
+
+*Flow F.* **Repro:** with the API server down, open Replay.
+
+**Expected** (PRD §12): storage and load failures surface clearly; a failure must be distinguishable from
+emptiness.
+
+**Observed:** `GET /api/recordings` returns **500 with an empty body** (proxy logs `ECONNREFUSED`), and the
+library renders the reassuring *"No Recordings yet — Record a clip or load the corpus. Nothing is listed until
+a Recording exists…"*. No error, no retry affordance, no hint the backend is unreachable. An operator would
+conclude the app is working and empty.
+
+Evidence: `.qa/screens/F3-dead-backend-reads-as-empty.txt`
+
+### F4 — API server binds the client's port under the repo's own preview config · **MODERATE**
+
+*Flow F.* **Repro:** `preview_start` the `workbench` config from `.claude/launch.json` (which declares port
+5173) → the harness sets `PORT=5173` → `npm run dev` runs client and server concurrently →
+`src/server/index.ts` reads `Number(process.env.PORT ?? 8787)` and logs **`server listening on :5173`**.
+
+**Observed:** the API never binds 8787, every `/api/*` call is ECONNREFUSED, and the entire Replay/storage
+half of the app is dead in the documented dev/QA path. I had to start the API separately with an explicit
+`PORT=8787` to continue this pass. A developer running `npm run dev` from a shell with no `PORT` set is
+unaffected — which is what makes this easy to miss.
+
+### F5 — `?fixture=fail-mt` injects no fault · **MODERATE**
+
+*Flow D, halted.* **Repro:** open `/?fixture=fail-mt` → select Cascade → Start microphone → observe.
+
+**Expected:** AGENTS.md documents `?fixture=fail-mt` as fault injection, and PRD §12 makes the
+architecture-differentiated failure copy a finding: *"mt stage timed out for this utterance — session still
+running"* versus Realtime's opaque string.
+
+**Observed:** `location.search === "?fixture=fail-mt"` is active, the session ran to **utterance 17**, and no
+stage failure ever surfaced — `/stage timed out/i` and `/opaque failure/i` are absent from the document
+throughout; the target card stayed `ready`.
+
+The failure copy itself is implemented (Replay's failed-run card renders *"tts stage timed out — run saved as
+failed, excluded from every aggregate"* correctly). What is broken is the documented manual path for
+exercising it in Live.
+
+Evidence: `.qa/screens/F5-fail-mt-inert.txt`
+
+### F6 — Blind scores persist only to browser localStorage · **MODERATE**
+
+*Flow G.* **Repro:** Replay → select a Recording with ≥2 completed runs → compare blind → pick two → score all
+four → submit → inspect storage.
+
+**Expected** (PRD §7): *"The server owns the store; the client reads and writes it over REST."* §10: scores
+append to the ledger, and a coworker scores *"at the same machine or on the deployed instance"*.
+
+**Observed:** the comparison is written to `localStorage["workbench.runLedger.v1"].blindComparisons` and
+nowhere else. There is no blind-comparison REST endpoint, so scores never reach `data/`, will not appear in
+the `results/` bundle `npm run export-results` produces (which is what the write-up cites), are lost if
+browser storage is cleared, and cannot be collected from a second machine or browser.
+
+The record itself is complete and correct — `runIds`, the drawn `order`, both dimensions for both samples,
+`evaluatorLanguage`. Only its destination is wrong.
+
+### F7 — Run and Batch sweep are enabled with no Recording selected · **LOW**
+
+*Flow F.* **Repro:** Replay with no Recording selected (panel reads *"select a Recording to run against"*) →
+click **Run**.
+
+**Observed:** both buttons are enabled (`disabled: false`, no `title`). Clicking Run is a **silent no-op** —
+no run starts, no message, no console error. The app's own Results view models the right pattern: its
+"Run sweep" button is disabled with an explanatory title.
+
+### F8 — Provenance stamp asserts a corpus version on an empty Results screen · **LOW**
+
+*Flow A/H.* **Repro:** open Results with an empty ledger.
+
+**Observed:** the top bar renders `run 2026-08-06 · corpus v1` beside a body that says **"No runs recorded"**.
+The results panel itself is correctly digit-free, but the stamp sits outside it and reads as though a run
+against corpus v1 exists. PRD §8 attaches provenance to results; with zero results there is nothing to
+attribute.
+
+## Checked and deliberately **not** filed
+
+- **Recording duration renders `0:00`** — my seeded clips were 0.6 s; real corpus clips are 30–45 s.
+  Test-data artifact.
+- **Run ids visible in `data-run` attributes during blind compare** — my seed ids (`run-b-sweep-1`) encode the
+  arm; production ids are opaque (`run_<ts><seq>_<uuid>`). Visible labels are neutral (`Run 1/2/3`).
+- **Empty Recordings library, empty aggregates, `not yet measured` cells** — known-empty by design; the real
+  corpus is blocked on the operator.
+- **Top bar measures 53px** against the design's 52px — the extra pixel is the border; structurally correct.
 
 ## Escalations
-- **Mic-granted journeys** (flows 5–7): the pane's capture policy hard-blocks getUserMedia;
-  cannot be driven here. Becomes drivable once QA-3's fixture mode exists (next iteration).
-- **Real-provider audio journeys** (Arm A/B with live APIs): out of scope for QA per budget
-  rules; adapters were smoke-tested separately.
+
+- **Audible autoplay** could not be verified — Live states `autoplay on` and emits audio through the playback
+  path, but this environment has no audio output to confirm by ear. Needs a human with speakers.
+- **Real-provider smoke** for ElevenLabs Scribe and Anthropic MT is out of scope here and costs money; Scribe
+  will 401 until the key scope gains `speech_to_text`.
+- **A real microphone session** (grantable mic, real speech) needs the operator; this pass ran in fixture mode
+  by design.
