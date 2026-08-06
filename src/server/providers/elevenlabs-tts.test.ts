@@ -118,6 +118,23 @@ describe('ElevenLabsTts adapter specifics', () => {
     expect(created[0]!.url).toContain('/text-to-speech/customVoice123/stream-input');
   });
 
+  it('uses config.modelId in the URL when provided, leaving voice and output_format untouched', async () => {
+    const { created, wsFactory } = makeSetup();
+    const tts = new ElevenLabsTts(
+      { apiKey: 'k', modelId: 'eleven_multilingual_v2' },
+      { wsFactory },
+    );
+    await collect(tts.synthesize(asyncIterableOf(['hi'])));
+
+    const url = created[0]!.url;
+    expect(url).toMatch(/[?&]model_id=eleven_multilingual_v2/);
+    expect(url).not.toMatch(/eleven_flash_v2_5/);
+    // Only the model becomes configurable — everything else is unchanged.
+    expect(url).toContain(`/text-to-speech/${ELEVENLABS_DEFAULT_VOICE_ID}/stream-input`);
+    expect(url).toMatch(/[?&]output_format=pcm_24000/);
+    expect(url).toMatch(/[?&]auto_mode=true/);
+  });
+
   it('resolves the API key from ELEVENLABS_API_KEY at construction when config omits it', async () => {
     vi.stubEnv('ELEVENLABS_API_KEY', 'env-el-key');
     const { created, wsFactory } = makeSetup();
