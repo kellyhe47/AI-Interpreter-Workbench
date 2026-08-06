@@ -18,8 +18,15 @@
  *   budget while they read Replay, Results or Help, so hiding it there was a
  *   lie about the app's state.
  * - Run-provenance mono text ('run YYYY-MM-DD · corpus v1', date from
- *   deps.now()) is passed to TopBar ONLY on the Results view. A live session
- *   is not a run; provenance over it would be a category error.
+ *   deps.now()) is passed to TopBar ONLY on the Results view, and — ticket 025
+ *   (QA F8) — only when Results is actually SHOWING results. A live session is
+ *   not a run; provenance over it would be a category error, and so is
+ *   provenance over 'No runs recorded'. PRD §8: "A number without provenance is
+ *   a claim; a number with it is citable" — with no numbers there is nothing to
+ *   make citable, and a corpus version stamped over an empty screen is a claim
+ *   about a corpus that produced none of what is on it. The emptiness question
+ *   is answered by ResultsView's own exported `resultsAreEmpty`, never by a
+ *   second copy of the rule here, so the stamp cannot disagree with the panel.
  * - ONE DEPS BAG. The ledger a Live session appends to IS the ledger Results
  *   reads — same instance, no reload, no second copy.
  * - `deps` is optional ONLY for production main.tsx convenience: when
@@ -40,16 +47,27 @@
  * somewhere to persist the draw. App is that host: it fills every one of the
  * three in, so the affordance exists in the real product, and a host bag that
  * supplies its own (a test pinning the draw) still wins.
+ *
+ * A SUBMITTED COMPARISON GOES TO BOTH DESTINATIONS (ticket 023, QA F6). The
+ * default `recordBlindComparison` writes the ledger AND POSTs the very same
+ * record to /api/blind-comparisons through `deps.replay.blindComparisons`.
+ * PRD §7 gives the server the store, and PRD §10 expects a coworker to score on
+ * the deployed instance — neither is reachable from localStorage alone. The
+ * ORDER and the failure handling are load-bearing: the local write happens
+ * FIRST and unconditionally, and a rejected POST is swallowed rather than
+ * thrown, because the evaluator's judgement must survive an unreachable server.
+ * A host that supplies no client keeps exactly the old behaviour.
  */
 
-import { useMemo, useRef, useState, type ReactElement } from 'react';
+import { useCallback, useMemo, useReducer, useRef, useState, type ReactElement } from 'react';
 import { buildBrowserDeps } from './browserDeps';
 import { buildFixtureDeps, isFixtureMode } from './fixtureDeps';
 import TopBar, { type WorkbenchView } from './components/TopBar';
 import type { LedgerHydrationSource } from './state/hydrateLedger';
+import type { BlindComparison } from './state/ledger';
 import type { SessionStatus } from './state/sessionMachine';
 import HelpView from './views/HelpView';
-import ResultsView from './views/ResultsView';
+import ResultsView, { resultsAreEmpty } from './views/ResultsView';
 import LiveView from './views/LiveView';
 import ReplayView, { type ReplayDeps } from './views/ReplayView';
 import { useSessionController, type SessionDeps } from './views/useSessionController';
@@ -120,6 +138,95 @@ export default function App(props: AppProps): ReactElement {
   const [view, setView] = useState<WorkbenchView>('live');
 
   /**
+   * TICKET 025 — the shell's view of the ledger's CONTENT.
+   *
+   * The ledger is a plain mutable store with no subscription, so nothing tells
+   * the shell that hydration has landed records: ResultsView's own
+   * `setHydration` re-renders ResultsView alone. `bumpContent` is that missing
+   * signal — a re-render request carrying no value, because the ledger itself
+   * IS the state — and `hydrating` is the shell's copy of "the panel is still
+   * asking". Both are driven by the wrapper below, the only place App can
+   * observe the hydration it merely forwards.
+   */
+  const [, bumpContent] = useReducer((version: number) => version + 1, 0);
+  const [hydrating, setHydrating] = useState(deps.hydrate !== undefined);
+
+  /**
+   * `deps.hydrate` with completion observed, and NOTHING else changed — the
+   * listings are forwarded verbatim, so ResultsView hydrates exactly as before.
+   *
+   * Memoized on `deps` (pinned for App's lifetime) because ResultsView re-runs
+   * hydration whenever this identity changes; a fresh wrapper per render would
+   * be an unbounded reload loop, and every re-render caused by the bump below
+   * would trigger another.
+   *
+   * The bump is deferred to the next task rather than fired at resolution:
+   * `hydrateLedger` awaits BOTH listings and appends afterwards, so a bump on
+   * the resolution itself would re-read the ledger before the records reached
+   * it and the stamp would stay hidden until some later, unrelated render.
+   */
+  const hydrate = useMemo<LedgerHydrationSource | undefined>(() => {
+    const source = deps.hydrate;
+    if (source === undefined) return undefined;
+
+    let outstanding = 0;
+    const observe = <T,>(list: () => Promise<T>): (() => Promise<T>) => {
+      return async () => {
+        if (outstanding === 0) setHydrating(true);
+        outstanding += 1;
+        try {
+          return await list();
+        } finally {
+          outstanding -= 1;
+          if (outstanding === 0) {
+            setTimeout(() => {
+              setHydrating(false);
+              bumpContent();
+            }, 0);
+          }
+        }
+      };
+    };
+
+    return {
+      recordings: { list: observe(() => source.recordings.list()) },
+      runs: { list: observe(() => source.runs.list()) },
+    };
+  }, [deps]);
+
+  /**
+   * Whether Results currently has anything to attribute. `hydrating` counts as
+   * "no": a panel still rendering its loading note is showing no figures, so a
+   * corpus-version claim over it would describe data that has not arrived.
+   *
+   * Recomputed EVERY render rather than memoized: the input is a mutable ledger
+   * with no identity change to key a cache on, so any dependency list would be
+   * a list of the things that happen to change when it does — and would go
+   * stale the first time one of them didn't. It is the same pair of reads
+   * ResultsView already performs on the same render.
+   */
+  const resultsShowContent = !hydrating && !resultsAreEmpty(deps.ledger);
+
+  /**
+   * TICKET 023 — the default blind-comparison sink: the ledger FIRST, then the
+   * server. See the file header for why the order and the swallowed rejection
+   * are both deliberate.
+   */
+  const persistBlindComparison = useCallback(
+    (comparison: BlindComparison): void => {
+      deps.ledger.recordBlindComparison(comparison);
+      // The SAME record, not a second derived copy: one judgement, two stores.
+      void deps.replay?.blindComparisons?.create(comparison).catch(() => {
+        // An unreachable server costs the server's copy and nothing else. The
+        // reveal already happened and the local record stands; re-throwing here
+        // would surface as an unhandled rejection and change nothing for the
+        // evaluator except losing their place.
+      });
+    },
+    [deps],
+  );
+
+  /**
    * The Replay bag with the blind seams filled in. Memoized on `deps` — which
    * is pinned for the App's lifetime — because ReplayView re-lists recordings
    * and runs whenever its `deps` identity changes, and a fresh object per
@@ -132,15 +239,15 @@ export default function App(props: AppProps): ReactElement {
       ...bag,
       rng: bag.rng ?? Math.random,
       evaluatorLanguage: bag.evaluatorLanguage ?? DEFAULT_EVALUATOR_LANGUAGE,
-      recordBlindComparison:
-        bag.recordBlindComparison ?? ((comparison) => deps.ledger.recordBlindComparison(comparison)),
+      recordBlindComparison: bag.recordBlindComparison ?? persistBlindComparison,
     };
-  }, [deps]);
+  }, [deps, persistBlindComparison]);
 
   // The dot describes the SESSION, not the navigation: no `view ===` gate.
   const live = LIVE_STATUSES.includes(controller.state.status);
+  // Results-only AND content-only: see the header. Absent, never blanked.
   const provenance =
-    view === 'results'
+    view === 'results' && resultsShowContent
       ? `run ${new Date(deps.now()).toISOString().slice(0, 10)} · corpus v1`
       : null;
 
@@ -165,7 +272,7 @@ export default function App(props: AppProps): ReactElement {
       // `deps.replay`: wiring Replay is not a request for Results to go to the
       // network, and a host that wired only Replay must still see the client
       // ledger alone.
-      body = <ResultsView ledger={deps.ledger} hydrate={deps.hydrate} />;
+      body = <ResultsView ledger={deps.ledger} hydrate={hydrate} />;
       break;
     case 'help':
       body = <HelpView />;

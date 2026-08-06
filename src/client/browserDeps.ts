@@ -20,6 +20,14 @@
  * deliberately NOT set here. App supplies them, because it is App that owns
  * the ledger the comparison is persisted into.
  *
+ * TICKET 023 — the bag DOES carry `blindComparisons`, the REST client for
+ * POST/GET /api/blind-comparisons. It sits here rather than in App for the
+ * mirror-image reason: it is a transport, built from the same injected fetch as
+ * the recordings/runs clients, and App is what decides to USE it (it writes the
+ * ledger and posts the same record). Without it, a submitted score reached
+ * localStorage and nothing else — absent from the exported bundle and
+ * unreachable from the second machine PRD §10 describes (QA F6).
+ *
  * TICKET 019 — the bag also carries `hydrate`, the Results hydration seam, so
  * the real product's Results screen reads the server's Runs instead of an
  * empty browser-local ledger. It is built from the SAME two REST clients the
@@ -41,8 +49,10 @@ import { startCapture, type CapturePipeline, type CaptureResult } from './audio/
 import { ArmPlayback, type PlaybackAudioContextLike } from './audio/playback';
 import { createRunOnceExecutor, startBatch, type BatchHandle } from './batch/runner';
 import {
+  createBlindComparisonsClient,
   createRecordingsClient,
   createRunsClient,
+  type BlindComparisonsClient,
   type RecordingsClient,
   type RunsClient,
 } from './replay/recordingsClient';
@@ -117,6 +127,13 @@ const browserFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
 export function buildReplayDeps(): ReplayDeps {
   const recordings: RecordingsClient = createRecordingsClient({ fetchImpl: browserFetch });
   const runs: RunsClient = createRunsClient({ fetchImpl: browserFetch });
+  // Ticket 023 — the REST seam a submitted blind comparison is persisted
+  // through. Same injected fetch and same same-origin default as its two
+  // siblings, so the deployed instance needs no extra configuration for a
+  // coworker's scores to reach data/ (PRD §7, §10).
+  const blindComparisons: BlindComparisonsClient = createBlindComparisonsClient({
+    fetchImpl: browserFetch,
+  });
 
   // Replay has no microphone: the clip is paced INTO the transport, so the
   // realtime peer connection carries no live track (getMediaStream omitted).
@@ -148,6 +165,7 @@ export function buildReplayDeps(): ReplayDeps {
   return {
     recordings,
     runs,
+    blindComparisons,
     runOnce: (request: ReplayRunRequest): Promise<RunOnceResult> =>
       runOnce({
         recordingId: request.recordingId,

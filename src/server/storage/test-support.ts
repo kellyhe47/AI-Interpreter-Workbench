@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { NewRecording, Run } from './types';
+import type { BlindComparison, NewRecording, Run } from './types';
 
 /** Relative paths of the normative layout (PRD §7). */
 export const LAYOUT = {
@@ -19,6 +19,12 @@ export const LAYOUT = {
   runJson: (base: string, id: string) => path.join(base, 'runs', `${id}.json`),
   runWav: (base: string, id: string) => path.join(base, 'runs', `${id}.out.wav`),
   ledger: (base: string) => path.join(base, 'ledger.jsonl'),
+  /**
+   * Ticket 023 — blind comparisons get their OWN append-only file, NOT a line
+   * in ledger.jsonl: `readLedger()` is typed `Run[]` and is read as runs by
+   * exportResults, so a comparison sharing that file would be counted as a run.
+   */
+  comparisons: (base: string) => path.join(base, 'comparisons.jsonl'),
 };
 
 export async function makeTempBase(): Promise<string> {
@@ -52,6 +58,26 @@ export function newRecording(overrides: Partial<NewRecording> = {}): NewRecordin
     durationMs: 4200,
     speechEndMs: 3800,
     origin: 'mic',
+    ...overrides,
+  };
+}
+
+/** Ticket 023 — a complete, well-formed BlindComparison (PRD §10). */
+export function makeBlindComparison(
+  overrides: Partial<BlindComparison> = {},
+): BlindComparison {
+  return {
+    id: 'cmp-1',
+    recordingId: 'rec-1',
+    runIds: ['run-a', 'run-b'],
+    order: ['run-b', 'run-a'],
+    evaluatorLanguage: 'es',
+    scores: {
+      A: { adequacy: 4, fluency: 5 },
+      B: { adequacy: 2, fluency: 3 },
+    },
+    createdAt: 1_700_000_000_000,
+    revealedAt: 1_700_000_000_500,
     ...overrides,
   };
 }

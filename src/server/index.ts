@@ -3,7 +3,8 @@
  *
  * ============================ APP FACTORY SEAM (normative) =================
  *   export interface AppDeps {
- *     storage?: Storage;      // backs /api/recordings + /api/runs
+ *     storage?: Storage;      // backs /api/recordings, /api/runs and
+ *                             // /api/blind-comparisons
  *     clientDist?: string;    // production SPA dir
  *   }
  *   createApp(deps?)        -> express.Express
@@ -21,7 +22,7 @@
  * closes over paths, so importing this module is free of side effects beyond
  * the listener below.
  *
- * ROUTE ORDER IS LOAD-BEARING: /api/health, the token route and the two REST
+ * ROUTE ORDER IS LOAD-BEARING: /api/health, the token route and the three REST
  * routers are all mounted BEFORE the production SPA catch-all, and the
  * catch-all itself excludes /api/ and /ws/ — an SPA that swallowed
  * /api/recordings would answer index.html to every API call in production only.
@@ -30,7 +31,7 @@ import express from 'express'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createRecordingsRouter, createRunsRouter } from './routes'
+import { createBlindComparisonsRouter, createRecordingsRouter, createRunsRouter } from './routes'
 import { createStorage } from './storage'
 import type { Storage } from './storage'
 import { createTokenRouter } from './token'
@@ -45,7 +46,7 @@ const DEFAULT_DATA_DIR = path.resolve(serverDir, '../../data')
 const DEFAULT_CLIENT_DIST = path.resolve(serverDir, '../../dist/client')
 
 export interface AppDeps {
-  /** Backs /api/recordings and /api/runs. Defaults to createStorage(<repo>/data). */
+  /** Backs the REST routers. Defaults to createStorage(<repo>/data). */
   storage?: Storage
   /** Directory the production SPA is served from. Defaults to ../../dist/client. */
   clientDist?: string
@@ -62,6 +63,10 @@ export function createApp(deps: AppDeps = {}): express.Express {
   app.use(createTokenRouter())
   app.use(createRecordingsRouter({ storage }))
   app.use(createRunsRouter({ storage }))
+  // Ticket 023 (QA F6) — blind comparisons over the SAME injected store, so a
+  // score submitted on the deployed instance reaches data/ like every other
+  // record instead of dying in one browser's localStorage.
+  app.use(createBlindComparisonsRouter({ storage }))
 
   // Production: serve the built SPA (PRD §13 — single origin, no CORS).
   // Read at CALL time so the branch is reachable in tests.

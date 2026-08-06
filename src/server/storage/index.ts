@@ -9,6 +9,7 @@
  *   runs/<id>.json          the Run record
  *   runs/<id>.out.wav       synthesized output audio
  *   ledger.jsonl            append-only, ONE LINE PER RUN
+ *   comparisons.jsonl       append-only, ONE LINE PER BLIND COMPARISON
  *
  * THE BASE DIRECTORY IS INJECTED, NEVER HARDCODED. `createStorage(baseDir)`
  * takes the root as an argument so tests run against a `mkdtemp` directory and
@@ -26,6 +27,14 @@
  * a read-modify-write would make a crash mid-write cost the entire benchmark
  * history. `readLedger` pays for that by being tolerant — it skips any line it
  * cannot parse, so a process killed part-way through a write costs ONE line.
+ *
+ * BLIND COMPARISONS GET THEIR OWN STREAM, NOT A LINE IN ledger.jsonl (ticket
+ * 023, QA F6). `appendBlindComparison`/`listBlindComparisons` obey exactly the
+ * same append-only + tolerant-reader discipline, against comparisons.jsonl.
+ * The separation is not tidiness: `readLedger()` is typed `Run[]` and
+ * `exportResults` unions it into the exported RUN record set, so a comparison
+ * sharing that file would be counted in `totals.runs` and derived into an arm.
+ * A judgement about two runs is not a third run.
  *
  * AUDIO IS IMMUTABLE. A Recording's WAV is written once, by `createRecording`,
  * and there is deliberately no method to replace it. Only the label is mutable
@@ -50,9 +59,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { StorageError } from './types';
-import type { NewRecording, Recording, Run } from './types';
+import type { BlindComparison, NewRecording, Recording, Run } from './types';
 
 export type {
+  BlindComparison,
+  BlindSampleScores,
   NewRecording,
   Recording,
   RecordingOrigin,
@@ -72,6 +83,11 @@ export interface ListRunsOptions {
   recordingId?: string;
 }
 
+/** Ticket 023 — the one filter the blind-comparison listing offers. */
+export interface ListBlindComparisonsOptions {
+  recordingId?: string;
+}
+
 export interface Storage {
   createRecording(meta: NewRecording, wavBytes: Uint8Array): Promise<Recording>;
   getRecording(id: string): Promise<Recording | undefined>;
@@ -85,6 +101,15 @@ export interface Storage {
   readRunAudio(runId: string): Promise<Uint8Array>;
   listRuns(opts?: ListRunsOptions): Promise<Run[]>;
   readLedger(): Promise<Run[]>;
+
+  /**
+   * Ticket 023 — append one blind comparison to its OWN append-only file,
+   * `comparisons.jsonl`. Never rewrites an earlier line, so the same id posted
+   * twice is two records and the first evaluator's scores survive.
+   */
+  appendBlindComparison(comparison: BlindComparison): Promise<BlindComparison>;
+  /** Ticket 023 — every stored comparison, in write order. Filters by Recording. */
+  listBlindComparisons(opts?: ListBlindComparisonsOptions): Promise<BlindComparison[]>;
 }
 
 /**
@@ -118,6 +143,33 @@ async function readJson<T>(file: string): Promise<T | undefined> {
   }
 }
 
+/**
+ * TOLERANT READER for an append-only JSONL stream. A line that will not parse
+ * is skipped, so a process killed part-way through a write costs THAT LINE and
+ * not the whole file; a file that is not there yet is an empty stream, not an
+ * error. Shared by the run ledger and the blind-comparison stream so the two
+ * cannot drift in how much a torn write costs.
+ */
+async function readJsonl<T>(file: string): Promise<T[]> {
+  let text: string;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch (err) {
+    if (isNotFound(err)) return [];
+    throw err;
+  }
+  const out: T[] = [];
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue;
+    try {
+      out.push(JSON.parse(line) as T);
+    } catch {
+      // A torn line costs that line, not the whole stream.
+    }
+  }
+  return out;
+}
+
 async function writeJson(file: string, value: unknown): Promise<void> {
   await ensureDir(path.dirname(file));
   await fs.writeFile(file, `${JSON.stringify(value)}\n`, 'utf8');
@@ -127,6 +179,8 @@ export function createStorage(baseDir: string): Storage {
   const recordingsDir = path.join(baseDir, 'recordings');
   const runsDir = path.join(baseDir, 'runs');
   const ledgerFile = path.join(baseDir, 'ledger.jsonl');
+  // Ticket 023 — a SEPARATE stream, beside the ledger and never inside it.
+  const comparisonsFile = path.join(baseDir, 'comparisons.jsonl');
 
   const recordingJson = (id: string) => path.join(recordingsDir, `${id}.json`);
   const recordingWav = (id: string) => path.join(recordingsDir, `${id}.wav`);
@@ -278,25 +332,27 @@ export function createStorage(baseDir: string): Storage {
       return runs;
     },
 
+    async appendBlindComparison(comparison: BlindComparison): Promise<BlindComparison> {
+      // APPEND-ONLY, exactly like the ledger: one line, 'a' flag, no read of
+      // the existing file. The record is stored VERBATIM — the draw, the
+      // scores and the evaluator's language are the evaluator's judgement, and
+      // rewriting any field here would change what was judged.
+      await ensureDir(baseDir);
+      await fs.appendFile(comparisonsFile, `${JSON.stringify(comparison)}\n`, 'utf8');
+      return comparison;
+    },
+
+    async listBlindComparisons(
+      opts: ListBlindComparisonsOptions = {},
+    ): Promise<BlindComparison[]> {
+      const comparisons = await readJsonl<BlindComparison>(comparisonsFile);
+      return opts.recordingId === undefined
+        ? comparisons
+        : comparisons.filter((c) => c.recordingId === opts.recordingId);
+    },
+
     async readLedger(): Promise<Run[]> {
-      let text: string;
-      try {
-        text = await fs.readFile(ledgerFile, 'utf8');
-      } catch (err) {
-        if (isNotFound(err)) return [];
-        throw err;
-      }
-      const runs: Run[] = [];
-      for (const line of text.split('\n')) {
-        if (line.trim().length === 0) continue;
-        try {
-          runs.push(JSON.parse(line) as Run);
-        } catch {
-          // A torn line (process killed mid-write) costs that line, not the
-          // whole ledger.
-        }
-      }
-      return runs;
+      return readJsonl<Run>(ledgerFile);
     },
   };
 }

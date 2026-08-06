@@ -12,7 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStorage } from '../storage';
-import type { Recording, Run, Storage } from '../storage';
+import type { BlindComparison, Recording, Run, Storage } from '../storage';
+import { createBlindComparisonsRouter } from './blindComparisons';
 import { createRecordingsRouter } from './recordings';
 import { createRunsRouter } from './runs';
 
@@ -38,6 +39,9 @@ export async function startApi(): Promise<ApiHarness> {
   const app = express();
   app.use(createRecordingsRouter({ storage }));
   app.use(createRunsRouter({ storage }));
+  // Ticket 023 — the third router joins the bare harness. Additive: it adds
+  // routes, it shadows none, and the recordings/runs suites are untouched.
+  app.use(createBlindComparisonsRouter({ storage }));
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -116,6 +120,27 @@ export async function postRun(api: ApiHarness, run: Run): Promise<Response> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(run),
   });
+}
+
+/**
+ * Ticket 023 — POST /api/blind-comparisons. The body is passed through
+ * VERBATIM (typed `unknown`) so a malformed-body test can post anything at all.
+ */
+export async function postBlindComparison(api: ApiHarness, body: unknown): Promise<Response> {
+  return fetch(`${api.base}/api/blind-comparisons`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Ticket 023 — GET /api/blind-comparisons, optionally filtered. */
+export async function getBlindComparisons(
+  api: ApiHarness,
+  query = '',
+): Promise<{ status: number; body: BlindComparison[] }> {
+  const res = await fetch(`${api.base}/api/blind-comparisons${query}`);
+  return { status: res.status, body: (await res.json()) as BlindComparison[] };
 }
 
 export async function bodyBytes(res: Response): Promise<Uint8Array> {

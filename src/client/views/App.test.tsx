@@ -29,7 +29,8 @@ import { DEFAULT_CASCADE_TRIPLE, type ProviderTriple } from '../../core/arms';
 import type { BatchHandle } from '../batch/runner';
 import type { RecordingsClient, RunsClient } from '../replay/recordingsClient';
 import type { RunOnceResult } from '../replay/runner';
-import type { Recording, Run } from '../state/ledger';
+import { RunLedger, type Recording, type Run } from '../state/ledger';
+import { seedCleanSweep } from '../components/results/testRecords';
 import type { ReplayDeps } from './ReplayView';
 import {
   COPY,
@@ -258,7 +259,16 @@ describe('TopBar — four tabs', () => {
   });
 
   it('run-provenance mono text renders on Results and nowhere else', async () => {
-    renderPinnedWorkbench();
+    // TICKET 025 — the stamp attributes RESULTS, so the Results half of this
+    // test needs something attributable in the ledger. The claim under test is
+    // TAB SCOPING ('and nowhere else'); the empty ledger this used to render
+    // with was incidental to renderPinnedWorkbench(), not a statement that
+    // provenance may attach to nothing. Cf. App.tsx:20-22 — a live session is
+    // not a run, and a Results view with zero runs is the same category error.
+    // The empty-ledger counterpart is asserted in App.provenance.test.tsx.
+    const ledger = new RunLedger();
+    seedCleanSweep(ledger);
+    renderPinnedWorkbench({ ledger });
 
     expect(q('[data-provenance-run]')).toBeNull();
     await showTab('Replay');

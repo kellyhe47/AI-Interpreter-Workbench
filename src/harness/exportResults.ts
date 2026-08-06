@@ -50,6 +50,15 @@
  * attempted against, and dropping it would shrink the denominator to hide the
  * very shortfall being measured.
  *
+ * BLIND COMPARISONS ARE EXPORTED AND DISCLOSED (ticket 023, PRD §10). They are
+ * read from their own append-only stream, written verbatim into the bundle as
+ * `blind-comparisons.json`, and counted in `summary.blindComparisons` — a
+ * TOP-LEVEL field, never inside `totals`, because a judgement about two runs is
+ * not a third run. Only comparisons whose BOTH runs are in the exported record
+ * set are `scored`; the rest are `unattributable` — exported in full, counted
+ * toward no Recording. Discarding them would destroy real evaluator work;
+ * counting them would let an id nothing in the bundle defines inflate a claim.
+ *
  * FAILURE LEAVES THE SOURCE ALONE (PRD §12). The bundle is staged in a sibling
  * directory and renamed into place, so a failed export never leaves a
  * half-written `results/<date>/`. The error names the output path that could
@@ -62,7 +71,7 @@ import path from 'node:path';
 import { deriveArmTag } from '../core/arms';
 import type { ArmTag } from '../core/arms';
 import { createStorage } from '../server/storage/index';
-import type { Run } from '../server/storage/index';
+import type { BlindComparison, Run } from '../server/storage/index';
 
 /** PRD §9: 5 repetitions per utterance per arm. */
 export const DEFAULT_INTENDED_REPS = 5;
@@ -98,10 +107,37 @@ export interface ExperimentSummary {
   configurations: ConfigurationSummary[];
 }
 
+/**
+ * Ticket 023 (QA F6) — PRD §10's disclosure requirement: the number of
+ * comparisons SCORED is stated alongside N, "so a small sample is disclosed
+ * rather than implied to be complete".
+ *
+ * It is a TOP-LEVEL summary field and deliberately NOT part of `totals`.
+ * `totals` counts RUNS and its exact shape is pinned (`toEqual`) by the
+ * empty-bundle test; a comparison is a judgement ABOUT two runs, not a third
+ * run, so folding it in there would both break that pin and inflate a figure
+ * that means "how much of the sweep landed".
+ */
+export interface BlindComparisonSummary {
+  /** Every comparison in the bundle, including unattributable ones. */
+  total: number;
+  /**
+   * Comparisons whose BOTH runIds are in the exported record set — the number
+   * disclosed alongside N.
+   */
+  scored: number;
+  /** `total - scored`. Stored, exported, never counted toward a Recording. */
+  unattributable: number;
+  /** Scored comparisons per recordingId. Unattributable ones appear nowhere. */
+  byRecording: Record<string, number>;
+}
+
 export interface ExportSummary {
   /** Bundle date, YYYY-MM-DD. */
   exportedAt: string;
   intendedReps: number;
+  /** Ticket 023 — the human-judgement disclosure. Never inside `totals`. */
+  blindComparisons: BlindComparisonSummary;
   totals: {
     /** ALL exported run records, including every excluded one. */
     runs: number;
@@ -225,6 +261,40 @@ function summariseArm(arm: NamedArm, runs: readonly Run[], intendedReps: number)
   };
 }
 
+/**
+ * Ticket 023 — the disclosure figures.
+ *
+ * SCORED means ATTRIBUTABLE: both of a comparison's `runIds` are in the
+ * exported record set, so a reader can follow the judgement back to the two
+ * runs it was made over. A comparison naming a run this bundle does not carry
+ * is `unattributable`: it is still exported (the evaluator's work is never
+ * discarded — see the router header) but it is counted toward NO Recording,
+ * because attributing it would mean asserting which arms were compared on the
+ * strength of an id nothing in the bundle defines.
+ *
+ * `recordingId` is deliberately NOT the attribution key. A comparison carries
+ * one, but a self-declared label cannot be checked; the pair of run ids can.
+ */
+function summariseComparisons(
+  comparisons: readonly BlindComparison[],
+  runIds: ReadonlySet<string>,
+): BlindComparisonSummary {
+  const byRecording: Record<string, number> = {};
+  let scored = 0;
+  for (const comparison of comparisons) {
+    const pair = comparison.runIds ?? [];
+    if (pair.length !== 2 || !pair.every((id) => runIds.has(id))) continue;
+    scored += 1;
+    byRecording[comparison.recordingId] = (byRecording[comparison.recordingId] ?? 0) + 1;
+  }
+  return {
+    total: comparisons.length,
+    scored,
+    unattributable: comparisons.length - scored,
+    byRecording,
+  };
+}
+
 function reason(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -246,8 +316,16 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
   const store = createStorage(dataDir);
   let ledger: Run[];
   let stored: Run[];
+  let comparisons: BlindComparison[];
   try {
-    [ledger, stored] = await Promise.all([store.readLedger(), store.listRuns()]);
+    // Comparisons come from their OWN append-only stream (comparisons.jsonl),
+    // never from the ledger — see the storage header. Reading them here is what
+    // puts human judgement into the bundle the write-up cites.
+    [ledger, stored, comparisons] = await Promise.all([
+      store.readLedger(),
+      store.listRuns(),
+      store.listBlindComparisons(),
+    ]);
   } catch (err) {
     throw new Error(`export-results: could not read the data store at ${dataDir} — ${reason(err)}`, {
       cause: err,
@@ -277,6 +355,7 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
   const summary: ExportSummary = {
     exportedAt: date,
     intendedReps,
+    blindComparisons: summariseComparisons(comparisons, new Set(byId.keys())),
     totals: { runs: runs.length, aggregated, excluded: runs.length - aggregated },
     experiments,
     empty,
@@ -294,6 +373,15 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
         'utf8',
       );
     }
+    // Ticket 023 — the records themselves, so a reviewer can recompute the
+    // disclosed number instead of taking the summary's word for it. Written
+    // unconditionally (an empty array on an empty store) so the bundle's shape
+    // never depends on whether anyone scored anything.
+    await fs.writeFile(
+      path.join(stagingDir, 'blind-comparisons.json'),
+      `${JSON.stringify(comparisons, null, 2)}\n`,
+      'utf8',
+    );
     await fs.writeFile(
       path.join(stagingDir, 'summary.json'),
       `${JSON.stringify(summary, null, 2)}\n`,

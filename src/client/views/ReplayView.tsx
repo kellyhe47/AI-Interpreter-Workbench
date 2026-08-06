@@ -104,7 +104,11 @@ import RecordingsLibrary from '../components/replay/RecordingsLibrary';
 import RunConfigPanel, { type ReplayConfigState } from '../components/replay/RunConfigPanel';
 import RunsList from '../components/replay/RunsList';
 import type { BatchConfiguration, BatchHandle, BatchProgress } from '../batch/runner';
-import type { RecordingsClient, RunsClient } from '../replay/recordingsClient';
+import type {
+  BlindComparisonsClient,
+  RecordingsClient,
+  RunsClient,
+} from '../replay/recordingsClient';
 import type { RunOnceConfig, RunOnceResult } from '../replay/runner';
 import type { BlindComparison, Recording, Run } from '../state/ledger';
 
@@ -149,6 +153,15 @@ export interface ReplayDeps {
   evaluatorLanguage?: string;
   /** Appends a completed blind comparison to the ledger. */
   recordBlindComparison?: (comparison: BlindComparison) => void;
+
+  /**
+   * TICKET 023 — the REST seam a submitted comparison is persisted through.
+   * OPTIONAL and NOT consumed by this view: like the
+   * recordings/runs clients it lives on the Replay bag, but it is APP that
+   * reads it, because App owns the default `recordBlindComparison` and
+   * therefore owns where a judgement lands.
+   */
+  blindComparisons?: BlindComparisonsClient;
 }
 
 export interface ReplayViewProps {
