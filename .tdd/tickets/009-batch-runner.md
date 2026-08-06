@@ -28,9 +28,15 @@ something. If the runner silently skips them, `origin: 'sweep'` is a lie. This t
 - **Counterbalanced run order** across repetitions: A→B on odd reps, B→A on even. Always
   running A first systematically advantages or penalises one arm if provider latency drifts
   across the sweep window.
-- **Warmup discard**: the **first run per configuration is discarded** — cold connection and
-  cold provider inflate the first call and it is not representative. Discarded means *not
-  aggregated*; the runner records that it discarded.
+- **Warmup discard**: an **extra, uncounted warmup run per configuration** is executed first and
+  discarded — cold connection and cold provider inflate the first call and it is not
+  representative. Discarded means *not aggregated*; the runner records that it discarded.
+  **`reps` means RETAINED reps.** Total executions per cell = `reps + 1`. The PRD is decisive:
+  §8 "60 samples per arm (12 utterances × 5 repetitions)", §17 22c "5 repetitions **retained**",
+  §7 "3 recordings × 5 reps × 2 arms = 30 runs", and the mock's batch note "first run per
+  configuration discarded as warmup" (an ADDITIONAL run, not one of the five). Treating the
+  warmup as one of the 5 would silently cost 20% of N and weaken p95 — and the fatter cascade
+  tail is precisely what 5 reps were chosen to resolve.
 - **`origin: 'sweep'`** on every retained run.
 - **A failed run does not abort the batch**: it is retried **once**, then recorded
   `status: 'failed'`, and the batch continues. Failures are summarised at the end rather than
@@ -48,8 +54,9 @@ something. If the runner silently skips them, `origin: 'sweep'` is a lie. This t
       point are two runs in flight (assert with an injected runner that would observe overlap)
 - [ ] **Counterbalancing**: with two configurations, odd-numbered reps run them in order
       [A, B] and even-numbered reps in [B, A]. Assert the actual execution order across ≥4 reps
-- [ ] **Warmup discard**: the first run of each configuration is marked discarded/excluded and
-      does not enter the aggregated set; with 5 reps, 4 are retained per configuration
+- [ ] **Warmup discard**: an extra uncounted warmup run per configuration runs first and is
+      excluded from the aggregated set; with `reps: 5`, **5 are retained** per configuration and
+      6 executions occur (`intendedReps === reps`, never `reps - 1`)
 - [ ] The discard is **recorded**, not silent — the batch summary states that warmup was
       discarded and counterbalancing applied
 - [ ] Every retained run carries `origin: 'sweep'`
@@ -74,3 +81,11 @@ clock so the matrix runs instantly and execution order is directly observable. *
 timing, no network.**
 
 ## Attempt log
+
+## Correction (orchestrator, after the first test-writing pass)
+
+The first draft said "the first run per configuration is discarded ... with 5 reps, 4 are
+retained". That was **wrong**, and the tests faithfully encoded it. The PRD pins `reps` as
+retained (§8's 60-sample arithmetic, §17 22c's "5 repetitions retained", §7's 30-run matrix), so
+the warmup is an **additional** execution. Corrected through the test-writer, not by editing
+locked tests.

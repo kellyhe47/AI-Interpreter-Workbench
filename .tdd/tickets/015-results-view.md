@@ -1,11 +1,11 @@
 ---
 id: 015
 title: Results view — Experiments tab and By Recording & category tab
-status: pending
+status: green
 depends_on: [011]
 touches: [src/client/views/ResultsView.tsx, src/client/views/ResultsView.test.tsx, src/client/components/results/derive.ts, src/client/components/results/derive.test.ts, src/client/components/results/testRecords.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/views/ResultsView.test.tsx, src/client/views/App.test.tsx, src/client/components/results/derive.test.ts, src/client/components/results/testRecords.ts]
 branch: ""
 ---
 
@@ -92,3 +92,14 @@ Rework `src/client/views/ResultsView.test.tsx` structurally (manifest Tests tabl
 against `testRecords.ts` from ticket 011.
 
 ## Attempt log
+
+- iter 1: green. 83 tests across the view, App and derive. v1 derivation block deleted — exactly
+  one derivation survives, so a metric cannot drift between two copies (§17 15g).
+- Mutation-checked: forcing the empty flag false fails 6 tests, incl. the "not one digit anywhere"
+  guard. A fixture-only ledger renders identically to an empty one.
+- Un-measured cells render `not yet measured` (never 0, never a figure). WER needs the real corpus,
+  adequacy/fluency need blind scoring — both blocked on the operator.
+- GAP FOUND, handed to ticket 012: the results card's `realtime-trimmed` column renders absent for
+  every cell, because `LiveSession` carries no `contextPolicy`. PRD §7 makes contextPolicy a Live
+  user-selectable variable and §8 sources that column from LiveSessions, so the policy must be
+  recorded ON the LiveSession or one third of that card is structurally unfillable.
