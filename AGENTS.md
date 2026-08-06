@@ -93,6 +93,23 @@ These exist because a violation would produce a number that looks fine and is wr
 - Error semantics: 429 → `RateLimitError` (so `withRetry` engages); timeouts via `withTimeout` →
   `TimeoutError`; abort = generator returns cleanly, no leaked timers or sockets. Cascade failure
   copy names the stage; Realtime failure copy is opaque — both are graded product copy.
+- **The measured atom is the UTTERANCE, not the Run.** PRD §8: *"one record per utterance per
+  arm"*. A corpus Recording is a ≤45 s take holding ~4 utterances with *deliberately different*
+  categories (§9, §17 22a), so a Run is the CONTAINER that produced a set of utterance records —
+  it is not itself a measurement. Any aggregate computed per-Run is wrong by construction under a
+  multi-utterance corpus. See `.tdd/tickets/README-v3-corpus.md`.
+- **A Recording carries a manifest of utterances, never a single category.** `src/core/corpus.ts`
+  is the canonical home of `CORPUS_CATEGORIES` and `validateManifest`. `src/harness/corpus.ts` is
+  the pre-22a *synthetic placeholder* corpus for bench/soak only — never the real corpus shape.
+- **The manifest is mapped to measured utterances by ORDER**, so a VAD that segments a clip
+  differently than the manifest describes mis-attributes every later utterance in that run: right
+  latency, wrong category, wrong reference. A count mismatch must fail the run with a named reason,
+  never partially attribute.
+- **Recordings VALIDATE their body; runs do not.** `POST /api/recordings` rejects a malformed
+  manifest with a 400 and a named reason, because a bad manifest never fails loudly later — it
+  silently corrupts every category and WER figure derived from it. `createRecording` whitelists
+  fields explicitly, so a new Recording field needs an explicit line there (unlike `appendRun`,
+  which stringifies the whole object).
 - **Storage is append-only.** `ledger.jsonl` is written with the `a` flag, one JSON object per line,
   never read-modify-write: a crash mid-write must cost one line, not the benchmark history.
   `readLedger` is tolerant and skips an unparseable line.
@@ -133,6 +150,10 @@ These exist because a violation would produce a number that looks fine and is wr
   have been committed by accident before.
 - `.env` holds `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`.
 - Commit in logical units with meaningful messages; never push without being asked.
+- **Commit BEFORE running a mutation check, and confirm every file it touches is tracked.** The
+  revert that undoes a sabotage also undoes uncommitted work, and an UNTRACKED file cannot be
+  reverted at all — which silently contaminates the rest of the batch while appearing to succeed.
+  This has now cost work twice (tickets 016 and 030).
 
 ## Known open items (need the operator)
 
