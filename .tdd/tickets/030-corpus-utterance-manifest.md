@@ -1,12 +1,12 @@
 ---
 id: 030
 title: Recording carries a corpus utterance manifest — categories, references, per-utterance true speech-end
-status: pending
+status: green
 source: v3-corpus
 depends_on: []
 touches: [src/server/storage/types.ts, src/server/storage/index.ts, src/server/routes/recordings.ts, src/client/state/ledger.ts, src/core/corpus.ts]
 iterations: 0
-test_files: []
+test_files: [src/core/corpus.test.ts, src/server/routes/recordings.test.ts]
 branch: ""
 ---
 
@@ -95,3 +95,36 @@ no runtime values, add the frozen `CORPUS_CATEGORIES` array in `src/core/corpus.
 - The route currently whitelists body fields in `parseUpload`; the manifest must be parsed and
   validated there, not passed through blind. Note this is the OPPOSITE of the runs route, which
   passes unknown keys through (see AGENTS.md) — recordings validate, runs do not.
+
+## Attempt log
+
+- Green in one pass. Suite 1118/63 (+33), both tsconfigs clean.
+- `CORPUS_CATEGORIES` was NOT duplicated: `src/harness/corpus.ts` already had the six-category list
+  for the synthetic placeholder corpus. The new `src/core/corpus.ts` is the canonical home (core is
+  compiled by both tsconfigs; harness is not), and the category strings match exactly, so
+  `derive.ts`'s `UtteranceCategory` alias keeps working untouched.
+- The route VALIDATES rather than passing unknown keys through — deliberately the opposite of the
+  runs route (AGENTS.md). A malformed manifest never fails loudly later; it silently mis-attributes
+  every category and WER figure derived from it, so it is a hard 400 with a named reason.
+- `createRecording` whitelists fields explicitly (unlike `appendRun`, which stringifies the whole
+  object), so persistence needed two explicit lines. Verified by mutation rather than assumed.
+- Mutation-checked, five properties, each killing its own tests:
+  | mutation | result |
+  |---|---|
+  | route skips manifest validation | 7 red — every malformed manifest is accepted |
+  | monotonicity check off | 3 red |
+  | index contiguity check off | 2 red |
+  | storage drops the manifest | 2 red |
+  | duration upper bound off | 2 red |
+
+### ORCHESTRATOR ERROR (mine, and a repeat)
+
+I ran the mutation checks BEFORE committing. `src/core/corpus.ts` was untracked, so
+`git checkout -- src/core/corpus.ts` could not revert its mutation and errored — while the same
+loop's `git checkout` DID revert `recordings.ts` and `storage/index.ts`, discarding my uncommitted
+implementation of both. Two mutation results were contaminated and had to be redone.
+
+This is the same error as ticket 016, one variant worse: an **untracked** file is not merely
+un-revertable, it makes the whole batch's results untrustworthy while looking like it worked.
+**Commit first, then mutate.** And before any mutation batch, confirm every file it will touch is
+tracked and clean — `git status --porcelain` showing no `??` among the targets.
