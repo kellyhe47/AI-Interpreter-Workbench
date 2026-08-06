@@ -1,12 +1,12 @@
 ---
 id: 007
 title: Replay pacer — 1× playback in 20 ms framing
-status: pending
+status: in-progress
 depends_on: []
 touches: [src/client/replay/pacer.ts, src/client/replay/pacer.test.ts]
 iterations: 0
-test_files: []
-branch: ""
+test_files: [src/client/replay/pacer.test.ts]
+branch: "tdd/007"
 ---
 
 ## Scope

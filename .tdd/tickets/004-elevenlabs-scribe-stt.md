@@ -1,12 +1,12 @@
 ---
 id: 004
 title: ElevenLabs Scribe v2 Realtime STT adapter
-status: pending
+status: in-progress
 depends_on: []
 touches: [src/server/providers/elevenlabs-stt.ts, src/server/providers/elevenlabs-stt.test.ts]
 iterations: 0
 test_files: []
-branch: ""
+branch: "tdd/004"
 ---
 
 ## Scope

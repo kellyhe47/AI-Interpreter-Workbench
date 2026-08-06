@@ -1,12 +1,12 @@
 ---
 id: 002
 title: Wire protocol run identity + filesystem storage layer
-status: pending
+status: green
 depends_on: []
 touches: [src/core/protocol.ts, src/core/protocol.test.ts, src/server/storage/]
 iterations: 0
-test_files: []
-branch: ""
+test_files: [src/core/protocol.test.ts, src/server/storage/recordings.test.ts, src/server/storage/runs.test.ts, src/server/storage/test-support.ts]
+branch: "tdd/002"
 ---
 
 ## Scope
@@ -101,3 +101,5 @@ New `src/server/storage/*.test.ts` (node env — `src/server/**` is not jsdom). 
 `src/core/protocol.test.ts` for the new fields.
 
 ## Attempt log
+
+- iter 1: green. 32 ticket tests; protocol half was compile-red (types erase before vitest), gated on tsc.

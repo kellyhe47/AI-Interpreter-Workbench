@@ -1,12 +1,12 @@
 ---
 id: 005
 title: Claude Haiku MT adapter + parameterize ElevenLabs TTS model_id
-status: pending
+status: green
 depends_on: []
 touches: [src/server/providers/anthropic-mt.ts, src/server/providers/anthropic-mt.test.ts, src/server/providers/elevenlabs-tts.ts, src/server/providers/elevenlabs-tts.test.ts]
 iterations: 0
-test_files: []
-branch: ""
+test_files: [src/server/providers/anthropic-mt.test.ts, src/server/providers/elevenlabs-tts.test.ts]
+branch: "tdd/005"
 ---
 
 ## Scope
@@ -85,3 +85,5 @@ New `src/server/providers/anthropic-mt.test.ts` modelled on `openai-mt.test.ts`,
 `test-support.ts`. **No network.** Extend `elevenlabs-tts.test.ts` with the model-id cases.
 
 ## Attempt log
+
+- iter 1: green. 31 tests (14 new + 17 guards); EL default-model guard passed throughout.
