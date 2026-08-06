@@ -23,7 +23,7 @@ below was read out of the running app, not inferred.
 | A | Cold landing → all four tabs | pass |
 | B | Live config, derived arm tag A→B→C→ad-hoc, language + Cantonese | pass |
 | C | Full Live session (fixture), tab-switch mid-session, stop | pass, but exposed **F1** |
-| D | Live stage failure via `?fixture=fail-mt` | **halted — F5**, fault never injected |
+| D | Live stage failure via `?fixture=fail-mt` | pass — **F5 was a sampling error, withdrawn** |
 | E | Mic denied | pass |
 | F | Replay config panel without data | pass, but exposed **F3, F4, F7** |
 | G | Replay with seeded data → runs list → blind compare | pass, but exposed **F6** |
@@ -133,23 +133,32 @@ half of the app is dead in the documented dev/QA path. I had to start the API se
 `PORT=8787` to continue this pass. A developer running `npm run dev` from a shell with no `PORT` set is
 unaffected — which is what makes this easy to miss.
 
-### F5 — `?fixture=fail-mt` injects no fault · **MODERATE**
+### F5 — WITHDRAWN — `?fixture=fail-mt` works; this was a sampling error
 
-*Flow D, halted.* **Repro:** open `/?fixture=fail-mt` → select Cascade → Start microphone → observe.
+**This finding was wrong and is retracted.** The original claim was that no fault is injected.
 
-**Expected:** AGENTS.md documents `?fixture=fail-mt` as fault injection, and PRD §12 makes the
-architecture-differentiated failure copy a finding: *"mt stage timed out for this utterance — session still
-running"* versus Realtime's opaque string.
+Cause of the false positive: the fault fires on `utt === 1` (displayed *"utterance 2"*) and the
+failed state is **transient** — the next utterance replaces the card ~4 s later. This pass first
+sampled at utterance 4 and again at utterance 17, both after it had gone. The report itself quoted
+v1's note that the *"session recovers and streams the next utterance normally"*, which should have
+prompted polling rather than spot-checks.
 
-**Observed:** `location.search === "?fixture=fail-mt"` is active, the session ran to **utterance 17**, and no
-stage failure ever surfaced — `/stage timed out/i` and `/opaque failure/i` are absent from the document
-throughout; the target card stayed `ready`.
+Re-verified by polling the DOM every 150 ms from session start:
 
-The failure copy itself is implemented (Replay's failed-run card renders *"tts stage timed out — run saved as
-failed, excluded from every aggregate"* correctly). What is broken is the documented manual path for
-exercising it in Live.
+```
+utterance: "utterance 2"
+status:    failed
+copy:      "mt stage timed out for this utterance — session still running"
+session survived: true
+```
 
-Evidence: `.qa/screens/F5-fail-mt-inert.txt`
+That is the exact PRD §12 cascade string, naming the failing stage, with the session continuing.
+Ticket 022 is closed as not-a-defect; no code was changed.
+
+**Method note:** transient per-utterance states must be observed by polling, not by spot-checking a
+long-running session.
+
+Evidence: `.qa/screens/F5-CORRECTION-fail-mt-works.txt`
 
 ### F6 — Blind scores persist only to browser localStorage · **MODERATE**
 

@@ -1,7 +1,7 @@
 ---
 id: 022
 title: "?fixture=fail-mt injects no fault — the documented failure path is unreachable"
-status: pending
+status: closed-not-a-defect
 source: qa
 depends_on: []
 touches: [src/client/fixtureDeps.ts]
@@ -45,3 +45,31 @@ the architecture-differentiated copy.
 Restore fault injection in the fixture deps so `fail-mt` fails a specific utterance, and keep the
 session alive afterwards (the PRD's point is that the session survives). Worth an assertion that the
 fault actually fires, so this cannot go inert again unnoticed.
+
+---
+
+## CLOSED — not a defect (orchestrator, before dispatch)
+
+**The finding was wrong. `?fixture=fail-mt` works exactly as specified.**
+
+Cause of the false positive: `src/client/fixtureDeps.ts:348` fires the fault on
+`utt === 1` (displayed *"utterance 2"*), and the failed state is **transient** — the next
+utterance replaces the card about 4 s later. The QA pass first sampled at utterance 4 and
+again at utterance 17, both after it had gone. The report even quoted v1's note that the
+"session recovers and streams the next utterance normally", which should have prompted
+polling rather than spot-checks.
+
+Re-verified by polling the DOM every 150 ms from session start:
+
+```
+utterance: "utterance 2"
+status:    failed
+copy:      "mt stage timed out for this utterance — session still running"
+session survived (Stop session still present): true
+```
+
+That is the exact PRD §12 cascade string, naming the failing stage, with the session
+continuing. **No code change made.** Evidence: `.qa/screens/F5-CORRECTION-fail-mt-works.txt`
+
+Method note for future QA: transient per-utterance states must be observed by polling,
+not by spot-checking a long-running session.
