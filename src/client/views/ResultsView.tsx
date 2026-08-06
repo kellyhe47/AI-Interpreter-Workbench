@@ -882,8 +882,12 @@ type TabKey = 'experiments' | 'secondary';
  * host supplied no `hydrate` seam at all, and then NOTHING about this view
  * changes: no effect runs, no attribute is rendered, and a pre-019 caller is
  * byte-identical to before.
+ *
+ * Exported (ticket 029) because the shared predicate below now takes it: the
+ * App shell has to name the same three states this view does to ask the same
+ * question.
  */
-type HydrationStatus = 'loading' | 'ready' | 'failed';
+export type ResultsHydrationStatus = 'loading' | 'ready' | 'failed';
 
 /**
  * A group whose every excluded run is fixture-sourced carries no evidence at
@@ -908,8 +912,24 @@ function isFixtureOnly(row: RecordingGroupRow): boolean {
  *
  * Emptiness is decided on real content, never on record count: a ledger holding
  * nothing but fixture runs has recorded nothing.
+ *
+ * TICKET 029 — and it is decided on the LOAD as well as the ledger. The ledger
+ * persists to localStorage, so a reload against an unreachable run store leaves
+ * it populated from the previous session while this load rejects: content-only
+ * said "there is evidence" while the panel below rendered "this screen has
+ * nothing to show". A failed load has strictly LESS to attribute than an empty
+ * one — it does not even know what it has — and an in-flight one has not
+ * arrived yet, so both answer "nothing to show" whatever the cache holds.
+ *
+ * `hydration` is OMITTED (or `null`) by a caller with no hydration seam, and
+ * then the answer is the pre-019 one: the ledger alone, with no load to wait on
+ * and none that can fail.
  */
-export function resultsAreEmpty(ledger: RunLedger): boolean {
+export function resultsAreEmpty(
+  ledger: RunLedger,
+  hydration?: ResultsHydrationStatus | null,
+): boolean {
+  if (hydration === 'loading' || hydration === 'failed') return true;
   return deriveLiveModel(ledger).empty && groupByRecording(ledger).every(isFixtureOnly);
 }
 
@@ -938,7 +958,7 @@ export default function ResultsView(props: ResultsViewProps): ReactElement {
   // `null` for a host with no seam — see HydrationStatus. Starts 'loading' so
   // the very first paint of a hydrating view already says so, rather than
   // flashing 'No runs recorded' for one frame before the effect runs.
-  const [hydration, setHydration] = useState<HydrationStatus | null>(
+  const [hydration, setHydration] = useState<ResultsHydrationStatus | null>(
     hydrate === undefined ? null : 'loading',
   );
 
@@ -967,10 +987,10 @@ export default function ResultsView(props: ResultsViewProps): ReactElement {
   const categoryRows = groupByCategory(props.ledger);
   const live = deriveLiveModel(props.ledger);
 
-  // Emptiness is decided on real content, never on record count — and by the
-  // shared predicate, so the TopBar's provenance stamp cannot disagree with
-  // what this panel renders (ticket 025).
-  const empty = resultsAreEmpty(props.ledger);
+  // Emptiness is decided on real content and on the load, never on record
+  // count — and by the shared predicate, so the TopBar's provenance stamp
+  // cannot disagree with what this panel renders (tickets 025, 029).
+  const empty = resultsAreEmpty(props.ledger, hydration);
 
   const exp1 = empty ? null : deriveComparison(props.ledger, 'A', 'B');
   const exp2 = empty ? null : deriveComparison(props.ledger, 'B', 'C');

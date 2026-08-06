@@ -24,9 +24,13 @@
  *   provenance over 'No runs recorded'. PRD §8: "A number without provenance is
  *   a claim; a number with it is citable" — with no numbers there is nothing to
  *   make citable, and a corpus version stamped over an empty screen is a claim
- *   about a corpus that produced none of what is on it. The emptiness question
- *   is answered by ResultsView's own exported `resultsAreEmpty`, never by a
- *   second copy of the rule here, so the stamp cannot disagree with the panel.
+ *   about a corpus that produced none of what is on it. Ticket 029 extends the
+ *   same rule to the LOAD: a hydration that FAILED leaves the localStorage-
+ *   cached ledger populated, and a stamp over "the run store did not answer, so
+ *   this screen has nothing to show" is the same category error again. Both
+ *   halves of the question are answered by ResultsView's own exported
+ *   `resultsAreEmpty` — the shell passes it the load status and adds no
+ *   condition of its own — so the stamp cannot disagree with the panel.
  * - ONE DEPS BAG. The ledger a Live session appends to IS the ledger Results
  *   reads — same instance, no reload, no second copy.
  * - `deps` is optional ONLY for production main.tsx convenience: when
@@ -67,7 +71,10 @@ import type { LedgerHydrationSource } from './state/hydrateLedger';
 import type { BlindComparison } from './state/ledger';
 import type { SessionStatus } from './state/sessionMachine';
 import HelpView from './views/HelpView';
-import ResultsView, { resultsAreEmpty } from './views/ResultsView';
+import ResultsView, {
+  resultsAreEmpty,
+  type ResultsHydrationStatus,
+} from './views/ResultsView';
 import LiveView from './views/LiveView';
 import ReplayView, { type ReplayDeps } from './views/ReplayView';
 import { useSessionController, type SessionDeps } from './views/useSessionController';
@@ -144,12 +151,19 @@ export default function App(props: AppProps): ReactElement {
    * the shell that hydration has landed records: ResultsView's own
    * `setHydration` re-renders ResultsView alone. `bumpContent` is that missing
    * signal — a re-render request carrying no value, because the ledger itself
-   * IS the state — and `hydrating` is the shell's copy of "the panel is still
-   * asking". Both are driven by the wrapper below, the only place App can
-   * observe the hydration it merely forwards.
+   * IS the state — and `hydration` is the shell's copy of where that load got
+   * to. Both are driven by the wrapper below, the only place App can observe
+   * the hydration it merely forwards.
+   *
+   * TICKET 029 — the shell tracks the full STATUS, not just "still asking". A
+   * rejected load and a successful one both stop asking, so a boolean could not
+   * tell them apart, and the stamp rode a localStorage-cached ledger straight
+   * through a failure. `null` is a host with no seam, exactly as in ResultsView.
    */
   const [, bumpContent] = useReducer((version: number) => version + 1, 0);
-  const [hydrating, setHydrating] = useState(deps.hydrate !== undefined);
+  const [hydration, setHydration] = useState<ResultsHydrationStatus | null>(
+    deps.hydrate === undefined ? null : 'loading',
+  );
 
   /**
    * `deps.hydrate` with completion observed, and NOTHING else changed — the
@@ -170,17 +184,30 @@ export default function App(props: AppProps): ReactElement {
     if (source === undefined) return undefined;
 
     let outstanding = 0;
+    let rejected = false;
     const observe = <T,>(list: () => Promise<T>): (() => Promise<T>) => {
       return async () => {
-        if (outstanding === 0) setHydrating(true);
+        if (outstanding === 0) {
+          // A fresh attempt — reopening the tab re-runs hydration in place, and
+          // it is not a failed load until it fails again.
+          rejected = false;
+          setHydration('loading');
+        }
         outstanding += 1;
         try {
           return await list();
+        } catch (error) {
+          // RECORDED, then rethrown unchanged: `hydrateLedger` still rejects and
+          // ResultsView still renders its own failure state from that. This
+          // observer only copies the verdict out to the shell.
+          rejected = true;
+          throw error;
         } finally {
           outstanding -= 1;
           if (outstanding === 0) {
+            const settled: ResultsHydrationStatus = rejected ? 'failed' : 'ready';
             setTimeout(() => {
-              setHydrating(false);
+              setHydration(settled);
               bumpContent();
             }, 0);
           }
@@ -195,9 +222,11 @@ export default function App(props: AppProps): ReactElement {
   }, [deps]);
 
   /**
-   * Whether Results currently has anything to attribute. `hydrating` counts as
-   * "no": a panel still rendering its loading note is showing no figures, so a
-   * corpus-version claim over it would describe data that has not arrived.
+   * Whether Results currently has anything to attribute — asked as ONE
+   * question, of the one predicate. The load status is an argument rather than
+   * a second condition ANDed on here (ticket 029): a shell-side condition is a
+   * second copy of the rule, and the two copies would drift into a screen
+   * claiming provenance the panel below it is refusing to show.
    *
    * Recomputed EVERY render rather than memoized: the input is a mutable ledger
    * with no identity change to key a cache on, so any dependency list would be
@@ -205,7 +234,7 @@ export default function App(props: AppProps): ReactElement {
    * stale the first time one of them didn't. It is the same pair of reads
    * ResultsView already performs on the same render.
    */
-  const resultsShowContent = !hydrating && !resultsAreEmpty(deps.ledger);
+  const resultsShowContent = !resultsAreEmpty(deps.ledger, hydration);
 
   /**
    * TICKET 023 — the default blind-comparison sink: the ledger FIRST, then the
