@@ -46,11 +46,38 @@ export interface LedgerHydrationSource {
 /**
  * Loads the server's Recordings and Runs into `ledger`.
  *
- * STUB (ticket 019, red): does nothing.
+ * BOTH listings are awaited BEFORE anything is appended. That is what makes a
+ * failure honest: a rejected `runs.list()` must not leave the ledger holding
+ * Recordings it will then describe as having no Runs, which reads exactly like
+ * a real empty sweep. Either the whole server view lands or none of it does,
+ * and the caller sees the `ApiError`.
+ *
+ * Nothing is filtered and nothing is re-gated here: the aggregation gate lives
+ * in the ledger (`isAggregatableRun`), so hydration loads the store verbatim
+ * and every excluded Run stays listable — loading more data must never load
+ * more data PAST the gate.
  */
 export async function hydrateLedger(
-  _ledger: RunLedger,
-  _source: LedgerHydrationSource,
+  ledger: RunLedger,
+  source: LedgerHydrationSource,
 ): Promise<void> {
-  return Promise.resolve();
+  const [recordings, runs] = await Promise.all([source.recordings.list(), source.runs.list()]);
+
+  // Idempotent on entity id. The ledger is append-only and may already hold a
+  // locally-appended Run (a Replay run this tab just executed) or the same
+  // server entity from an earlier hydration; neither may be duplicated, and
+  // neither may be dropped.
+  const knownRecordings = new Set(ledger.getRecordings().map((r) => r.id));
+  for (const recording of recordings) {
+    if (knownRecordings.has(recording.id)) continue;
+    knownRecordings.add(recording.id);
+    ledger.appendRecording(recording);
+  }
+
+  const knownRuns = new Set(ledger.getRuns().map((r) => r.id));
+  for (const run of runs) {
+    if (knownRuns.has(run.id)) continue;
+    knownRuns.add(run.id);
+    ledger.appendRun(run);
+  }
 }

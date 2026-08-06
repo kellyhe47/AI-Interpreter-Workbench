@@ -352,11 +352,21 @@ export function isRealRun(run: Run): boolean {
  * A LiveSession carries no `recordingId` and no `corpusId`, so the rule is
  * the two clauses the shape supports: false iff any of
  * providerTriple.stt/mt/tts === 'fixture', OR any modelSnapshots value ===
- * 'fixture'.
+ * 'fixture'. On every recipe the two shapes DO share, this returns exactly
+ * what `isRealRun` returns — the clauses below are that function's, minus the
+ * one field a LiveSession does not have.
  *
- * STUB (ticket 018, red): returns true for everything — today's behaviour.
+ * The session is still STORED. Fixture data is dev data, not garbage: the
+ * ledger is append-only, so `appendLiveSession` keeps it, `getLiveSessions`
+ * lists it and `exportRuns` carries it. It is kept out of the DERIVATIONS, in
+ * exactly the way a fixture Run is kept out of `runAggregates()`.
  */
-export function isRealLiveSession(_session: LiveSession): boolean {
+export function isRealLiveSession(session: LiveSession): boolean {
+  const triple = session.providerTriple;
+  if (triple && (triple.stt === 'fixture' || triple.mt === 'fixture' || triple.tts === 'fixture')) {
+    return false;
+  }
+  if (Object.values(session.modelSnapshots ?? {}).includes('fixture')) return false;
   return true;
 }
 

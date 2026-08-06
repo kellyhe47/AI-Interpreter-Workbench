@@ -161,7 +161,11 @@ export default function App(props: AppProps): ReactElement {
         );
       break;
     case 'results':
-      body = <ResultsView ledger={deps.ledger} />;
+      // `deps.hydrate` is forwarded VERBATIM and is never synthesised from
+      // `deps.replay`: wiring Replay is not a request for Results to go to the
+      // network, and a host that wired only Replay must still see the client
+      // ledger alone.
+      body = <ResultsView ledger={deps.ledger} hydrate={deps.hydrate} />;
       break;
     case 'help':
       body = <HelpView />;

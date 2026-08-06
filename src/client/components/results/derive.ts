@@ -80,6 +80,8 @@ import {
 import type { CorpusCategory } from '../../../harness/corpus';
 import {
   isAggregatableRun,
+  isRealLiveSession,
+  isRealRecord,
   isRealRun,
   runArmTag,
   type LiveSession,
@@ -623,12 +625,53 @@ function deriveWerCell(ledger: RunLedger, armA: ArmTag, armB: ArmTag): string {
   return `${sign(delta)}${(Math.abs(delta) * 100).toFixed(1)}%`;
 }
 
-/** The conversation-length screen. LiveSessions only — Runs never contribute. */
+/**
+ * TICKET 018 — is this LiveSession a MEASUREMENT?
+ *
+ * Two independent ways it is not, and both have to be asked:
+ *
+ * 1. ITS DECLARED RECIPE names a fixture stage — `isRealLiveSession`, the
+ *    Run-shaped rule's sibling, exported beside it in the ledger.
+ * 2. THE RECORDS IT ACTUALLY PRODUCED are fixture records. A LiveSession
+ *    stores the recipe the operator SELECTED (`config.providers` /
+ *    `config.realtimeModel`), which under `?fixture=1` still names the real
+ *    speech-to-speech model even though a scripted FixtureTransport served
+ *    every utterance. The session's own UtteranceRecords are the evidence
+ *    behind its figures — they are in the same ledger under `runId ===
+ *    session.id` and they carry `providers: fixture` — so a session whose
+ *    evidence is fabricated is not a measurement no matter what its recipe
+ *    field claims. This is what closes QA F1 through the real fixture path,
+ *    and it is the "one ledger" rule doing the work: the session is judged on
+ *    the records it wrote, not on a self-description.
+ *
+ * A session with NO records in the ledger (a hand-seeded soak summary) is
+ * judged on clause 1 alone — absence of evidence is not fixture evidence.
+ */
+function isMeasuredLiveSession(ledger: RunLedger, session: LiveSession): boolean {
+  if (!isRealLiveSession(session)) return false;
+  return !ledger.getRecords(session.id).some((record) => !isRealRecord(record));
+}
+
+/**
+ * The conversation-length screen. LiveSessions only — Runs never contribute.
+ *
+ * TICKET 018 — the REALNESS RULE APPLIES HERE TOO. `isRealLiveSession` is the
+ * gate the Run path always had and this one did not: a `?fixture=1` soak
+ * writes a complete, fat LiveSession whose latency is a configured constant,
+ * and rendering it produced a p50 that equalled its p95 under a provenance
+ * line claiming a measurement (PRD §8: no reported number may come from a
+ * fixture run). Excluded sessions are dropped BEFORE grouping, so a fixture
+ * session cannot even open a column — a ledger holding nothing but fixture
+ * sessions derives `{ columns: [], empty: true }`, the same explicit empty
+ * state an untouched ledger derives (PRD §17 15g). They remain stored; only
+ * the derivation refuses them.
+ */
 export function deriveLiveModel(ledger: RunLedger): LiveModel {
   const order: ArmTag[] = [];
   const groups = new Map<ArmTag, LiveSession[]>();
 
   for (const session of ledger.getLiveSessions()) {
+    if (!isMeasuredLiveSession(ledger, session)) continue;
     const arm = liveArmTag(session);
     let group = groups.get(arm);
     if (!group) {
