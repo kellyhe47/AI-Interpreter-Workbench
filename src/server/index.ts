@@ -87,6 +87,16 @@ export function createAppServer(deps: AppDeps = {}): http.Server {
 /** The process-wide app. Same wiring as `createApp()` with no overrides. */
 const app = createApp()
 
+/**
+ * STUB (Ticket 021) — resolve the port the API listens on from an environment.
+ * Pure so it is testable without spawning a process. NOT YET IMPLEMENTED, and
+ * the module-level listener below still reads the generic PORT: that is the
+ * bug this ticket exists to fix.
+ */
+export function resolveApiPort(_env: NodeJS.ProcessEnv = process.env): number {
+  throw new Error('resolveApiPort not implemented')
+}
+
 const port = Number(process.env.PORT ?? 8787)
 if (process.env.NODE_ENV !== 'test') {
   createAppServer().listen(port, () => console.log(`server listening on :${port}`))

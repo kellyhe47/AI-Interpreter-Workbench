@@ -31,7 +31,8 @@ import { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
-import { app, createApp, createAppServer } from './index';
+import { fileURLToPath } from 'node:url';
+import { app, createApp, createAppServer, resolveApiPort } from './index';
 import { createStorage } from './storage';
 import type { Recording, Storage } from './storage';
 import { CASCADE_WS_PATH } from './ws';
@@ -196,5 +197,123 @@ describe('production SPA catch-all (Ticket 003)', () => {
     expect(list.headers.get('content-type')).toContain('application/json');
     const recs = (await list.json()) as Recording[];
     expect(recs.map((r) => r.label)).toEqual(['not swallowed by the SPA']);
+  });
+});
+
+/**
+ * ==================== API PORT RESOLUTION (Ticket 021, normative) ==========
+ * QA F4: `preview_start`ing the repo's own `workbench` launch config exports
+ * PORT=5173 (the *Vite* port). `npm run dev` then starts the API with
+ * `Number(process.env.PORT ?? 8787)`, so the API binds 5173, never 8787 — and
+ * every proxied /api call is ECONNREFUSED.
+ *
+ * index.ts therefore grows a pure, env-in/number-out resolver that the
+ * module-level listener calls:
+ *
+ *   export function resolveApiPort(env?: NodeJS.ProcessEnv): number;
+ *
+ * PINNED PRECEDENCE: `API_PORT` when set, otherwise the 8787 default. A
+ * generic `PORT` is NEVER consulted — it belongs to the client dev server.
+ * The default must equal what vite.config.ts proxies to; the test below reads
+ * BOTH sources rather than hardcoding 8787 twice.
+ *
+ * The `createAppServer(deps?)` factory keeps its own separate concern: tests
+ * listen(0) on an ephemeral port and never touch the environment.
+ * ==========================================================================
+ */
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
+async function readRepoFile(rel: string): Promise<string> {
+  return fs.readFile(path.join(repoRoot, rel), 'utf8');
+}
+
+/**
+ * Pull the proxy target port for a route out of vite.config.ts source, so the
+ * agreement assertion reads the real config instead of restating a literal.
+ * Handles both shorthand (`'/api': 'http://…'`) and object (`{ target: … }`).
+ */
+function viteProxyTargetPort(source: string, route: string): number {
+  const escaped = route.replace(/\//g, '\\/');
+  const shorthand = new RegExp(`['"]${escaped}['"]\\s*:\\s*['"]([^'"]+)['"]`).exec(source);
+  const object = new RegExp(
+    `['"]${escaped}['"]\\s*:\\s*\\{[^}]*target\\s*:\\s*['"]([^'"]+)['"]`,
+    's',
+  ).exec(source);
+  const target = shorthand?.[1] ?? object?.[1];
+  if (!target) throw new Error(`no proxy target for ${route} found in vite.config.ts`);
+  const port = Number(new URL(target).port);
+  if (!Number.isInteger(port) || port === 0) {
+    throw new Error(`proxy target for ${route} has no explicit port: ${target}`);
+  }
+  return port;
+}
+
+describe('API port resolution (Ticket 021)', () => {
+  it('AC1/AC3: defaults to 8787 with an empty environment', () => {
+    expect(resolveApiPort({})).toBe(8787);
+  });
+
+  it('AC1: PORT=5173 (the Vite port) does NOT move the API off its own port', () => {
+    expect(resolveApiPort({ PORT: '5173' })).toBe(8787);
+  });
+
+  it('AC2: a deliberate API_PORT override still works', () => {
+    expect(resolveApiPort({ API_PORT: '9000' })).toBe(9000);
+  });
+
+  it('AC2: API_PORT wins and PORT is never consulted', () => {
+    expect(resolveApiPort({ API_PORT: '9000', PORT: '5173' })).toBe(9000);
+  });
+
+  it('AC3: the default agrees with every port vite.config.ts proxies to', async () => {
+    const viteConfig = await readRepoFile('vite.config.ts');
+    const defaultPort = resolveApiPort({});
+
+    expect(viteProxyTargetPort(viteConfig, '/api')).toBe(defaultPort);
+    expect(viteProxyTargetPort(viteConfig, '/ws')).toBe(defaultPort);
+  });
+
+  it('AC1: the module-level listener resolves its port via resolveApiPort, not process.env.PORT', async () => {
+    const source = await readRepoFile('src/server/index.ts');
+
+    // Two occurrences: the declaration (or its import) and the call site in
+    // the module-level listener block. One alone means it is dead code.
+    const uses = source.match(/\bresolveApiPort\b/g) ?? [];
+    expect(uses.length).toBeGreaterThanOrEqual(2);
+    expect(source).not.toMatch(/process\.env\.PORT\b/);
+    expect(source).not.toMatch(/env\.PORT\b/);
+  });
+});
+
+describe('dev/prod wiring unchanged (Ticket 021 regression guard)', () => {
+  it('AC4: `npm run dev` still starts BOTH the server and the client', async () => {
+    const pkg = JSON.parse(await readRepoFile('package.json')) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(pkg.scripts.dev).toContain('npm run dev:server');
+    expect(pkg.scripts.dev).toContain('npm run dev:client');
+    expect(pkg.scripts['dev:server']).toContain('src/server/index.ts');
+    expect(pkg.scripts['dev:client']).toContain('vite');
+  });
+
+  it('AC4: the production `start` script still runs the server entry in production mode', async () => {
+    const pkg = JSON.parse(await readRepoFile('package.json')) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(pkg.scripts.start).toContain('NODE_ENV=production');
+    expect(pkg.scripts.start).toContain('src/server/index.ts');
+  });
+
+  it('AC4: createAppServer() still serves on an ephemeral port, untouched by the environment', async () => {
+    const storage = await tempStorage();
+    const port = await listen(createAppServer({ storage }));
+
+    expect(port).not.toBe(8787);
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
   });
 });
