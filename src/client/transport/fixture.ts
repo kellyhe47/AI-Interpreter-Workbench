@@ -27,9 +27,19 @@
  * array so tests can assert fan-out.
  *
  * stop(): cancels all pending timers — NO events after stop().
+ *
+ * Ticket 008 — the fixture ALSO serves Replay (fed from a Recording), not just
+ * Live. `replayFixtureScript({ recording, kind })` derives a well-formed
+ * utterance timeline from a Recording's duration/speechEndMs — source partials
+ * -> final, target deltas -> final, canonical timing marks for the kind, and
+ * output audio — every event landing AFTER the clip's speech end, the way a
+ * real pipeline would answer. `providers` is fixture-named
+ * (FIXTURE_PROVIDERS), so anything it produces is excluded by the ledger's
+ * realness rule and can never become reported evidence.
  * ==========================================================================
  */
 
+import type { ProviderTriple } from '../../core/arms';
 import type {
   ConnectionState,
   InterpreterTransport,
@@ -38,6 +48,28 @@ import type {
   TransportKind,
   UtteranceCompletion,
 } from './types';
+
+/**
+ * The provider triple every fixture transport advertises. `'fixture'` is the
+ * exact token the ledger's realness rule (isRealRun / isRealRecord) rejects.
+ */
+export const FIXTURE_PROVIDERS: ProviderTriple = { stt: 'fixture', mt: 'fixture', tts: 'fixture' };
+
+/** The Recording fields the replay fixture needs. */
+export interface ReplayRecordingLike {
+  id: string;
+  durationMs: number;
+  /** Ground-truth speech end offset; the fixture answers only after it. */
+  speechEndMs: number;
+}
+
+export interface ReplayFixtureOptions {
+  recording: ReplayRecordingLike;
+  /** Which timing vocabulary to emit. Default 'cascade'. */
+  kind?: TransportKind;
+  sourceText?: string;
+  targetText?: string;
+}
 
 export type FixtureScriptEvent =
   | { at: number; type: 'sourceText'; kind: 'partial' | 'final'; text: string; utt: number }
@@ -55,6 +87,8 @@ export interface FixtureTransportOptions {
   costPerMinUsd?: number;
   script: FixtureScriptEvent[];
   failStart?: boolean;
+  /** Advertised triple; defaults to FIXTURE_PROVIDERS. */
+  providers?: ProviderTriple;
 }
 
 export class FixtureTransport implements InterpreterTransport {
@@ -62,6 +96,8 @@ export class FixtureTransport implements InterpreterTransport {
   readonly kind: TransportKind;
   readonly label: string;
   readonly costPerMinUsd: number;
+  /** Fixture-named by default — never real evidence. */
+  readonly providers: ProviderTriple;
   /** Chunks passed to sendAudio, in order (for fan-out assertions). */
   readonly received: Int16Array[] = [];
 
@@ -78,6 +114,7 @@ export class FixtureTransport implements InterpreterTransport {
     this.costPerMinUsd = opts.costPerMinUsd ?? 0;
     this.script = opts.script;
     this.failStart = opts.failStart ?? false;
+    this.providers = opts.providers ?? FIXTURE_PROVIDERS;
   }
 
   async start(_config: TransportConfig): Promise<void> {
@@ -137,4 +174,20 @@ export class FixtureTransport implements InterpreterTransport {
   setHandlers(handlers: TransportHandlers): void {
     this.handlers = handlers;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Ticket 008 — STUB. Replay: a script derived from a Recording.
+ * ------------------------------------------------------------------------ */
+
+/** The utterance timeline a Recording would produce. Every `at` >= speechEndMs. */
+export function replayFixtureScript(_opts: ReplayFixtureOptions): FixtureScriptEvent[] {
+  throw new Error('not implemented');
+}
+
+/** A FixtureTransport pre-loaded with `replayFixtureScript(opts)`. */
+export function createReplayFixtureTransport(
+  _opts: ReplayFixtureOptions & { armId?: string; providers?: ProviderTriple },
+): FixtureTransport {
+  throw new Error('not implemented');
 }
