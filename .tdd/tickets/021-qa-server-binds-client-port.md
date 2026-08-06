@@ -1,12 +1,12 @@
 ---
 id: 021
 title: API server binds the client's port under the repo's own preview config
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/server/index.ts, package.json, .claude/launch.json]
 iterations: 0
-test_files: []
+test_files: [src/server/index.test.ts]
 branch: ""
 ---
 
@@ -41,3 +41,14 @@ The API should not silently inherit a generic `PORT` intended for the client. Op
 server its own variable (`API_PORT ?? PORT ?? 8787`), pin it in the `dev:server` script, or have
 `.claude/launch.json` not export a `PORT` the server will pick up. Whichever is chosen, `npm run dev`
 under the preview harness must leave the API reachable.
+
+- iter 1: green. 16 tests (6 new + 10 guards).
+- Fix: `API_PORT`-or-8787, generic `PORT` never consulted at any tier. Pinning the port in
+  `dev:server` was rejected — it would fix only `npm run dev` and leave `npm start` exposed to any
+  shell exporting `PORT`.
+- **Accepted tradeoff:** a PaaS that injects `PORT` and expects the app to bind it (Heroku, Railway,
+  Render, Fly) now needs `API_PORT` set explicitly. PRD §14 pins EC2 + Caddy, which reverse-proxies
+  to a fixed port, so this is the right default here — documented in the file header.
+- Mutation-checked: reintroducing `Number(process.env.PORT ?? 8787)` fails 3 tests.
+- LIVE PROBE (orchestrator): with `PORT=5173` exported — the exact repro environment — the server
+  logs `server listening on :8787`, `/api/health` answers there, and 5173 is not serving the API.
