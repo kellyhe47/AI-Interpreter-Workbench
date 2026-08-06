@@ -47,6 +47,8 @@ export interface ElevenLabsTtsConfig {
   apiKey?: string;
   /** Voice id used in the stream-input URL. Default ELEVENLABS_DEFAULT_VOICE_ID. */
   voiceId?: string;
+  /** model_id used in the stream-input URL. Default 'eleven_flash_v2_5'. */
+  modelId?: string;
   /** voice_settings.stability. Default 0.5. */
   stability?: number;
   /** voice_settings.similarity_boost. Default 0.75. */
