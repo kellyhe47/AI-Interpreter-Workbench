@@ -60,6 +60,36 @@ export interface Run {
 }
 
 /**
+ * STUB (ticket 023 — test-writer). One sample's two scores (PRD §10).
+ * Mirrors src/client/state/ledger.ts's BlindComparison field-for-field, for
+ * the same reason the Recording/Run shapes are mirrored: tsconfig.json excludes
+ * src/server from the client program, so neither side may import the other.
+ */
+export interface BlindSampleScores {
+  adequacy: number;
+  fluency: number;
+}
+
+/**
+ * STUB (ticket 023 — test-writer). A submitted pairwise blind comparison.
+ * Server-side twin of the client type.
+ */
+export interface BlindComparison {
+  id: string;
+  /** Both runs are Runs of THIS Recording. */
+  recordingId: string;
+  /** The two Runs compared, as picked. */
+  runIds: [string, string];
+  /** The drawn assignment: order[0] was Sample A, order[1] was Sample B. */
+  order: [string, string];
+  /** The language the evaluator judged in (PRD §10). */
+  evaluatorLanguage: string;
+  scores: { A: BlindSampleScores; B: BlindSampleScores };
+  createdAt: number;
+  revealedAt: number;
+}
+
+/**
  * Every storage failure the route layer has to map surfaces as one of these,
  * distinguished by `code` — never as a raw ENOENT (PRD §12).
  */

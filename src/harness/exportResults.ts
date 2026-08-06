@@ -98,10 +98,35 @@ export interface ExperimentSummary {
   configurations: ConfigurationSummary[];
 }
 
+/**
+ * STUB (ticket 023 — test-writer). PRD §10's disclosure requirement: the
+ * number of comparisons scored is stated alongside N, "so a small sample is
+ * disclosed rather than implied to be complete".
+ *
+ * It is a TOP-LEVEL field and deliberately NOT part of `totals`: `totals` is
+ * pinned exactly (`toEqual`) by the locked empty-bundle test, and comparisons
+ * are not runs.
+ */
+export interface BlindComparisonSummary {
+  /** Every comparison in the bundle, including unattributable ones. */
+  total: number;
+  /**
+   * Comparisons whose BOTH runIds are in the exported record set — the number
+   * disclosed alongside N.
+   */
+  scored: number;
+  /** `total - scored`. Stored, exported, never counted toward a Recording. */
+  unattributable: number;
+  /** Scored comparisons per recordingId. Unattributable ones appear nowhere. */
+  byRecording: Record<string, number>;
+}
+
 export interface ExportSummary {
   /** Bundle date, YYYY-MM-DD. */
   exportedAt: string;
   intendedReps: number;
+  /** STUB (ticket 023 — test-writer). */
+  blindComparisons: BlindComparisonSummary;
   totals: {
     /** ALL exported run records, including every excluded one. */
     runs: number;
@@ -277,6 +302,9 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
   const summary: ExportSummary = {
     exportedAt: date,
     intendedReps,
+    // STUB (ticket 023 — test-writer). NO IMPLEMENTATION: the store is never
+    // asked for its comparisons and nothing is counted.
+    blindComparisons: { total: 0, scored: 0, unattributable: 0, byRecording: {} },
     totals: { runs: runs.length, aggregated, excluded: runs.length - aggregated },
     experiments,
     empty,

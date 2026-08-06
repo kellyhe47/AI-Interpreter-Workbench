@@ -50,9 +50,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { StorageError } from './types';
-import type { NewRecording, Recording, Run } from './types';
+import type { BlindComparison, NewRecording, Recording, Run } from './types';
 
 export type {
+  BlindComparison,
+  BlindSampleScores,
   NewRecording,
   Recording,
   RecordingOrigin,
@@ -72,6 +74,11 @@ export interface ListRunsOptions {
   recordingId?: string;
 }
 
+/** STUB (ticket 023 — test-writer). */
+export interface ListBlindComparisonsOptions {
+  recordingId?: string;
+}
+
 export interface Storage {
   createRecording(meta: NewRecording, wavBytes: Uint8Array): Promise<Recording>;
   getRecording(id: string): Promise<Recording | undefined>;
@@ -85,6 +92,14 @@ export interface Storage {
   readRunAudio(runId: string): Promise<Uint8Array>;
   listRuns(opts?: ListRunsOptions): Promise<Run[]>;
   readLedger(): Promise<Run[]>;
+
+  /**
+   * STUB (ticket 023 — test-writer). Append a blind comparison to its OWN
+   * append-only file, `comparisons.jsonl`.
+   */
+  appendBlindComparison(comparison: BlindComparison): Promise<BlindComparison>;
+  /** STUB (ticket 023 — test-writer). `?recordingId=` filters. */
+  listBlindComparisons(opts?: ListBlindComparisonsOptions): Promise<BlindComparison[]>;
 }
 
 /**
@@ -276,6 +291,20 @@ export function createStorage(baseDir: string): Storage {
         runs.push(run);
       }
       return runs;
+    },
+
+    // STUB (ticket 023 — test-writer). NO IMPLEMENTATION.
+    appendBlindComparison(_comparison: BlindComparison): Promise<BlindComparison> {
+      return Promise.reject(
+        new Error('appendBlindComparison: not implemented (ticket 023)'),
+      );
+    },
+
+    // STUB (ticket 023 — test-writer). NO IMPLEMENTATION.
+    listBlindComparisons(_opts: ListBlindComparisonsOptions = {}): Promise<BlindComparison[]> {
+      return Promise.reject(
+        new Error('listBlindComparisons: not implemented (ticket 023)'),
+      );
     },
 
     async readLedger(): Promise<Run[]> {

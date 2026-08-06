@@ -21,7 +21,7 @@
  * ==========================================================================
  */
 
-import type { Recording, Run } from '../state/ledger';
+import type { BlindComparison, Recording, Run } from '../state/ledger';
 
 /** The closed server envelope vocabulary, plus a catch-all for anything else. */
 export type ApiErrorCode =
@@ -79,6 +79,17 @@ export interface RunsClient {
   list(recordingId?: string): Promise<Run[]>;
   /** The run's output WAV bytes. Rejects ApiError('run-audio-missing'). */
   getAudio(id: string): Promise<Uint8Array>;
+}
+
+/**
+ * STUB (ticket 023 — test-writer). The REST seam a submitted blind comparison
+ * travels over. PRD §7: the server owns the store; the client reads and writes
+ * it over REST. Scores that live only in localStorage are absent from the
+ * exported bundle and unreachable from a second machine (QA F6).
+ */
+export interface BlindComparisonsClient {
+  create(comparison: BlindComparison): Promise<BlindComparison>;
+  list(recordingId?: string): Promise<BlindComparison[]>;
 }
 
 const KNOWN_CODES: readonly ApiErrorCode[] = [
@@ -208,6 +219,14 @@ export function createRecordingsClient(deps: ApiClientDeps): RecordingsClient {
         method: 'DELETE',
         fallback: 'corpus-undeletable',
       }),
+  };
+}
+
+/** STUB (ticket 023 — test-writer). NO IMPLEMENTATION. */
+export function createBlindComparisonsClient(_deps: ApiClientDeps): BlindComparisonsClient {
+  return {
+    create: () => Promise.reject(new Error('createBlindComparisonsClient: not implemented')),
+    list: () => Promise.reject(new Error('createBlindComparisonsClient: not implemented')),
   };
 }
 
