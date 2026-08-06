@@ -38,7 +38,8 @@ import type { Server as HttpServer } from 'node:http';
 import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 import { encodeTtsFrame } from '../core/protocol';
-import type { ClientToServerMessage } from '../core/protocol';
+import type { ClientToServerMessage, RunOrigin } from '../core/protocol';
+import type { UtteranceRecord } from '../core/timing';
 import { createMt, createStt, createTts } from '../core/registry';
 import { pushChannel, runCascade } from './cascade/orchestrator';
 import type {
@@ -89,6 +90,16 @@ interface SocketSession {
   audio: PushChannel<Int16Array>;
   ac: AbortController;
 }
+
+/**
+ * The record as it goes out on the wire, widened with the run `origin`.
+ *
+ * `origin` describes the RUN, not the utterance, so it is stamped here from
+ * session.start rather than added to UtteranceRecord in core/timing — the
+ * cascade pipeline has no notion of why a session was opened, and threading one
+ * through it would put a benchmark concern inside the translation path.
+ */
+type EmittedRecord = UtteranceRecord & { origin?: RunOrigin };
 
 function sendJson(ws: WebSocket, msg: unknown): void {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -159,11 +170,22 @@ export function attachCascadeWs(
         const current: SocketSession = { audio, ac };
         session = current;
 
+        // Run identity (ticket 003) is OPTIONAL and rides on session.start:
+        // Live sends none of it, a replay/sweep leg stamps all three. A
+        // Recording IS the corpus clip (PRD §7), so `recordingId` is the
+        // record's `corpusId` — one identity field, not two.
+        const { recordingId, runId, origin } = msg;
+
         void (async () => {
           try {
             const events = createOrchestrator(audio.iterable, providers, {
               signal: ac.signal,
-              session: { languagePair: msg.languagePair, direction: msg.direction },
+              session: {
+                languagePair: msg.languagePair,
+                direction: msg.direction,
+                corpusId: recordingId,
+                runId,
+              },
             });
             for await (const ev of events) {
               if (ws.readyState !== ws.OPEN) break;
@@ -171,6 +193,9 @@ export function attachCascadeWs(
                 ws.send(encodeTtsFrame(ev.utt, ev.pcm));
               } else if (ev.type === 'error') {
                 sendJson(ws, { type: 'error', stage: ev.stage, message: ev.message });
+              } else if (ev.type === 'utterance.complete' && origin !== undefined) {
+                const record: EmittedRecord = { ...ev.record, origin };
+                sendJson(ws, { ...ev, record });
               } else {
                 sendJson(ws, ev);
               }

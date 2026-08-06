@@ -10,9 +10,9 @@ import { app } from './index';
 import { attachCascadeWs, bufferToPcm, CASCADE_WS_PATH } from './ws';
 import type { AttachCascadeWsOptions, OrchestratorFactory } from './ws';
 import { decodeTtsFrame } from '../core/protocol';
-import type { ServerToClientMessage } from '../core/protocol';
+import type { RunOrigin, ServerToClientMessage } from '../core/protocol';
 import { deriveCascadeIntervals } from '../core/timing';
-import type { CascadeTimestamps } from '../core/timing';
+import type { CascadeTimestamps, UtteranceRecord } from '../core/timing';
 
 type Received =
   | { kind: 'json'; msg: ServerToClientMessage }
@@ -76,14 +76,47 @@ function jsonOf(received: Received[]): ServerToClientMessage[] {
   return received.filter((r): r is Extract<Received, { kind: 'json' }> => r.kind === 'json').map((r) => r.msg);
 }
 
-function sessionStart(providers = { stt: 'fixture', mt: 'fixture', tts: 'fixture' }): string {
+/**
+ * Run identity (ticket 003) rides on session.start and is OPTIONAL: Live sends
+ * none of the three fields, a replay/sweep leg stamps them on the same frame.
+ */
+interface RunIdentity {
+  recordingId?: string;
+  runId?: string;
+  origin?: RunOrigin;
+}
+
+function sessionStart(
+  providers = { stt: 'fixture', mt: 'fixture', tts: 'fixture' },
+  identity: RunIdentity = {},
+): string {
   return JSON.stringify({
     type: 'session.start',
     mode: 'cascade',
     languagePair: 'en-es',
     direction: 'en->es',
     providers,
+    ...identity,
   });
+}
+
+/** The emitted record, widened with the run `origin` the WS layer stamps on it. */
+type EmittedRecord = UtteranceRecord & { origin?: RunOrigin };
+
+async function completeOneUtterance(identity: RunIdentity = {}): Promise<EmittedRecord> {
+  const { port } = await startServer();
+  const { ws, received } = await connect(port);
+  ws.send(sessionStart(undefined, identity));
+  ws.send(pcmChunk());
+  const complete = await waitFor(
+    () =>
+      jsonOf(received).find(
+        (m): m is Extract<ServerToClientMessage, { type: 'utterance.complete' }> =>
+          m.type === 'utterance.complete',
+      ),
+    'utterance.complete',
+  );
+  return complete.record as EmittedRecord;
 }
 
 function pcmChunk(samples = 2400): Buffer {
@@ -244,5 +277,41 @@ describe('cascade WS endpoint', () => {
     ws.terminate();
     await waitFor(() => abortedAt !== undefined, 'abort');
     expect(abortedAt! - closeSentAt).toBeLessThanOrEqual(100);
+  });
+});
+
+/**
+ * Ticket 003, AC13. The cascade path itself is unchanged — the only new
+ * behaviour is that run identity carried on session.start reaches the record
+ * the server emits. `recordingId` lands on the record's `corpusId` (a corpus
+ * clip IS a Recording — PRD §7), `runId` on `runId`, and `origin` on `origin`.
+ */
+describe('run identity on session.start (Ticket 003)', () => {
+  it('AC13: recordingId / runId / origin appear on the emitted record', async () => {
+    const record = await completeOneUtterance({
+      recordingId: 'rec_abc_12345678',
+      runId: 'run_xyz_87654321',
+      origin: 'sweep',
+    });
+
+    expect(record.corpusId).toBe('rec_abc_12345678');
+    expect(record.runId).toBe('run_xyz_87654321');
+    expect(record.origin).toBe('sweep');
+
+    // Everything else about the cascade turn is untouched.
+    expect(record.mode).toBe('cascade');
+    expect(record.sourceFinal).toBe('hello world');
+    expect(record.targetFinal).toBe('hola mundo');
+    expect(record.languagePair).toBe('en-es');
+  });
+
+  it('AC13: session.start WITHOUT run identity still works exactly as before (Live)', async () => {
+    const record = await completeOneUtterance();
+
+    expect(record.sourceFinal).toBe('hello world');
+    expect(record.targetFinal).toBe('hola mundo');
+    expect(record.corpusId).toBe('');
+    expect(record.runId).toBe('');
+    expect(record.origin).toBeUndefined();
   });
 });
