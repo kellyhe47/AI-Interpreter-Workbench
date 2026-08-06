@@ -1,12 +1,12 @@
 ---
 id: 024
 title: Run and Batch sweep are enabled with no Recording selected; Run is a silent no-op
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/components/replay/RunConfigPanel.tsx, src/client/views/ReplayView.tsx]
 iterations: 0
-test_files: []
+test_files: [src/client/views/ReplayView.failures.test.tsx]
 branch: ""
 ---
 
@@ -35,3 +35,8 @@ whether the app is broken or the click was ignored.
 Disable both while no Recording is selected, with a title explaining why — matching the Results
 pattern. Auto-selecting the first Recording when the library is non-empty would also remove the
 state entirely.
+
+- iter 1: green (batched with 020). Gated on **selection alone** — deliberately not on busy-ness,
+  which would have broken four locked `ReplayView.test.tsx` clicks and is the wrong concept: a run
+  in flight is not a reason to forbid queueing the next one. A locked test pins that.
+- Mutation-checked: removing the selection gate fails 6 tests.

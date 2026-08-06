@@ -1,12 +1,12 @@
 ---
 id: 020
 title: A dead API backend renders as a normal empty state in Replay
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/views/ReplayView.tsx, src/client/components/replay/RecordingsLibrary.tsx]
 iterations: 0
-test_files: []
+test_files: [src/client/views/ReplayView.failures.test.tsx]
 branch: ""
 ---
 
@@ -41,3 +41,9 @@ The empty-state copy is otherwise excellent — the problem is only that a hard 
 
 Distinguish "loaded, zero Recordings" from "could not load". The recordings client already returns
 typed `ApiError`s; the library needs a third state that surfaces the failure and offers a retry.
+
+- iter 1: green (batched with 024). 23 tests.
+- ROOT CAUSE was deeper than the finding: `ReplayView`'s load effect had **no catch at all**, so a
+  rejecting `recordings.list()` escaped as an unhandled rejection (12 of them in the scoped run) and
+  the UI fell back to the reassuring empty state. Now three mutually exclusive states, failure first.
+- Mutation-checked: suppressing the error branch fails 12 tests.
