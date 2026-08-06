@@ -28,7 +28,7 @@
 // Imported directly (in addition to vitest.setup.ts) so the jest-dom matcher
 // type augmentation is visible to `tsc -p tsconfig.json`.
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App, { type AppDeps } from '../App';
 import { DEFAULT_CASCADE_TRIPLE } from '../../core/arms';
@@ -40,7 +40,7 @@ import {
   runWithLatency,
   seedCleanSweep,
 } from '../components/results/testRecords';
-import type { RecordingsClient, RunsClient } from '../replay/recordingsClient';
+import { ApiError, type RecordingsClient, type RunsClient } from '../replay/recordingsClient';
 import type { RunOnceResult } from '../replay/runner';
 import type { LedgerHydrationSource } from '../state/hydrateLedger';
 import { RunLedger, type Recording, type Run } from '../state/ledger';
@@ -300,6 +300,153 @@ describe('ticket 025 — hydration in flight asserts nothing', () => {
     expect(stamp()).toBeNull();
 
     release();
+    await waitFor(() => expect(panel().getAttribute('data-results-hydration')).toBe('ready'));
+    await waitFor(() => expect(stamp()).not.toBeNull());
+    expect(get('[data-provenance-run]')).toHaveTextContent(PROVENANCE);
+  });
+});
+
+/* ====================================================== hydration FAILED = */
+
+/**
+ * TICKET 029 (QA iteration 4) — a FAILED load has strictly LESS to attribute
+ * than an empty one: it does not even know what it has.
+ *
+ * The observed bug: the client ledger persists to
+ * localStorage["workbench.runLedger.v1"], so a reload against a stopped API
+ * leaves it populated from the previous successful load while hydration
+ * rejects. The stamp's gate reads ledger CONTENT only, so the top bar rendered
+ * `run … · corpus v1` beside a body reading "The run store did not answer, so
+ * this screen has nothing to show" — the screen asserting a run and denying it
+ * has anything to show, at once.
+ *
+ * Ticket 025's rule is unchanged and extended, not replaced: THE STAMP APPEARS
+ * EXACTLY WHEN RESULTS IS SHOWING RESULTS. The matrix below states all four
+ * (ledger × hydration) states together so the gate cannot be fixed in one and
+ * broken in another; three of the four are regression guards for 025 and pass
+ * today.
+ */
+describe('ticket 029 — the stamp is gated on the LOAD as well as the ledger', () => {
+  /** The panel's own copy for a failed load — asserted verbatim, unchanged. */
+  const FAILED_TITLE = 'Could not read the run ledger';
+  const FAILED_SUBLINE =
+    'The run store did not answer, so this screen has nothing to show. That is not ' +
+    'the same as an empty ledger: check that the server is reachable, then reopen ' +
+    'this tab.';
+
+  function panel(): HTMLElement {
+    return get('[data-results-tab]');
+  }
+
+  /**
+   * A run store that is unreachable until `heal()` — an API that was stopped
+   * and later came back. It appends nothing: the ledger it is paired with
+   * stands in for what localStorage already restored.
+   */
+  function flakyHydration(opts: { healthy: boolean }) {
+    let healthy = opts.healthy;
+    const answer = async <T,>(rows: T[]): Promise<T[]> => {
+      if (!healthy) throw new ApiError('http-error', 500, 'HTTP 500');
+      return rows;
+    };
+    const source: LedgerHydrationSource = {
+      recordings: { list: () => answer<Recording>([]) },
+      runs: { list: () => answer<Run>([]) },
+    };
+    return {
+      source,
+      heal: (): void => {
+        healthy = true;
+      },
+    };
+  }
+
+  /**
+   * App defers its content bump to a macrotask (see App.tsx), so absence must
+   * be judged AFTER that lands — otherwise a stamp that is about to appear
+   * reads as a stamp that never does.
+   */
+  async function settle(): Promise<void> {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+
+  const MATRIX = [
+    {
+      label: 'empty ledger + ready — nothing recorded (025 guard)',
+      populated: false,
+      healthy: true,
+      hydration: 'ready',
+      stamped: false,
+    },
+    {
+      label: 'populated ledger + ready — the one state that IS attributable (025 guard)',
+      populated: true,
+      healthy: true,
+      hydration: 'ready',
+      stamped: true,
+    },
+    {
+      label: 'empty ledger + failed — nothing loaded, nothing cached (025 guard)',
+      populated: false,
+      healthy: false,
+      hydration: 'failed',
+      stamped: false,
+    },
+    {
+      label: 'CACHED populated ledger + failed — the defect: no stamp over "nothing to show"',
+      populated: true,
+      healthy: false,
+      hydration: 'failed',
+      stamped: false,
+    },
+  ] as const;
+
+  it.each(MATRIX)('AC1+AC2: $label', async ({ populated, healthy, hydration, stamped }) => {
+    const ledger = populated ? seededLedger() : new RunLedger();
+    renderWorkbench({ ledger, hydrate: flakyHydration({ healthy }).source });
+
+    await showTab('Results');
+    await waitFor(() =>
+      expect(panel().getAttribute('data-results-hydration')).toBe(hydration),
+    );
+    await settle();
+
+    if (stamped) {
+      expect(get('[data-provenance-run]')).toHaveTextContent(PROVENANCE);
+    } else {
+      expect(stamp()).toBeNull();
+    }
+  });
+
+  it('AC3: the failure body copy is untouched — failed still reads as failed, not empty', async () => {
+    renderWorkbench({ ledger: seededLedger(), hydrate: flakyHydration({ healthy: false }).source });
+
+    await showTab('Results');
+    await waitFor(() => expect(panel().getAttribute('data-results-hydration')).toBe('failed'));
+
+    expect(screen.getByText(FAILED_TITLE)).toBeInTheDocument();
+    expect(screen.getByText(FAILED_SUBLINE)).toBeInTheDocument();
+    expect(screen.queryByText(EMPTY_TITLE)).not.toBeInTheDocument();
+  });
+
+  it('AC4: a recovered load restores the stamp — reopening the tab, no page reload', async () => {
+    const ledger = seededLedger();
+    const { source, heal } = flakyHydration({ healthy: false });
+    renderWorkbench({ ledger, hydrate: source });
+
+    await showTab('Results');
+    await waitFor(() => expect(panel().getAttribute('data-results-hydration')).toBe('failed'));
+    await settle();
+    expect(stamp()).toBeNull();
+
+    // The failure copy tells the operator to "reopen this tab", and Results is
+    // unmounted on leaving it — so coming back re-runs hydration in place.
+    heal();
+    await showTab('Live');
+    await showTab('Results');
+
     await waitFor(() => expect(panel().getAttribute('data-results-hydration')).toBe('ready'));
     await waitFor(() => expect(stamp()).not.toBeNull());
     expect(get('[data-provenance-run]')).toHaveTextContent(PROVENANCE);
