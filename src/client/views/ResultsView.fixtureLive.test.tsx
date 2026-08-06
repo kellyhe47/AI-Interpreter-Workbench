@@ -141,10 +141,22 @@ describe('ticket 018 — with real Runs present, the live card renders its OWN e
 
   it('none of the fixture figures appear anywhere on the Experiments panel', () => {
     render(<ResultsView ledger={ledgerWithRunsAndFixtureLive()} />);
-    const text = panel().textContent ?? '';
-    expect(text).not.toContain(String(FIXTURE_UTTERANCES_COMPLETED));
-    // 0.98 s — the constant-delay signature QA saw as both p50 and p95.
-    expect(text).not.toContain('0.98 s');
+
+    // Scoped to the live card, because that is the only place a fixture
+    // LiveSession can surface — and an excluded one leaves it digit-free.
+    // A panel-wide digit check would be wrong here: the REAL gate-passing
+    // sweep runs legitimately render figures like '$0.020', and '20' inside
+    // Arm B's genuine cost is arithmetic, not a fixture fingerprint.
+    const card = document.querySelector('[data-card="live"]')!;
+    expect(card.textContent ?? '').not.toMatch(/\d/);
+    // The provenance phrasing QA saw: '1 sessions · 20 utterances completed'.
+    expect(card.textContent ?? '').not.toContain(
+      `${FIXTURE_UTTERANCES_COMPLETED} utterances`,
+    );
+
+    // 0.98 s — the constant-delay signature QA saw as both p50 and p95. This
+    // one is a real fingerprint, so it stays scoped to the whole panel.
+    expect(panel().textContent ?? '').not.toContain('0.98 s');
   });
 });
 
