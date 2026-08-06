@@ -132,6 +132,19 @@ the PRD's visible-state requirement is met.
 - [ ] `?fixture=1` / `?fixture=fail-mt` browser fixture mode still works and still produces
       fixture-named providers so its records stay out of aggregates
 
+## Orchestrator note — realtime model snapshot (added after ticket 001)
+
+`REALTIME_MODEL` is `gpt-realtime` (Arm A's frozen recipe, which the rubric requires), but the
+existing transport and token defaults are `gpt-realtime-mini` — the PRD §5 / §14 **development**
+model, chosen for cost control. `deriveArmTag` therefore tags a mini-model run `ad-hoc`, and that
+is **correct**: a cheap dev run must not count as Arm A evidence. That is the quarantine working.
+
+The consequence to handle here: **this ticket must pass the realtime model explicitly from the run
+configuration** rather than letting the transport fall back to its dev default — otherwise every
+realtime run derives `ad-hoc` and Arm A never appears in the ledger. `src/server/token.ts` and
+`src/client/transport/realtime.ts` keep `gpt-realtime-mini` as their default; the caller supplies
+`REALTIME_MODEL` for measured runs.
+
 ## Test plan
 
 Rename `SessionView.test.tsx` / `SessionView.flow.test.tsx` to `LiveView.*` and drop the

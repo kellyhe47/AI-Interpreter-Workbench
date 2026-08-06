@@ -1,11 +1,11 @@
 ---
 id: 001
 title: Frozen arm definitions and derived armTag
-status: pending
+status: green
 depends_on: []
 touches: [src/core/arms.ts, src/core/arms.test.ts]
 iterations: 0
-test_files: []
+test_files: [src/core/arms.test.ts]
 branch: ""
 ---
 
@@ -103,3 +103,5 @@ three new tests the v2 verification requires — write it table-driven over
 `{config, expected}` cases.
 
 ## Attempt log
+
+- iter 1: green. 40/40 ticket tests, full suite 35 files / 501 tests, both typechecks clean.
