@@ -75,12 +75,24 @@
  *   [data-batch-controls-note] verbatim
  *   button 'Cancel — keep completed runs' → handle.cancel(); when `done`
  *   settles the panel unmounts and every completed run is still listed.
+ *
+ * BlindCompare — ticket 014, a sibling of [data-runs-list] in this column.
+ *   Trigger 'compare blind (pick 2 runs)' / 'close blind compare', offered
+ *   ONLY when the selected Recording has at least two COMPLETED runs (a
+ *   failed run produced no audio to listen to) AND the host supplied the
+ *   blind seams — rng, evaluatorLanguage and recordBlindComparison. Without
+ *   them there is no honest blind mode, so nothing occupies the slot at all:
+ *   absent, not disabled.
+ *   The view owns open/close and the filtering, and NOTHING else: the pair
+ *   pick, the draw, the scores, the reveal and the submit all belong to the
+ *   component, which is what keeps the blinding in one auditable place.
  * ==========================================================================
  */
 
 import { useCallback, useEffect, useState, type CSSProperties, type ReactElement } from 'react';
 import { ARMS, DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL } from '../../core/arms';
 import BatchProgressPanel from '../components/replay/BatchProgress';
+import BlindCompare from '../components/replay/BlindCompare';
 import RecordingsLibrary from '../components/replay/RecordingsLibrary';
 import RunConfigPanel, { type ReplayConfigState } from '../components/replay/RunConfigPanel';
 import RunsList from '../components/replay/RunsList';
@@ -145,6 +157,11 @@ const HEADER_SUBLINE =
   'are comparable by construction.';
 
 const RECORD_NEW = 'Record new clip · max 1 min';
+
+/** The blind-compare trigger. Pairwise by name: three runs are not judgeable. */
+const OPEN_BLIND = 'compare blind (pick 2 runs)';
+const CLOSE_BLIND = 'close blind compare';
+
 /**
  * Microphone capture lands with the Live view's recorder; until then the
  * affordance states the cap it will enforce rather than pretending to record.
@@ -178,6 +195,19 @@ const columnsStyle: CSSProperties = {
   gridTemplateColumns: '330px 1fr',
   gap: 'var(--space-4)',
   alignItems: 'start',
+};
+
+const blindToggleStyle: CSSProperties = {
+  alignSelf: 'flex-start',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--surface-card)',
+  color: 'var(--text-body)',
+  fontFamily: 'inherit',
+  fontSize: 'var(--text-sm)',
+  fontWeight: 'var(--weight-medium)',
+  padding: 'var(--space-2) var(--space-3)',
+  cursor: 'pointer',
 };
 
 const recordButtonStyle: CSSProperties = {
@@ -228,6 +258,7 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
   const [config, setConfig] = useState<ReplayConfigState>(initialConfig);
   const [sweep, setSweep] = useState<SweepState | null>(null);
+  const [blindOpen, setBlindOpen] = useState(false);
 
   const refreshRuns = useCallback(async (): Promise<void> => {
     setRuns(await deps.runs.list());
@@ -312,6 +343,50 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
     });
   };
 
+  /**
+   * Blind compare, ticket 014. A failed Run produced no audio, so only
+   * COMPLETED runs are pairable; and without all three seams there is nothing
+   * honest to offer, so the trigger is absent rather than disabled.
+   */
+  const completedRuns = selectedRuns.filter((run) => run.status === 'complete');
+  const { rng, evaluatorLanguage, recordBlindComparison } = deps;
+
+  let blindTrigger: ReactElement | null = null;
+  let blindCard: ReactElement | null = null;
+  if (
+    rng !== undefined &&
+    evaluatorLanguage !== undefined &&
+    recordBlindComparison !== undefined &&
+    selectedRecording !== null &&
+    completedRuns.length >= 2
+  ) {
+    blindTrigger = (
+      <button
+        type="button"
+        data-blind-toggle=""
+        onClick={() => setBlindOpen((open) => !open)}
+        style={blindToggleStyle}
+      >
+        {blindOpen ? CLOSE_BLIND : OPEN_BLIND}
+      </button>
+    );
+    if (blindOpen) {
+      blindCard = (
+        <BlindCompare
+          key={selectedRecording.id}
+          recording={selectedRecording}
+          runs={completedRuns}
+          rng={rng}
+          evaluatorLanguage={evaluatorLanguage}
+          now={deps.now}
+          newId={deps.newId}
+          onPlay={(runId) => deps.playRun(runId)}
+          onSubmit={recordBlindComparison}
+        />
+      );
+    }
+  }
+
   const batchProgress =
     sweep === null ? null : (
       <BatchProgressPanel
@@ -375,6 +450,9 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
             onBatchSweep={startSweep}
             batchProgress={batchProgress}
           />
+
+          {blindTrigger}
+          {blindCard}
 
           <RunsList
             recording={selectedRecording}
