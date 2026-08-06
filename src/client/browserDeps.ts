@@ -19,6 +19,21 @@
  * The three BLIND seams (rng, evaluatorLanguage, recordBlindComparison) are
  * deliberately NOT set here. App supplies them, because it is App that owns
  * the ledger the comparison is persisted into.
+ *
+ * TICKET 019 — the bag also carries `hydrate`, the Results hydration seam, so
+ * the real product's Results screen reads the server's Runs instead of an
+ * empty browser-local ledger. It is built from the SAME two REST clients the
+ * Replay bag holds, but it is a separate field on purpose (see BrowserDeps).
+ *
+ * FIXTURE MODE GETS NO `hydrate`. `buildFixtureDeps` keeps the real Replay bag
+ * — Replay needs no microphone, so there is nothing there for fixture mode to
+ * stand in for — but its ledger is a deliberately fresh, in-memory,
+ * never-persisted one holding a scripted session. Pulling the server's real
+ * measurements into that bag would put genuine figures on screen underneath a
+ * fabricated session, and would make `?fixture=1` (a QA and screenshot path)
+ * depend on whatever happens to be on the server that day. Fixture mode is for
+ * exercising the LIVE journey without a grantable mic; it is not a second
+ * production build.
  */
 
 import { readWav } from '../harness/wav';
@@ -32,6 +47,7 @@ import {
   type RunsClient,
 } from './replay/recordingsClient';
 import { runOnce, type RunnerDeps, type RunOnceConfig, type RunOnceResult } from './replay/runner';
+import type { LedgerHydrationSource } from './state/hydrateLedger';
 import { RunLedger } from './state/ledger';
 import { CascadeTransport, type WsLike } from './transport/cascade';
 import { RealtimeTransport, type RtcPeerConnectionLike } from './transport/realtime';
@@ -39,9 +55,21 @@ import type { InterpreterTransport } from './transport/types';
 import type { ReplayBatchRequest, ReplayDeps, ReplayRunRequest } from './views/ReplayView';
 import type { CaptureCallbacks, LiveRunConfig, SessionDeps } from './views/useSessionController';
 
-/** The production bag: SessionDeps plus the Replay seams. Assignable to AppDeps. */
+/**
+ * The production bag: SessionDeps plus the Replay seams and — ticket 019 — the
+ * Results hydration seam. Assignable to AppDeps.
+ */
 export interface BrowserDeps extends SessionDeps {
   replay: ReplayDeps;
+  /**
+   * TICKET 019 — how Results gets the server's Runs. It reuses the very same
+   * REST client instances the Replay bag holds (so both screens read one
+   * backend), but it is its OWN field: App must never infer hydration from the
+   * presence of `replay`, because "this host can run replays" and "this host
+   * wants Results to load from the server" are different statements, and a
+   * test bag that wires the first is not asking for the second.
+   */
+  hydrate: LedgerHydrationSource;
 }
 
 /** A batch run that over-runs this is aborted and recorded as a failure. */
@@ -157,6 +185,11 @@ export function buildReplayDeps(): ReplayDeps {
 export function buildBrowserDeps(): BrowserDeps {
   const wsBase = websocketBase();
 
+  // Built ONCE and shared: `replay` and `hydrate` hand Results and Replay the
+  // same two REST clients, which is what makes "one ledger under every view"
+  // true of the real product rather than only of the unit tests.
+  const replay = buildReplayDeps();
+
   // Live getUserMedia stream captured as it is granted, so RealtimeTransport
   // can attach the mic track to its RTCPeerConnection before createOffer
   // (controller starts transports only after the grant, and reconnects
@@ -210,6 +243,7 @@ export function buildBrowserDeps(): BrowserDeps {
     playbackContextFactory: () => new AudioContext() as unknown as PlaybackAudioContextLike,
     ledger: new RunLedger(window.localStorage),
     now: () => Date.now(),
-    replay: buildReplayDeps(),
+    replay,
+    hydrate: { recordings: replay.recordings, runs: replay.runs },
   };
 }

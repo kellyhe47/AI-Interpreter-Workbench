@@ -55,9 +55,30 @@
  *   [data-category-row][data-category="<category>"]
  *   [data-recording-row][data-recording="<id>"][data-arm][data-excluded]
  *   [data-exclusion="ad-hoc"|"manual"|"failed"|"fixture"]
+ *
+ * TICKET 019 — HYDRATION IS AN INJECTED, OPTIONAL SEAM.
+ *
+ *   [data-results-tab][data-results-hydration="loading"|"ready"|"failed"]
+ *
+ * The attribute exists ONLY when `hydrate` was supplied. Results used to read
+ * a browser-local ledger while Replay read the server over REST — two stores
+ * under one screen, so four Runs on the server rendered here as 'No runs
+ * recorded' (PRD §8 allows exactly one ledger). `hydrate` loads the server's
+ * Recordings and Runs into the SAME ledger instance every other view reads,
+ * and it is a prop rather than a module import so no test here needs a
+ * network. A host that omits it keeps today's behaviour exactly: no effect,
+ * no attribute, no new DOM.
+ *
+ * Loading MORE data must not load data PAST the gate: hydration adds entities,
+ * and `isAggregatableRun` still decides which of them reach a figure — the
+ * failed, ad-hoc and fixture Runs stay out of every aggregate and stay listed,
+ * marked, on the secondary tab.
+ *
+ * Rule 1 above gains a third state on top of empty: 'still asking' and 'could
+ * not ask' are NOT emptiness and never render as it (see LOADING_/FAILED_).
  */
 
-import { useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { armLabel, type ArmTag } from '../../core/arms';
 import {
   deriveComparison,
@@ -73,10 +94,19 @@ import {
   type RecordingGroupRow,
   type Tone,
 } from '../components/results/derive';
+import { hydrateLedger, type LedgerHydrationSource } from '../state/hydrateLedger';
 import type { RunLedger } from '../state/ledger';
 
 export interface ResultsViewProps {
   ledger: RunLedger;
+  /**
+   * TICKET 019 — the injected seam that loads server-persisted Recordings and
+   * Runs into `ledger` before anything is derived. OPTIONAL: a host that omits
+   * it gets exactly today's behaviour (client-local ledger only) and renders
+   * no hydration state at all, which is what keeps every pre-019 caller — and
+   * the locked App shared-deps-bag guard — byte-identical.
+   */
+  hydrate?: LedgerHydrationSource;
 }
 
 /* ------------------------------------------------------------------ copy -- */
@@ -93,6 +123,27 @@ const EMPTY_SUBLINE =
   'Run a batch sweep in Replay to populate the experiments. Result cards never ' +
   'show sample data as evidence.';
 const SWEEP_DISABLED_REASON = 'Sweeps require the real corpus to be loaded';
+
+/*
+ * TICKET 019 — the two states that are NOT emptiness.
+ *
+ * "Nothing recorded", "still asking" and "could not ask" are three different
+ * claims, and only the first one is the empty state. Rendering either of the
+ * other two as 'No runs recorded' would tell an operator their sweep produced
+ * nothing when in fact this screen never got to look — the F3 bug, relocated.
+ * Neither note carries a digit: there is no figure to report yet, and a stray
+ * one here would read as a measurement.
+ */
+const LOADING_TITLE = 'Loading the run ledger…';
+const LOADING_SUBLINE =
+  'Reading the recordings and runs the server holds. Figures appear once they are ' +
+  'in the ledger — none are shown before then.';
+
+const FAILED_TITLE = 'Could not read the run ledger';
+const FAILED_SUBLINE =
+  'The run store did not answer, so this screen has nothing to show. That is not ' +
+  'the same as an empty ledger: check that the server is reachable, then reopen ' +
+  'this tab.';
 
 /**
  * The cell a metric with no derivation behind it renders. A zero here would be
@@ -765,9 +816,53 @@ function EmptyState(): ReactElement {
   );
 }
 
+/**
+ * TICKET 019 — the panel body while hydration is in flight, and after it
+ * failed. Deliberately the same shape as the empty state and deliberately NOT
+ * the same words: the three are distinguishable to a reader, not only to a
+ * test asserting on `data-results-hydration`.
+ */
+function HydrationNote(props: { title: string; subline: string }): ReactElement {
+  return (
+    <div
+      style={{
+        ...cardStyle,
+        padding: 'var(--space-12) var(--space-6)',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        textAlign: 'center',
+        gap: 'var(--space-2)',
+      }}
+    >
+      <div style={{ fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-md)' }}>
+        {props.title}
+      </div>
+      <p
+        style={{
+          color: 'var(--text-secondary)',
+          fontSize: 'var(--text-sm)',
+          maxWidth: 460,
+          margin: 0,
+        }}
+      >
+        {props.subline}
+      </p>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ view -- */
 
 type TabKey = 'experiments' | 'secondary';
+
+/**
+ * TICKET 019 — where the ledger's server half is, right now. `null` means the
+ * host supplied no `hydrate` seam at all, and then NOTHING about this view
+ * changes: no effect runs, no attribute is rendered, and a pre-019 caller is
+ * byte-identical to before.
+ */
+type HydrationStatus = 'loading' | 'ready' | 'failed';
 
 /**
  * A group whose every excluded run is fixture-sourced carries no evidence at
@@ -801,6 +896,36 @@ function tabStyle(selected: boolean): CSSProperties {
 
 export default function ResultsView(props: ResultsViewProps): ReactElement {
   const [tab, setTab] = useState<TabKey>('experiments');
+
+  const { ledger, hydrate } = props;
+
+  // `null` for a host with no seam — see HydrationStatus. Starts 'loading' so
+  // the very first paint of a hydrating view already says so, rather than
+  // flashing 'No runs recorded' for one frame before the effect runs.
+  const [hydration, setHydration] = useState<HydrationStatus | null>(
+    hydrate === undefined ? null : 'loading',
+  );
+
+  useEffect(() => {
+    if (hydrate === undefined) return;
+    let live = true;
+    setHydration('loading');
+    void hydrateLedger(ledger, hydrate).then(
+      () => {
+        // The ledger is mutated in place; this state change is what tells
+        // React to re-derive from it. Same instance, no second store.
+        if (live) setHydration('ready');
+      },
+      () => {
+        // The error is deliberately not rethrown: an unreachable server is a
+        // state this screen RENDERS, not a crash.
+        if (live) setHydration('failed');
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [ledger, hydrate]);
 
   const recordingRows = groupByRecording(props.ledger);
   const categoryRows = groupByCategory(props.ledger);
@@ -862,10 +987,18 @@ export default function ResultsView(props: ResultsViewProps): ReactElement {
       {/* Exactly ONE panel is mounted: the other is unmounted, not hidden. */}
       <div
         data-results-tab={tab}
+        // Rendered ONLY when a hydration seam was supplied: `undefined` makes
+        // React omit the attribute entirely, which is what keeps a pre-019
+        // caller's DOM byte-identical.
+        data-results-hydration={hydration ?? undefined}
         role="tabpanel"
         style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}
       >
-        {empty ? (
+        {hydration === 'loading' ? (
+          <HydrationNote title={LOADING_TITLE} subline={LOADING_SUBLINE} />
+        ) : hydration === 'failed' ? (
+          <HydrationNote title={FAILED_TITLE} subline={FAILED_SUBLINE} />
+        ) : empty ? (
           <EmptyState />
         ) : tab === 'experiments' ? (
           <>
