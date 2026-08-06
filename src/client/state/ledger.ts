@@ -85,6 +85,19 @@
  * - The entity types are RE-DECLARED here, mirroring src/server/storage/types.ts
  *   field-for-field, because tsconfig.json excludes src/server from the client
  *   program.
+ *
+ * Ticket 016 — the pairwise BlindComparison finally gets a home
+ * (recordBlindComparison / getBlindComparisons). Additive by construction:
+ *
+ * - A fourth append-only store, deep-copied in and out like every other one, so
+ *   neither the submitter nor a reader can rewrite a judgement after the fact.
+ * - It rides the same persisted blob, so a submitted comparison survives a
+ *   reload; a pre-016 blob simply has no `blindComparisons` key and restores
+ *   as empty.
+ * - It is NOT in LedgerExport. That envelope's shape is pinned by the locked
+ *   export/import tests, so `exportRuns`/`importRuns` are untouched and
+ *   `importRuns` leaves the comparison store alone rather than discarding
+ *   judgements the export it was handed never carried.
  */
 
 import { deriveArmTag, type ArmTag, type ProviderTriple } from '../../core/arms';
@@ -365,6 +378,8 @@ interface LedgerState {
   recordings?: Recording[];
   runs?: Run[];
   liveSessions?: LiveSession[];
+  /** Ticket 016. Absent in every pre-016 blob; restored as empty. */
+  blindComparisons?: BlindComparison[];
 }
 
 export class RunLedger {
@@ -373,6 +388,7 @@ export class RunLedger {
   private recordings: Recording[] = [];
   private runs: Run[] = [];
   private liveSessions: LiveSession[] = [];
+  private blindComparisons: BlindComparison[] = [];
   private readonly storage?: StorageAdapter;
 
   constructor(storage?: StorageAdapter) {
@@ -386,6 +402,7 @@ export class RunLedger {
         this.recordings = state.recordings ?? [];
         this.runs = state.runs ?? [];
         this.liveSessions = state.liveSessions ?? [];
+        this.blindComparisons = state.blindComparisons ?? [];
       }
     }
   }
@@ -400,6 +417,7 @@ export class RunLedger {
           recordings: this.recordings,
           runs: this.runs,
           liveSessions: this.liveSessions,
+          blindComparisons: this.blindComparisons,
         }),
       );
     }
@@ -493,6 +511,34 @@ export class RunLedger {
     draw.scores = deepCopy(input.scores);
     draw.revealedAt = input.revealedAt;
     this.persist();
+  }
+
+  /* --- ticket 016: pairwise blind comparisons (additive) ----------------
+   *
+   * The ticket-014 BlindComparison type had no persistence at all. These two
+   * are strictly ADDITIVE: nothing above changes, so every locked ledger test
+   * keeps its meaning.
+   *
+   * Append-only and deep-copied on both sides, exactly like every other store
+   * here: a caller mutating what it handed in — or what it read back — must
+   * not be able to rewrite a recorded judgement after the reveal.
+   *
+   * They ride the SAME persisted blob (so a comparison survives a reload) but
+   * they are deliberately NOT part of `LedgerExport`. That envelope's shape is
+   * pinned by the locked export/import tests, and widening it would change
+   * what `importRuns(exportRuns())` round-trips; `importRuns` therefore leaves
+   * the comparison store alone rather than silently discarding judgements that
+   * the export it was handed never carried. */
+
+  /** Appends one completed pairwise blind comparison. */
+  recordBlindComparison(comparison: BlindComparison): void {
+    this.blindComparisons.push(deepCopy(comparison));
+    this.persist();
+  }
+
+  /** Every persisted pairwise blind comparison, in append order. */
+  getBlindComparisons(): BlindComparison[] {
+    return deepCopy(this.blindComparisons);
   }
 
   exportRuns(): LedgerExport {

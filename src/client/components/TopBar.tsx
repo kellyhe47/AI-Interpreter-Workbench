@@ -1,17 +1,24 @@
 /**
- * Ticket 012 — App-level top bar.
+ * Ticket 012/016 — App-level top bar.
  *
- * 52px sticky bar per the design mock: mic glyph + 'Interpreter workbench'
- * wordmark, Session/Results segmented control, and the right-hand status
- * area. Lives at app level (not inside the Live view) because it hosts the
- * view tabs; App owns the current view and passes it down.
+ * 52px sticky bar per the design mock, marked [data-topbar]: mic glyph +
+ * 'Interpreter workbench' wordmark, the segmented view control, and the
+ * right-hand status area. Lives at app level (not inside the Live view)
+ * because it hosts the view tabs; App owns the current view and passes it
+ * down.
  *
  * DOM contract (locked by App.test.tsx + LiveView tests):
- * - Tab buttons named exactly 'Session' and 'Results', with aria-pressed
- *   reflecting the current view.
- * - Pulsing live dot + 'live' text, marked [data-live-dot], rendered ONLY
- *   while `live` is true (an active session on the Session view). Absent
- *   while idle / stopped / disconnected / reconnecting and on Results.
+ * - EXACTLY FOUR tab buttons, in this order and named exactly: 'Live',
+ *   'Replay', 'Results', 'Help'. They are the only children of the segmented
+ *   group, and aria-pressed reflects the current view (true on exactly one).
+ *   The names are the contract — LiveView.test.tsx reaches for the button
+ *   named 'Results' by name.
+ * - Pulsing live dot + 'live' text, marked [data-live-dot], rendered
+ *   whenever `live` is true. `live` means A SESSION IS RUNNING, and nothing
+ *   else: it is emphatically NOT gated on the open tab. A running session
+ *   burns its five-minute budget while the user reads Replay, Results or
+ *   Help, and hiding the dot there would be a lie about the app's state.
+ *   Absent while idle / stopped / disconnected / reconnecting.
  * - Mono run-provenance text (e.g. 'run 2026-08-05 · corpus v1'), marked
  *   [data-provenance-run], rendered ONLY when `provenance` is non-null —
  *   App passes it on the Results view only (a live session is not a run;
@@ -21,16 +28,34 @@
 
 import type { CSSProperties, ReactElement } from 'react';
 
-export type WorkbenchView = 'session' | 'results';
+/**
+ * Ticket 016 — four tabs. 'session' was renamed 'live' so the value matches
+ * the tab the user sees; Replay and Help joined it.
+ */
+export type WorkbenchView = 'live' | 'replay' | 'results' | 'help';
 
 export interface TopBarProps {
   view: WorkbenchView;
   onViewChange: (view: WorkbenchView) => void;
-  /** True only while a session is actively running (live dot). */
+  /**
+   * True while a session is actively running — INDEPENDENT of the open tab.
+   * See the header: the dot describes the session, not the navigation.
+   */
   live: boolean;
-  /** Mono provenance line; null hides it (Session view). */
+  /** Mono provenance line; null hides it (every view except Results). */
   provenance: string | null;
 }
+
+/**
+ * The tabs, in render order, each paired with the label the user reads. The
+ * label IS the accessible name, so this table is the naming contract.
+ */
+const TABS: ReadonlyArray<{ view: WorkbenchView; label: string }> = [
+  { view: 'live', label: 'Live' },
+  { view: 'replay', label: 'Replay' },
+  { view: 'results', label: 'Results' },
+  { view: 'help', label: 'Help' },
+];
 
 function tabStyle(on: boolean): CSSProperties {
   return {
@@ -46,6 +71,7 @@ function tabStyle(on: boolean): CSSProperties {
 export default function TopBar({ view, onViewChange, live, provenance }: TopBarProps): ReactElement {
   return (
     <div
+      data-topbar=""
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -94,20 +120,17 @@ export default function TopBar({ view, onViewChange, live, provenance }: TopBarP
           font: '500 12.5px var(--font-sans)',
         }}
       >
-        <button
-          aria-pressed={view === 'session'}
-          onClick={() => onViewChange('session')}
-          style={tabStyle(view === 'session')}
-        >
-          Session
-        </button>
-        <button
-          aria-pressed={view === 'results'}
-          onClick={() => onViewChange('results')}
-          style={tabStyle(view === 'results')}
-        >
-          Results
-        </button>
+        {TABS.map((entry) => (
+          <button
+            key={entry.view}
+            type="button"
+            aria-pressed={view === entry.view}
+            onClick={() => onViewChange(entry.view)}
+            style={tabStyle(view === entry.view)}
+          >
+            {entry.label}
+          </button>
+        ))}
       </div>
       <div
         style={{

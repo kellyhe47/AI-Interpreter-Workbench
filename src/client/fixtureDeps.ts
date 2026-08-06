@@ -55,7 +55,9 @@
 import type { UtteranceRecord } from '../core/timing';
 import type { CaptureResult } from './audio/capture';
 import type { PlaybackAudioContextLike, PlaybackSourceLike } from './audio/playback';
+import { buildReplayDeps } from './browserDeps';
 import { RunLedger } from './state/ledger';
+import type { ReplayDeps } from './views/ReplayView';
 import type { FixtureScriptEvent } from './transport/fixture';
 import type {
   InterpreterTransport,
@@ -64,6 +66,15 @@ import type {
   TransportKind,
 } from './transport/types';
 import type { LiveRunConfig, SessionDeps } from './views/useSessionController';
+
+/**
+ * Ticket 016 — what fixture mode hands <App />: the scripted SessionDeps plus
+ * the REAL Replay bag (Replay needs no microphone, so there is nothing about
+ * it for fixture mode to stand in for). Assignable to AppDeps.
+ */
+export interface FixtureDeps extends SessionDeps {
+  replay: ReplayDeps;
+}
 
 export interface FixtureModeSelection {
   enabled: boolean;
@@ -408,7 +419,7 @@ function silentPlaybackContext(): PlaybackAudioContextLike {
 /** Deterministic synthetic mic-level pattern (0..5 bars). */
 const LEVEL_PATTERN = [2, 3, 4, 3, 2, 1, 2, 4] as const;
 
-export function buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps {
+export function buildFixtureDeps(options?: FixtureDepsOptions): FixtureDeps {
   const now = options?.now ?? (() => Date.now());
   const loopConfig: LoopConfig = {
     fault: options?.fault,
@@ -447,5 +458,10 @@ export function buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps {
     playbackContextFactory: silentPlaybackContext,
     ledger: new RunLedger(), // fresh, in-memory — fixture data never persists
     now,
+    // Ticket 016 — the REAL Replay bag, unfaked. Fixture mode exists because a
+    // QA browser has no grantable microphone (PRD §7); Replay needs no
+    // microphone, so faking its seams would only hide the actual server. The
+    // Live session is scripted; Replay still talks to the real endpoints.
+    replay: buildReplayDeps(),
   };
 }
