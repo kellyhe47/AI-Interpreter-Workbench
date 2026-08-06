@@ -11,6 +11,9 @@ build/
 coverage/
 
 # runtime artifacts
+# working state: recordings, runs, output audio, ledger.jsonl (PRD §7).
+# results/ is committed and is what the write-up cites.
+data/
 *.log
 benchmark-results/*.json
 !benchmark-results/.gitkeep
