@@ -234,9 +234,12 @@ interface BatchProbe {
 }
 
 function makeFakes(options: { recordings?: Recording[]; runs?: SeededRun[] } = {}) {
+  // Copied per element, not just per array: `patchLabel` and `remove` write
+  // through to the stored object, and sharing identity with the module-level
+  // fixtures would let one test's soft delete leak into every later mount.
   const store = {
-    recordings: [...(options.recordings ?? [])],
-    runs: [...(options.runs ?? [])],
+    recordings: (options.recordings ?? []).map((r) => ({ ...r })),
+    runs: (options.runs ?? []).map((r) => ({ ...r })),
   };
 
   const visible = (): Recording[] => store.recordings.filter((r) => r.deletedAt === undefined);
@@ -993,7 +996,7 @@ describe('BatchProgress — position, clock, bar, controls note and cancel', () 
     batch.emit(PROGRESS);
 
     // Two runs completed before the operator stopped watching.
-    fakes.store.runs.push(RUN_CASCADE, RUN_REALTIME);
+    fakes.store.runs.push({ ...RUN_CASCADE }, { ...RUN_REALTIME });
 
     fireEvent.click(screen.getByRole('button', { name: CANCEL_BATCH }));
     expect(batch.cancel).toHaveBeenCalledTimes(1);
