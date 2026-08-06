@@ -436,3 +436,76 @@ anywhere. No console errors.
 `'deepgram'` appear nowhere in `src/client` except as the literal patterns inside
 `deletions.test.ts`, the guard that keeps them gone. Every KEEP file is byte-identical to its v2
 starting state.
+
+## QA loop — iteration 1
+
+`/manual-qa` walked eight end-to-end flows across all four views against the running app.
+**8 findings filed (018–025); one withdrawn on re-verification; seven fixed.**
+
+### The withdrawal
+
+**022 — `?fixture=fail-mt` "injects no fault" was a QA sampling error, not a defect.** The fault
+fires on `utt === 1` (displayed *utterance 2*) and the failed state is **transient** — the next
+utterance replaces the card ~4 s later. The QA pass sampled at utterances 4 and 17, both after it
+had gone. Re-verified by polling the DOM every 150 ms: status `failed`, copy *"mt stage timed out
+for this utterance — session still running"* — the exact PRD §12 cascade string — with the session
+surviving. Closed with evidence; **no code changed**. The tell was in the report itself, which
+quoted v1's note that the session "recovers and streams the next utterance normally"; a transient
+per-utterance state needs polling, not spot-checks.
+
+### Fixed
+
+| # | Sev | Finding | Mutation check |
+|---|---|---|---|
+| 018 | HIGH | fixture-sourced LiveSession figures reached Results | defeat `isRealLiveSession` → 23 red |
+| 019 | HIGH | Results never saw server-persisted Runs | no-op `hydrateLedger` → 28 red |
+| 020 | HIGH | a dead backend rendered as the normal empty state | suppress the error branch → 12 red |
+| 021 | MOD | API server bound the client's port under the repo's own preview config | reintroduce `PORT` → 3 red |
+| 023 | MOD | blind scores persisted only to localStorage | share `ledger.jsonl` → 11 red |
+| 024 | LOW | Run/Batch sweep enabled with no Recording selected | remove the selection gate → 6 red |
+| 025 | LOW | provenance stamp asserted a corpus version on an empty Results screen | unconditional stamp → 9 red |
+
+### Root causes deeper than the findings
+
+- **020** — the load effect had **no `catch` at all**; a rejecting `list()` escaped as an unhandled
+  rejection (12 per scoped run) and the empty state was simply what rendered without data.
+- **018** — `isRealLiveSession` alone could not fix it, because `useSessionController` stamps the
+  session header from the **configured** triple rather than the transport that served it, so a
+  fixture session claims real model names. Mitigated with a second records-linked gate; the source
+  fix is **ticket 026**, filed and deliberately left pending — no wrong number reaches a screen today.
+
+### Decisions taken during the fixes
+
+- **`API_PORT`, with a generic `PORT` never consulted.** Pinning the port in `dev:server` would fix
+  only `npm run dev` and leave `npm start` exposed to any shell exporting `PORT`. Accepted tradeoff:
+  a PaaS that injects `PORT` needs `API_PORT` set — PRD §14 pins EC2 + Caddy, which proxies to a
+  fixed port.
+- **Fixture mode gets no hydration.** Pulling the server's genuine measurements into a bag holding a
+  fabricated session would put real figures under a fixture session — the 018 bug inverted — and
+  would make `?fixture=1`, a QA and screenshot path, depend on whatever is on the server that day.
+- **Hydration is atomic on failure.** A partial write would leave Recordings with no Runs, which
+  reads exactly like a real empty sweep — the same failure-as-emptiness shape as 020.
+- **Comparisons get `comparisons.jsonl`, not the run ledger.** `readLedger()` is typed `Run[]` and
+  `exportResults` unions it into the run record set; a shared file would count a comparison in
+  `totals.runs` and derive it into an arm.
+- **Blind submit is dual-sink** — a rejected POST still records locally, so the evaluator never
+  loses their work.
+- **024 gates on selection, not busy-ness.** An in-flight run is not a reason to forbid queueing the
+  next one; a locked test pins the distinction.
+
+### Locked tests corrected through the test-writer (never by an implementer)
+
+Twice, an implementer stopped and reported a locked test as wrong rather than editing it. Both
+claims were verified independently and both were right:
+
+1. **`ResultsView.fixtureLive.test.tsx`** asserted the bare digit `20` absent from the whole
+   Experiments panel — colliding with Arm B's genuine `$0.020` cost. Arithmetic, not a fixture
+   fingerprint. Narrowed to `[data-card="live"]` plus the `20 utterances` provenance token, then
+   **re-verified to still fire on the original F1 leak with the gate removed** — the step that
+   distinguishes a narrowed test from a weakened one.
+2. **`App.test.tsx:270`** demanded the provenance stamp on Results while its helper built an *empty*
+   ledger — precisely the state 025 forbids. Ruled for 025: the test's intent is tab scoping (four
+   of five assertions are about *where*), and the empty ledger was incidental to the helper. Updated
+   in place with all four absence assertions verbatim.
+
+**After iteration 1: 1,059 tests / 61 files green**, both typechecks and the production build clean.
