@@ -1,12 +1,12 @@
 ---
 id: 019
 title: Results never sees server-persisted Runs — two disjoint ledgers
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/App.tsx, src/client/state/ledger.ts, src/client/views/ResultsView.tsx, src/client/browserDeps.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/state/liveRealness.test.ts, src/client/components/results/deriveLive.fixture.test.ts, src/client/views/ResultsView.fixtureLive.test.tsx, src/client/state/hydrateLedger.test.ts, src/client/views/ResultsView.hydration.test.tsx, src/client/views/App.hydration.test.tsx, src/client/state/hydrationFixtures.ts]
 branch: ""
 ---
 
@@ -53,3 +53,14 @@ displays fixture-sourced Live data and omits real server Runs: the exact inversi
 Results must read the same store Replay does. Either hydrate the client `RunLedger` from
 `GET /api/runs` + `GET /api/recordings` on load, or have `ResultsView` derive from the REST clients
 directly. Whichever, one store feeds every view.
+
+- iter 1: green (batched with 018). Mutation-checked: making `hydrateLedger` a no-op fails 28 tests.
+- `hydrate` is its own optional `AppDeps` field, never derived from `deps.replay` — deriving it
+  would break two locked `App.test.tsx` assertions whose replay bag serves gate-passing runs. A test
+  locks that decision.
+- Hydration is atomic on failure: a partial write would leave Recordings present with no Runs, which
+  reads exactly like a real empty sweep.
+- **Fixture mode deliberately gets no `hydrate`.** Pulling the server's genuine measurements into a
+  bag holding a fabricated session would put real figures on screen under a fixture session — the
+  bug this ticket exists to fix, inverted — and would make `?fixture=1`, a QA and screenshot path,
+  depend on whatever is on the server that day.
