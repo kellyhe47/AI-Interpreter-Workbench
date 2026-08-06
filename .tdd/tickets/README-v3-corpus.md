@@ -78,3 +78,24 @@ not evidence.
 **The measured atom is the utterance, not the Run.** A Run is the container that produced a set of
 utterance records; it is not itself a measurement. Any aggregate computed per-Run rather than
 per-utterance-record is wrong by construction under a multi-utterance corpus.
+
+## Decisions confirmed by the operator (2026-08-06)
+
+1. **Packaging: 3 Recordings per direction, ~4 utterances each (9 total).** Confirmed against
+   §17 22a and §9. The 36-single-utterance-clip model in `src/harness/corpus.ts` (ticket 015) is
+   **pre-22a and superseded** for the real corpus — it stays only as the synthetic placeholder for
+   bench/soak, which is what it is marked as. Tickets 031 and 032 (the architectural ones) are
+   therefore in scope, not optional.
+2. **Ingestion: recorded in-app via the microphone.** The operator records each ≤45 s take in the
+   browser (English and Cantonese self-recorded, Spanish read by a coworker, per §9), then tags its
+   utterances. This adds **ticket 035**, without which there is no way for a real corpus to enter
+   the store at all — today the only path is the mic recorder, which produces an `origin: 'mic'`
+   Recording carrying no metadata.
+
+### What this means for `speechEndMs`
+
+§8 requires t0 to be *"corpus-derived true speech end"*, computed offline, never a VAD guess that
+differs per arm. Recording in-app does not weaken that: the boundary is computed **once**, from the
+captured waveform, at record time — and then frozen into the manifest. Every Run of that Recording
+then shares it. What §8 forbids is deriving it per-run inside the measured path, and that stays
+forbidden.
