@@ -87,7 +87,7 @@ import RunsList from '../components/replay/RunsList';
 import type { BatchConfiguration, BatchHandle, BatchProgress } from '../batch/runner';
 import type { RecordingsClient, RunsClient } from '../replay/recordingsClient';
 import type { RunOnceConfig, RunOnceResult } from '../replay/runner';
-import type { Recording, Run } from '../state/ledger';
+import type { BlindComparison, Recording, Run } from '../state/ledger';
 
 /** One manual run request, as the view asks for it. */
 export interface ReplayRunRequest {
@@ -114,6 +114,22 @@ export interface ReplayDeps {
   playRun: (runId: string) => void;
   now: () => number;
   newId: () => string;
+
+  /* --- ticket 014: the blind-compare seams (PRD §10, §17 16b) --- */
+
+  /**
+   * The randomness the blind draw consumes — injected, never `Math.random`
+   * captured directly, so the draw is deterministic under test.
+   *
+   * OPTIONAL, and the option is load-bearing: blind compare has no honest
+   * affordance without a randomness source AND somewhere to persist the draw,
+   * so a host that supplies neither gets no trigger rather than a fake one.
+   */
+  rng?: () => number;
+  /** The language the evaluator judges in; persisted with every comparison. */
+  evaluatorLanguage?: string;
+  /** Appends a completed blind comparison to the ledger. */
+  recordBlindComparison?: (comparison: BlindComparison) => void;
 }
 
 export interface ReplayViewProps {

@@ -229,6 +229,51 @@ export interface BlindDraw extends BlindDrawInput {
   revealedAt?: number;
 }
 
+/* -------------------------------------------------------------------------
+ * Ticket 014 — the REPLAY-shaped blind comparison (PRD §10, §17 16b · 25d).
+ *
+ * The shapes above are Live-era: they blind the ARMS of one utterance and
+ * carry a single score per sample. A Replay comparison is a different object
+ * — it is between two RUNS of one Recording, it is rated on TWO dimensions,
+ * and PRD §10 requires the evaluator's language to be recorded alongside the
+ * drawn assignment. `utteranceId` is simply the wrong key for it.
+ *
+ * These types are ADDITIVE: nothing above changes, so every existing caller
+ * and every locked ledger test keeps its meaning.
+ * ---------------------------------------------------------------------- */
+
+/** The two presentation slots. `order[0]` was presented as Sample A. */
+export type BlindSampleKey = 'A' | 'B';
+
+/** The two dimensions a sample is rated on, 1–5 each (PRD §10). */
+export type BlindDimension = 'adequacy' | 'fluency';
+
+/** One sample's rating. Both dimensions, never one. */
+export type BlindSampleScores = { [dimension in BlindDimension]: number };
+
+/**
+ * One pairwise blind comparison, as it is appended to the ledger.
+ *
+ * `runIds` is the pair the evaluator chose; `order` is the DRAW — what was
+ * actually presented, order[0] as Sample A. Persisting both is what makes the
+ * blinding auditable after the fact rather than merely asserted (PRD §17 16b):
+ * recomputing the assignment later would prove nothing.
+ */
+export interface BlindComparison {
+  id: string;
+  /** Both runs are Runs of THIS Recording — cross-Recording pairs are not comparable. */
+  recordingId: string;
+  /** The two Runs compared, as picked. */
+  runIds: [string, string];
+  /** The drawn assignment: order[0] was Sample A, order[1] was Sample B. */
+  order: [string, string];
+  /** The language the evaluator judged in (PRD §10 — a single native evaluator). */
+  evaluatorLanguage: string;
+  scores: { [sample in BlindSampleKey]: BlindSampleScores };
+  createdAt: number;
+  revealedAt: number;
+}
+
 export interface ArmAggregate {
   count: number;
   p50Ms: number | null;
