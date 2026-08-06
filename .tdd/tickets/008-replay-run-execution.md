@@ -1,11 +1,11 @@
 ---
 id: 008
 title: Replay run execution — recording → pacer → transport → Run record
-status: pending
+status: green
 depends_on: [001, 003, 007]
 touches: [src/client/replay/runner.ts, src/client/replay/runner.test.ts, src/client/replay/recordingsClient.ts, src/client/replay/recordingsClient.test.ts, src/client/transport/fixture.ts, src/client/transport/fixture.test.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/replay/runner.test.ts, src/client/replay/recordingsClient.test.ts, src/client/transport/fixture.test.ts]
 branch: ""
 ---
 
@@ -88,3 +88,11 @@ New `src/client/replay/runner.test.ts` + `recordingsClient.test.ts` (jsdom), fak
 injected `fetch`. Extend `src/client/transport/fixture.test.ts`. **No network.**
 
 ## Attempt log
+
+- iter 1: green. 45 tests. Mutation-checked: replacing `pacer.start()` with a single
+  `sendAudio(samples)` (the buffer dump) turns 2 tests red — the runner's use of the pacer is
+  asserted, not assumed.
+- Decision logged: a CANCELLED run is not POSTed at all. It has no end-to-end measurement, and a
+  stored row would read as a pipeline failure rather than an abandoned attempt.
+- `'disconnected'` (retries exhausted) is treated as a run failure so a dead socket cannot hang a
+  run. The general completion-timeout gap remains ticket 009's.
