@@ -88,17 +88,49 @@ export function createAppServer(deps: AppDeps = {}): http.Server {
 const app = createApp()
 
 /**
- * STUB (Ticket 021) — resolve the port the API listens on from an environment.
- * Pure so it is testable without spawning a process. NOT YET IMPLEMENTED, and
- * the module-level listener below still reads the generic PORT: that is the
- * bug this ticket exists to fix.
+ * The API's own port. Must stay in agreement with the `/api` and `/ws` proxy
+ * targets in vite.config.ts — the client dev server forwards to exactly this.
  */
-export function resolveApiPort(_env: NodeJS.ProcessEnv = process.env): number {
-  throw new Error('resolveApiPort not implemented')
+const DEFAULT_API_PORT = 8787
+
+/**
+ * ==================== API PORT RESOLUTION (Ticket 021, normative) ==========
+ * Resolve the port the API listens on. Pure — env in, number out — so the
+ * decision is testable without spawning a process.
+ *
+ * PRECEDENCE: `API_PORT` when set, otherwise DEFAULT_API_PORT. The generic
+ * port variable (the one tooling exports for whatever it happens to be
+ * launching) is DELIBERATELY NEVER CONSULTED.
+ *
+ * WHY: the repo's own `workbench` preview config declares the *Vite* port
+ * 5173, and the harness exports it into the environment shared by both halves
+ * of `npm run dev`. The API used to read that generic variable, so it bound
+ * 5173 while vite.config.ts still proxied /api and /ws to 8787 — every API
+ * call was ECONNREFUSED and the whole Replay/storage half of the app was dead
+ * (QA F4). An API-specific name is the only fix that holds no matter who
+ * exports the generic one: pinning the port inside `dev:server` would leave
+ * `npm start` equally exposed.
+ *
+ * DEPLOYMENT TRADEOFF (accepted): PaaS platforms that inject a generic port
+ * variable and expect the process to bind it (Heroku/Railway/Render/Fly) need
+ * `API_PORT` set explicitly. PRD §14 pins deployment to EC2 + Caddy, which
+ * reverse-proxies to a fixed port, so nothing here injects one. A future move
+ * to such a platform must export API_PORT in the process environment.
+ *
+ * `createAppServer(deps?)` is a separate concern and reads no environment at
+ * all: tests listen(0) on an ephemeral port.
+ * ==========================================================================
+ */
+export function resolveApiPort(env: NodeJS.ProcessEnv = process.env): number {
+  const override = env.API_PORT
+  if (override === undefined || override.trim() === '') return DEFAULT_API_PORT
+
+  const parsed = Number(override)
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 65535 ? parsed : DEFAULT_API_PORT
 }
 
-const port = Number(process.env.PORT ?? 8787)
 if (process.env.NODE_ENV !== 'test') {
+  const port = resolveApiPort()
   createAppServer().listen(port, () => console.log(`server listening on :${port}`))
 }
 
