@@ -1,20 +1,20 @@
 /**
- * STUB (ticket 002 — test-writer). Types only, no behaviour.
- *
  * Entity vocabulary for the filesystem store (PRD §7). Server-only: this
  * module is compiled by tsconfig.server.json alone.
+ *
+ * The shared names are IMPORTED, never re-declared: `ArmTag`/`ProviderTriple`
+ * from core/arms, `Mode` from core/timing, and `RunOrigin` from core/protocol —
+ * a stored Run's origin and `session.start.origin` are the same vocabulary, so
+ * there is exactly one declaration of it.
  */
 import type { ArmTag, ProviderTriple } from '../../core/arms';
+import type { RunOrigin } from '../../core/protocol';
 import type { Mode } from '../../core/timing';
 
 /** Where a Recording came from. `corpus` Recordings are undeletable (PRD §7). */
 export type RecordingOrigin = 'mic' | 'corpus';
 
-/**
- * Where a Run came from. Same vocabulary as `session.start.origin` on the
- * wire protocol (PRD §7).
- */
-export type RunOrigin = 'sweep' | 'manual';
+export type { RunOrigin };
 
 /** Failed runs are stored and listed like any other (PRD §12). */
 export type RunStatus = 'complete' | 'failed';

@@ -21,6 +21,24 @@
  *     decodeTtsFrame below — they are the normative implementation of this
  *     framing (chosen over base64 JSON tts.chunk: binary both ways per PRD,
  *     and the helpers make it just as easy to test).
+ *
+ * RUN IDENTITY IS OPTIONAL AND CARRIED ON session.start (PRD §7).
+ *
+ * A session either is a benchmark run or it is not, and that is decided by the
+ * caller opening the socket — not by a later message. Live capture sends none
+ * of `recordingId` / `runId` / `origin`; a replay or a sweep leg stamps them on
+ * the same `session.start` it was already sending. Each field is independently
+ * optional so a partially-identified session (a recording replayed ad hoc, with
+ * no run row yet) is expressible without a second message shape.
+ *
+ * `origin` is the CLOSED run vocabulary 'sweep' | 'manual' — the same values
+ * the stored Run record uses. A free string would let the wire invent origins
+ * the ledger cannot aggregate.
+ *
+ * CASCADE IS CONTEXT-FREE (PRD §7): there is deliberately NO context-policy
+ * field on session.start. Each utterance is translated on its own, and a knob
+ * on the wire would advertise a control that exists nowhere in the pipeline or
+ * the UI.
  */
 
 import type { Mode, UtteranceRecord } from './timing';
@@ -35,6 +53,12 @@ export const TTS_FRAME_HEADER_BYTES = 4;
 export type CascadeStage = 'stt' | 'mt' | 'tts';
 
 /**
+ * Where a session/run came from. Closed vocabulary, shared verbatim with the
+ * stored Run record's `origin` (PRD §7).
+ */
+export type RunOrigin = 'sweep' | 'manual';
+
+/**
  * Client -> server JSON (text frame) messages. Audio itself travels as raw
  * binary frames (see FRAMING above), NOT as JSON.
  */
@@ -45,6 +69,12 @@ export type ClientToServerMessage =
       languagePair: string;
       direction: string;
       providers: { stt: string; mt: string; tts: string };
+      /** Recording being replayed, when this session is not live capture. */
+      recordingId?: string;
+      /** Run row this session's output belongs to, when one exists. */
+      runId?: string;
+      /** How the run was initiated. Omitted by Live. */
+      origin?: RunOrigin;
     }
   | { type: 'session.end' };
 
