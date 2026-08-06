@@ -1,7 +1,7 @@
 ---
 id: 028
 title: Run annotations are never persisted — provenance can only ever report "N of N", category table can never fill
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/batch/runner.ts, src/client/batch/runner.test.ts, src/server/storage/types.ts, src/client/state/ledger.ts, src/client/components/results/derive.ts]
@@ -109,3 +109,49 @@ rather than discovering each other later.**
 - `src/client/**` cannot import `src/server/**`; mirror the type as the codebase already does.
 - Mutation-check the denominator specifically: delete the `repIndex` stamp and confirm a test goes
   red with `4 of 5` collapsing to `4 of 4`. That single assertion is the whole point of the ticket.
+
+## Attempt log
+
+- iter 1: green, zero implementation retries. Full suite 1079/62; both tsconfigs clean.
+- Persistence shape: an additive nested `annotations?: RunAnnotations` envelope mirrored on the
+  server `Run` (`storage/types.ts`) and the client `Run` (`state/ledger.ts`), exactly as
+  `derive.ts` already read it. `createRunOnceExecutor` stamps
+  `annotations: { ...run.annotations, repIndex }` on the same object it already stamps `origin`
+  onto — one POST per execution, warmup included.
+- **Storage and the route needed no logic change**, as the test-writer predicted and the
+  implementer then verified rather than assumed: `appendRun` stringifies the whole object and
+  `POST /api/runs` passes `req.body` through with no field whitelist. Only the types widened.
+- The test-writer deliberately annotated `Run` literals directly so the missing field was a
+  COMPILE failure (11 errors per tsconfig). Without that nothing would have forced `types.ts` to
+  change at all — storage and the route already pass unknown keys through at runtime. Worth
+  reusing whenever a "persist this field" ticket has a permissive runtime path.
+- Mutation-checked, both properties:
+  | mutation | result |
+  |---|---|
+  | drop the `repIndex` stamp | 6 red; rendered line collapses to `Arm C · 4 of 4 reps completed` — the exact production bug, reproduced |
+  | let an annotated run bypass the `origin === 'sweep'` check | 13 red across 4 files — the gate has no back door and the warmup exclusion is independently defended |
+- Scope held to `repIndex`. See "Deferred" below.
+
+## Deferred — what a corpus-metadata model still needs
+
+`utteranceId`, `category`, `corpusVersion` and `wer` remain unwritten, so two things stay empty
+no matter how many real sweeps run:
+
+- **"By utterance category"** renders zero rows — `groupByCategory` skips any run without
+  `annotations.category`.
+- Every provenance line ends **`corpus version unrecorded`**, and WER stays `not yet measured`.
+
+These are blocked on a design decision, not on plumbing: a `Recording` carries no category or
+utterance identity on either side. Landing them needs, at minimum:
+
+1. `Recording` (both mirrors) to carry `utteranceId` and a PRD §9 `category`, populated when the
+   corpus is loaded rather than when a Run executes.
+2. A corpus version stamped at load time and copied onto each Run's annotations by the runner,
+   the same way `repIndex` now is.
+3. A post-hoc WER write path — WER is scored against the reference transcript after the run, so
+   it needs an update route, which today's append-only Run store deliberately lacks. Decide
+   whether WER lives on the Run or in a separate append-only scores stream (the blind-comparison
+   stream is the precedent).
+
+The plumbing this ticket built is the template for all three — they are additive fields on the
+same envelope. **This should land with the operator's corpus work, not after it.**
