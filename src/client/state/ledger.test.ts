@@ -894,3 +894,60 @@ describe('export / import carries the three entities', () => {
     expect(second.runAggregates()).toEqual(first.runAggregates());
   });
 });
+
+/* --------------------------------------------------------------- ticket 028 */
+
+/**
+ * TICKET 028 — the Run gains an ANNOTATION ENVELOPE, and the gate does not.
+ *
+ * The batch runner knows which repetition it is executing; nothing carried that
+ * index onto the Run, so `buildProvenance`'s denominator (distinct ATTEMPTED
+ * rep indices) always collapsed onto its numerator and provenance could only
+ * ever read "N of N". The client Run mirrors src/server/storage/types.ts
+ * field-for-field, so the envelope has to exist on BOTH shapes.
+ *
+ * The envelope is DATA, never a second gate: `isAggregatableRun` is unchanged,
+ * and the warmup — repIndex 0, origin 'manual' — still fails it.
+ */
+describe('ticket 028 — the annotation envelope on a Run', () => {
+  it('the client Run declares an optional annotations envelope, mirroring the server', () => {
+    // TYPE-LEVEL: this object literal is assigned to `Run` directly. It does
+    // not compile until `Run` declares the field, which is the point.
+    const annotated: Run = { ...makeRun({ id: 'run-annotated' }), annotations: { repIndex: 4 } };
+    expect(annotated.annotations?.repIndex).toBe(4);
+
+    // ...and it is optional: every Run written before this change still is one.
+    const legacy: Run = makeRun({ id: 'run-legacy' });
+    expect(legacy.annotations).toBeUndefined();
+  });
+
+  it('annotations survive the ledger’s deep copies and the storage-adapter round trip', () => {
+    const { adapter } = fakeStorage();
+    const first = new RunLedger(adapter);
+    first.appendRun({ ...makeRun({ id: 'run-rep-2' }), annotations: { repIndex: 2 } });
+
+    expect(first.getRuns()[0]!.annotations?.repIndex).toBe(2);
+    expect(new RunLedger(adapter).getRuns()[0]!.annotations?.repIndex).toBe(2);
+  });
+
+  it('the gate is UNCHANGED: an annotated warmup is still not aggregatable', () => {
+    // The warmup as the batch runner writes it: repIndex 0, origin 'manual'.
+    const warmup: Run = {
+      ...makeRun({ id: 'run-warmup', origin: 'manual' }),
+      annotations: { repIndex: 0 },
+    };
+    expect(isAggregatableRun(warmup)).toBe(false);
+
+    // An annotation cannot rescue any other excluded run either...
+    const failed: Run = {
+      ...makeRun({ id: 'run-failed', status: 'failed', errors: ['tts timeout'] }),
+      annotations: { repIndex: 3 },
+    };
+    expect(isAggregatableRun(failed)).toBe(false);
+
+    // ...nor is it needed by one that already passes.
+    const retained: Run = { ...makeRun({ id: 'run-rep-1' }), annotations: { repIndex: 1 } };
+    expect(isAggregatableRun(retained)).toBe(true);
+    expect(isAggregatableRun(makeRun({ id: 'run-bare' }))).toBe(true);
+  });
+});

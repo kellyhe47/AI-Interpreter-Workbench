@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createStorage } from './index';
-import type { Storage } from './index';
+import type { Run, Storage } from './index';
 import {
   LAYOUT,
   exists,
@@ -155,6 +155,74 @@ describe('readLedger', () => {
 
     const ledger = await store.readLedger();
     expect(ledger.map((r) => r.id)).toEqual(['r-1', 'r-2']);
+  });
+});
+
+/* --------------------------------------------------------------- ticket 028 */
+
+/**
+ * TICKET 028 — the persisted Run gains an ANNOTATION ENVELOPE so a sweep's
+ * repetition index survives to the Results derivations. Without it
+ * `buildProvenance`'s denominator collapses onto its numerator and provenance
+ * can only ever read "N of N".
+ *
+ * The envelope is ADDITIVE and OPTIONAL at every layer: a pre-028 ledger line
+ * has no `annotations` key at all and must still read back, and a torn line
+ * must still cost exactly that line.
+ */
+/**
+ * A stored Run carrying the rep index the sweep executed it as. Annotated at
+ * `Run` on purpose: this does not compile until the persisted shape declares
+ * the field, which is half of what this ticket is.
+ */
+function annotatedRun(id: string, repIndex: number, origin: Run['origin'] = 'sweep'): Run {
+  return { ...makeRun({ id, origin }), annotations: { repIndex } };
+}
+
+describe('ticket 028 — run annotations ride the persisted envelope', () => {
+  it('appendRun stores annotations.repIndex; readLedger and listRuns give it back', async () => {
+    const stored = annotatedRun('r-rep-3', 3);
+    await store.appendRun(stored);
+
+    // The ledger line is the record, verbatim — annotations included.
+    const line = JSON.parse(nonEmptyLines(await ledgerText())[0]!) as Run;
+    expect(line.annotations?.repIndex).toBe(3);
+    expect(line).toEqual(stored);
+
+    const [fromLedger] = await store.readLedger();
+    expect(fromLedger!.annotations?.repIndex).toBe(3);
+
+    // ...and the runs/<id>.json half agrees, which is what GET /api/runs reads.
+    const [fromList] = await store.listRuns();
+    expect(fromList!.annotations?.repIndex).toBe(3);
+    expect(fromList).toEqual(stored);
+  });
+
+  it('the warmup is persisted as repIndex 0 with origin manual, distinct from rep 1', async () => {
+    await store.appendRun(annotatedRun('r-warmup', 0, 'manual'));
+    await store.appendRun(annotatedRun('r-rep-1', 1));
+
+    const ledger = await store.readLedger();
+    expect(ledger.map((r) => [r.id, r.origin, r.annotations?.repIndex])).toEqual([
+      ['r-warmup', 'manual', 0],
+      ['r-rep-1', 'sweep', 1],
+    ]);
+  });
+
+  it('is ADDITIVE: a pre-028 line without annotations still reads, and a torn line still costs one line', async () => {
+    // A line written before this change: no `annotations` key at any depth.
+    const legacy = makeRun({ id: 'r-legacy' });
+    expect(JSON.stringify(legacy)).not.toContain('annotations');
+    await store.appendRun(legacy);
+    await store.appendRun(annotatedRun('r-annotated', 2));
+    // A process killed part-way through writing a third line.
+    await fs.appendFile(LAYOUT.ledger(base), '{"id":"r-torn","annotations":{"repInd');
+
+    const ledger = await store.readLedger();
+    expect(ledger.map((r) => r.id)).toEqual(['r-legacy', 'r-annotated']);
+    expect(ledger[0]!.annotations).toBeUndefined();
+    expect(ledger[0]).toEqual(legacy);
+    expect(ledger[1]!.annotations?.repIndex).toBe(2);
   });
 });
 

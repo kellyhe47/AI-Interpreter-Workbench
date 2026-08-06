@@ -6,7 +6,7 @@ source: qa
 depends_on: []
 touches: [src/client/batch/runner.ts, src/client/batch/runner.test.ts, src/server/storage/types.ts, src/client/state/ledger.ts, src/client/components/results/derive.ts]
 iterations: 0
-test_files: []
+test_files: [src/harness/repIndexRoundTrip.test.ts, src/client/batch/runner.test.ts, src/client/state/ledger.test.ts, src/server/storage/runs.test.ts, src/server/routes/runs.test.ts, src/client/components/results/derive.test.ts]
 branch: ""
 ---
 

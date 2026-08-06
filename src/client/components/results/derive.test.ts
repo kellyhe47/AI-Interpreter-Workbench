@@ -206,6 +206,45 @@ describe('provenance — ACTUAL N, never intended N', () => {
     expect(arm.provenance.line).toContain(String(SHORT_SWEEP_INTENDED_REPS));
   });
 
+  /**
+   * TICKET 028 REGRESSION GUARD — expected to pass BEFORE the change as well.
+   *
+   * Every Run written before this ticket carries no annotations at all. Once
+   * the sweep starts stamping `repIndex`, those older Runs must keep deriving
+   * exactly what they derive today: the counts fall back to the gate-passing
+   * run count, and no existing figure moves.
+   */
+  it('regression guard — Runs carrying NO annotations still derive today’s fallback', () => {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: 'rec-bare' }));
+    // Three gate-passing runs and one failed one, none of them annotated.
+    [700, 900, 1200].forEach((ms, i) => {
+      ledger.appendRun(
+        runWithLatency(ms, { id: `run-bare-${i + 1}`, recordingId: 'rec-bare', annotations: undefined }),
+      );
+    });
+    ledger.appendRun(
+      runWithLatency(5_000, {
+        id: 'run-bare-failed',
+        recordingId: 'rec-bare',
+        status: 'failed',
+        errors: ['tts stage timed out'],
+        annotations: undefined,
+      }),
+    );
+
+    const arm = deriveExperimentAggregates(ledger).perArm['B']!;
+    expect(arm.n).toBe(3);
+    // No rep index anywhere, so both counts fall back to the ACTUAL count and
+    // the line reads '3 of 3' — the pre-028 behaviour, unchanged.
+    expect(arm.provenance.completedReps).toBe(3);
+    expect(arm.provenance.intendedReps).toBe(3);
+    expect(arm.provenance.line).toContain('3 of 3 reps completed');
+    // ...and the figures beside it are the three survivors', not the four.
+    expect(arm.p50Ms).toBe(900);
+    expect(arm.p95Ms).toBe(1200);
+  });
+
   it('carries the PRD §8 fields: utterances, reps, pinned endpointing, corpus version', () => {
     const ledger = new RunLedger();
     seedCategorySweep(ledger);

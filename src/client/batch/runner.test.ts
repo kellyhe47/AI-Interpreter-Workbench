@@ -665,6 +665,14 @@ describe('batch runner — the summary reports actual reps against intended', ()
 // The last criterion: a sweep run goes through ticket 008's runOnce, not a
 // second implementation of it (PRD §8 "There is no separate harness").
 
+/**
+ * TICKET 028 — the Run as it reaches the ledger, with the annotation envelope
+ * the Results derivations read. Declared locally (the same shape ReplayView's
+ * tests declare) rather than imported from the results layer: the batch runner
+ * knows about a repetition index, not about a category or a WER.
+ */
+type StampedRun = Run & { annotations?: { repIndex?: number } };
+
 const RECORDING: Recording = {
   id: 'rec-1',
   label: 'clip one',
@@ -754,5 +762,97 @@ describe('createRunOnceExecutor — the sweep drives the manual run path', () =>
     // The ledger gate accepts it — which is the whole point of the sweep.
     expect(isAggregatableRun(retained)).toBe(true);
     expect(posted[1]).toEqual(retained);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 028 — the repIndex the executor is handed must reach the ledger.
+//
+// `createRunOnceExecutor` already receives `request.repIndex` and already
+// stamps `request.origin` onto the Run on its way to `create()`; it dropped the
+// index. Nothing downstream can recover it, so `buildProvenance`'s denominator
+// (`intendedReps`, the distinct rep indices a sweep ATTEMPTED) always collapsed
+// onto its numerator and provenance could only ever read "N of N" — a sweep
+// that lost reps to failures reporting as clean.
+
+/** The runOnce dependency bag over a fixture transport. Touches no network. */
+function runOnceHarness() {
+  const wav = writeWav(ramp(SAMPLE_RATE / 20), SAMPLE_RATE);
+  const posted: StampedRun[] = [];
+  let nextId = 0;
+
+  const recordings: RecordingsClient = {
+    list: async () => [RECORDING],
+    get: async (id) => {
+      if (id !== RECORDING.id) throw new ApiError('recording-not-found', 404, 'no such id');
+      return RECORDING;
+    },
+    getAudio: async () => wav,
+    create: async () => RECORDING,
+    patchLabel: async () => RECORDING,
+    remove: async () => RECORDING,
+  };
+  const runs: RunsClient = {
+    create: async (created: Run) => {
+      posted.push(created);
+      return created;
+    },
+    list: async () => posted,
+    getAudio: async () => new Uint8Array(0),
+  };
+  const deps: RunnerDeps = {
+    recordings,
+    runs,
+    createTransport: () =>
+      new FixtureTransport({ armId: 'fx', kind: 'cascade', script: utteranceScript() }),
+    now: () => Date.now(),
+    newId: () => `run-${++nextId}`,
+  };
+  return { deps, posted };
+}
+
+describe('createRunOnceExecutor — the executed repIndex reaches the ledger', () => {
+  it('stamps every executed repIndex onto the Run it POSTs, and onto the retained runs', async () => {
+    const { deps, posted } = runOnceHarness();
+
+    const summary = await drain(
+      run({
+        recordingIds: ['rec-1'],
+        configurations: ONE_CONFIG,
+        reps: 3, // one discarded warmup, then reps 1..3
+        execute: createRunOnceExecutor(deps),
+      }),
+    );
+
+    // One POST per execution, each carrying the index it ran as. `reps` means
+    // RETAINED reps, so the warmup is the extra rep 0 — never one of the three.
+    expect(posted.map((r) => r.annotations?.repIndex)).toEqual([0, 1, 2, 3]);
+    expect(posted.map((r) => r.origin)).toEqual(['manual', 'sweep', 'sweep', 'sweep']);
+
+    // ...and the record the summary hands back is the record that was stored.
+    expect((summary.runs as StampedRun[]).map((r) => r.annotations?.repIndex)).toEqual([1, 2, 3]);
+  });
+
+  it('the warmup Run carries repIndex 0 and STILL fails the aggregation gate', async () => {
+    const { deps, posted } = runOnceHarness();
+
+    await drain(
+      run({
+        recordingIds: ['rec-1'],
+        configurations: ONE_CONFIG,
+        reps: 2,
+        execute: createRunOnceExecutor(deps),
+      }),
+    );
+
+    const warmup = posted[0]!;
+    expect(warmup.annotations?.repIndex).toBe(0);
+    // The annotation must not become a second route into the aggregate: the
+    // gate is `isAggregatableRun` and nothing else, and origin still decides.
+    expect(warmup.origin).toBe('manual');
+    expect(isAggregatableRun(warmup)).toBe(false);
+    for (const retained of posted.slice(1)) {
+      expect(isAggregatableRun(retained)).toBe(true);
+    }
   });
 });

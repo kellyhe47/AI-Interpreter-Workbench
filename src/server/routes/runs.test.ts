@@ -90,6 +90,37 @@ describe('POST /api/runs + GET /api/runs', () => {
     expect(ledger[0]).toEqual(first);
     expect(ledger[1]).toEqual(second);
   });
+
+  /**
+   * TICKET 028 — the sweep's repetition index rides the POSTed Run. The router
+   * stores the record VERBATIM, so the only thing that has to hold here is that
+   * "verbatim" includes the annotation envelope, all the way to ledger.jsonl.
+   */
+  it('ticket 028: annotations.repIndex survives POST → ledger.jsonl → GET', async () => {
+    await boot();
+    // Annotated at `Run`: this does not compile until the persisted shape
+    // declares the field.
+    const warmup: Run = {
+      ...makeRun({ id: 'run-warmup', origin: 'manual' }),
+      annotations: { repIndex: 0 },
+    };
+    const rep2: Run = { ...makeRun({ id: 'run-rep-2', origin: 'sweep' }), annotations: { repIndex: 2 } };
+
+    for (const run of [warmup, rep2]) {
+      const res = await postRun(api, run);
+      expect(res.status).toBe(201);
+      expect((await res.json()) as Run).toEqual(run);
+    }
+
+    const listed = await listRuns();
+    expect(listed.map((r) => [r.id, r.annotations?.repIndex]).sort()).toEqual([
+      ['run-rep-2', 2],
+      ['run-warmup', 0],
+    ]);
+
+    const ledger = await api.storage.readLedger();
+    expect(ledger.map((r) => r.annotations?.repIndex)).toEqual([0, 2]);
+  });
 });
 
 describe('GET /api/runs/:id/audio', () => {
