@@ -18,6 +18,15 @@
  * carried-over context would make run 2 a different measurement from run 1 —
  * so it renders as a locked field with no operable element inside it, not as a
  * disabled select, which would read as a knob someone could unlock.
+ *
+ * Ticket 024 — A CONTROL THAT CANNOT ACT DOES NOT LOOK ACTIONABLE (PRD §17
+ * 25c, the pattern Results' 'Run sweep' already models). Both actions need a
+ * Recording to act ON, so with none selected they carry the real `disabled`
+ * attribute plus a title naming the missing precondition, rather than
+ * accepting a click and doing nothing — silent inaction reads as a broken
+ * button. The gate is the SELECTION and nothing else: a run already in flight
+ * does not disable Run, because whether the operator may start a run is not a
+ * fact about the previous request.
  */
 
 import type { CSSProperties, ReactElement } from 'react';
@@ -45,6 +54,9 @@ export interface RunConfigPanelProps {
 
 const TITLE = 'Run configuration';
 const NO_SELECTION = 'select a Recording to run against';
+
+/** Why the actions are inert: the missing precondition, not a missing handler. */
+const NO_SELECTION_HINT = 'Select a Recording in the library to run against';
 
 const REALTIME = 'Realtime';
 const CASCADE = 'Cascade';
@@ -132,18 +144,26 @@ function toggleButtonStyle(active: boolean): CSSProperties {
   };
 }
 
-function actionButtonStyle(primary: boolean): CSSProperties {
+function actionButtonStyle(primary: boolean, disabled: boolean): CSSProperties {
   return {
     appearance: 'none',
-    border: primary ? '1px solid var(--btn-primary-bg)' : '1px solid var(--border-default)',
+    border:
+      primary && !disabled ? '1px solid var(--btn-primary-bg)' : '1px solid var(--border-default)',
     borderRadius: 'var(--radius-md)',
-    background: primary ? 'var(--btn-primary-bg)' : 'var(--surface-card)',
-    color: primary ? 'var(--text-inverse)' : 'var(--text-body)',
+    // Disabled reads as muted-on-sunken — the same vocabulary the rest of the
+    // shell uses for an inert control. The `disabled` attribute, not the look,
+    // is what actually stops a click reaching an executor seam.
+    background: disabled
+      ? 'var(--surface-sunken)'
+      : primary
+        ? 'var(--btn-primary-bg)'
+        : 'var(--surface-card)',
+    color: disabled ? 'var(--text-muted)' : primary ? 'var(--text-inverse)' : 'var(--text-body)',
     fontFamily: 'inherit',
     fontSize: 'var(--text-sm)',
     fontWeight: 'var(--weight-medium)',
     padding: 'var(--space-2) var(--space-4)',
-    cursor: 'pointer',
+    cursor: disabled ? 'not-allowed' : 'pointer',
   };
 }
 
@@ -164,6 +184,9 @@ function tagPillStyle(named: boolean): CSSProperties {
 
 export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement {
   const { config } = props;
+
+  /** No Recording to act on — the precondition both actions need (ticket 024). */
+  const noSelection = props.recordingLabel === null;
 
   // The single source of truth for membership, read fresh on every render.
   const tag = deriveArmTag({
@@ -187,7 +210,7 @@ export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement
           {TITLE}
         </span>
         <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-sm)' }}>
-          {props.recordingLabel === null ? NO_SELECTION : `against “${props.recordingLabel}”`}
+          {noSelection ? NO_SELECTION : `against “${props.recordingLabel}”`}
         </span>
         {/* A READOUT: not a button, and holding no control. */}
         <span data-derived-tag={tag} style={{ marginLeft: 'auto', ...tagPillStyle(tag !== 'ad-hoc') }}>
@@ -262,10 +285,24 @@ export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement
           paddingTop: 'var(--space-3)',
         }}
       >
-        <button type="button" onClick={props.onRun} style={actionButtonStyle(true)}>
+        {/* SELECTION is the gate, and the only one: an in-flight run leaves
+            both of these alone (ticket 024). */}
+        <button
+          type="button"
+          onClick={props.onRun}
+          disabled={noSelection}
+          title={noSelection ? NO_SELECTION_HINT : undefined}
+          style={actionButtonStyle(true, noSelection)}
+        >
           {RUN}
         </button>
-        <button type="button" onClick={props.onBatchSweep} style={actionButtonStyle(false)}>
+        <button
+          type="button"
+          onClick={props.onBatchSweep}
+          disabled={noSelection}
+          title={noSelection ? NO_SELECTION_HINT : undefined}
+          style={actionButtonStyle(false, noSelection)}
+        >
           {BATCH_SWEEP}
         </button>
         <span data-pinned-note="" style={{ ...noteStyle, flex: 1, minWidth: 240 }}>

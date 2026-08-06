@@ -19,9 +19,22 @@
  *
  * Deletion is SOFT: the row disappears, the Recording's Runs do not. A Run
  * must always be able to reach the input that produced it.
+ *
+ * Ticket 020 — A FAILED LOAD MUST NOT BORROW THE EMPTY STATE (PRD §12).
+ * A storage/load failure has to surface clearly, and "clearly" means
+ * DISTINGUISHABLE FROM EMPTINESS. The two states answer different questions —
+ * "nothing has been recorded yet" versus "the store could not be read" — and
+ * they demand opposite next actions: record a clip, or fix the backend. When
+ * the QA repro (proxy ECONNREFUSED → HTTP 500, empty body) rendered the
+ * reassuring "No Recordings yet", an operator concluded the app was working
+ * and simply empty. So the failure gets its OWN region, [data-recordings-error],
+ * carrying the operator-readable failure, the underlying message and a retry —
+ * and rule 1's empty state is NOT rendered beside it. Rendering both would
+ * reproduce exactly the confusion the ticket exists to remove.
  */
 
 import { useState, type CSSProperties, type ReactElement } from 'react';
+import { ApiError } from '../../replay/recordingsClient';
 import type { Recording } from '../../state/ledger';
 
 export interface RecordingsLibraryProps {
@@ -33,6 +46,15 @@ export interface RecordingsLibraryProps {
   onRename: (recordingId: string, label: string) => void;
   /** Only ever wired for `origin: 'mic'` rows. */
   onDelete: (recordingId: string) => void;
+  /**
+   * The rejection the last recordings load ended in, or null when it
+   * succeeded. NOT a boolean: the underlying message is part of what the
+   * operator needs, and the ApiError's `code` is what the error region is
+   * marked with.
+   */
+  loadError: unknown;
+  /** Re-issues recordings.list(). Wired to the retry inside the error state. */
+  onRetry: () => void;
 }
 
 /* ------------------------------------------------------------------ copy -- */
@@ -53,6 +75,22 @@ const EDIT_LABEL = 'Edit label';
 const DELETE_RECORDING = 'Delete recording';
 const LABEL_INPUT = 'Recording label';
 
+/**
+ * The failure copy. It names the thing that could not be done — read the
+ * Recordings — and then, deliberately, says what an empty library would NOT
+ * say: this is not emptiness. The underlying message follows verbatim; a
+ * swallowed cause leaves the operator with nothing to act on.
+ */
+const ERROR_TITLE = "Couldn't load Recordings";
+const ERROR_BODY =
+  'The Recordings store could not be reached, so nothing can be listed. This is ' +
+  'not an empty library — the library is unknown until the load succeeds.';
+const ERROR_DETAIL_LABEL = 'reported:';
+const RETRY = 'Retry';
+
+/** Marker for a rejection that is not an ApiError and so carries no code. */
+const UNTYPED_ERROR_CODE = 'load-failed';
+
 /* ---------------------------------------------------------------- format -- */
 
 /** M:SS — the library's duration column. */
@@ -61,6 +99,23 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+/**
+ * The marker the error region is tagged with. recordingsClient types every
+ * failure (PRD §12), so an ApiError hands over its `code` directly; anything
+ * else — `fetch` itself throwing, say — still gets a non-empty marker rather
+ * than an empty attribute that reads as "no failure".
+ */
+function errorCode(cause: unknown): string {
+  return cause instanceof ApiError ? cause.code : UNTYPED_ERROR_CODE;
+}
+
+/** The underlying message, surfaced rather than swallowed. */
+function errorDetail(cause: unknown): string {
+  if (cause instanceof Error && cause.message.length > 0) return cause.message;
+  const rendered = String(cause);
+  return rendered.length > 0 ? rendered : UNTYPED_ERROR_CODE;
 }
 
 /* ---------------------------------------------------------------- styles -- */
@@ -94,6 +149,30 @@ const emptyStyle: CSSProperties = {
   flexDirection: 'column',
   gap: 'var(--space-1)',
   textAlign: 'center',
+};
+
+/** Deliberately NOT emptyStyle: the two states must not look alike. */
+const errorStyle: CSSProperties = {
+  padding: 'var(--space-5) var(--space-4)',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 'var(--space-2)',
+  alignItems: 'flex-start',
+  textAlign: 'left',
+  background: 'var(--negative-soft)',
+  borderBottom: '1px solid var(--border-default)',
+};
+
+const retryButtonStyle: CSSProperties = {
+  border: '1px solid var(--negative)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--surface-card)',
+  color: 'var(--negative)',
+  fontFamily: 'inherit',
+  fontSize: 'var(--text-sm)',
+  fontWeight: 'var(--weight-medium)',
+  padding: 'var(--space-1) var(--space-3)',
+  cursor: 'pointer',
 };
 
 const monoStyle: CSSProperties = {
@@ -212,11 +291,47 @@ export default function RecordingsLibrary(props: RecordingsLibraryProps): ReactE
     if (next.length > 0) props.onRename(recordingId, next);
   }
 
+  // THREE-WAY, never two-and-a-half: failed, empty, listed. The failure branch
+  // comes FIRST and excludes the other two — an error rendered beside "No
+  // Recordings yet" is the ticket-020 confusion, not a fix for it.
+  const failed = props.loadError !== null && props.loadError !== undefined;
+
   return (
     <div data-recordings-library="" style={panelStyle}>
       <div style={headerStyle}>{TITLE}</div>
 
-      {props.recordings.length === 0 ? (
+      {failed ? (
+        <div
+          data-recordings-error=""
+          data-error-code={errorCode(props.loadError)}
+          role="alert"
+          style={errorStyle}
+        >
+          <span style={{ fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-sm)' }}>
+            {ERROR_TITLE}
+          </span>
+          <span
+            style={{
+              color: 'var(--text-secondary)',
+              fontSize: 'var(--text-xs)',
+              lineHeight: 'var(--leading-normal)',
+            }}
+          >
+            {ERROR_BODY}
+          </span>
+          <span style={monoStyle}>
+            {`${ERROR_DETAIL_LABEL} ${errorDetail(props.loadError)}`}
+          </span>
+          <button
+            type="button"
+            data-recordings-retry=""
+            onClick={props.onRetry}
+            style={retryButtonStyle}
+          >
+            {RETRY}
+          </button>
+        </div>
+      ) : props.recordings.length === 0 ? (
         <div data-recordings-empty="" style={emptyStyle}>
           <span style={{ fontWeight: 'var(--weight-semibold)', fontSize: 'var(--text-sm)' }}>
             {EMPTY_TITLE}
