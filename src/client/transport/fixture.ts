@@ -40,6 +40,7 @@
  */
 
 import type { ProviderTriple } from '../../core/arms';
+import { SAMPLE_RATE } from '../../core/protocol';
 import type {
   ConnectionState,
   InterpreterTransport,
@@ -177,17 +178,87 @@ export class FixtureTransport implements InterpreterTransport {
 }
 
 /* ---------------------------------------------------------------------------
- * Ticket 008 — STUB. Replay: a script derived from a Recording.
+ * Ticket 008 — Replay: a script derived from a Recording.
+ *
+ * THE TIMELINE IS ANCHORED ON THE RECORDING, not on constants. Every event
+ * lands at `speechEndMs + k * u`, where u is a slice of the clip's silence
+ * tail. Two consequences the tests pin:
+ *   - nothing answers before the clip's speech has ended, which is the only
+ *     ordering a real pipeline can produce; and
+ *   - a different Recording moves the whole timeline with it, so a fixture
+ *     replay of a short clip finishes early and one of a long clip does not.
+ * `t` is deliberately omitted from the timing marks: FixtureTransport stamps
+ * Date.now() at fire time, so the marks carry real (virtual) clock values in
+ * fire order rather than a second, hand-written schedule that could disagree
+ * with `at`.
  * ------------------------------------------------------------------------ */
 
+const REPLAY_SOURCE_TEXT = 'hello there';
+const REPLAY_TARGET_TEXT = 'hola qué tal';
+
+/** A recognisable non-silent chunk — content is irrelevant, presence is not. */
+function fixturePcm(samples: number): Int16Array {
+  return Int16Array.from({ length: samples }, (_, i) =>
+    Math.round(8000 * Math.sin((2 * Math.PI * 440 * i) / SAMPLE_RATE)),
+  );
+}
+
 /** The utterance timeline a Recording would produce. Every `at` >= speechEndMs. */
-export function replayFixtureScript(_opts: ReplayFixtureOptions): FixtureScriptEvent[] {
-  throw new Error('not implemented');
+export function replayFixtureScript(opts: ReplayFixtureOptions): FixtureScriptEvent[] {
+  const { recording } = opts;
+  const kind = opts.kind ?? 'cascade';
+  const sourceText = opts.sourceText ?? REPLAY_SOURCE_TEXT;
+  const targetText = opts.targetText ?? REPLAY_TARGET_TEXT;
+
+  const base = recording.speechEndMs;
+  const tail = Math.max(recording.durationMs - recording.speechEndMs, 0);
+  /** One step of the answer timeline, derived from the clip's silence tail. */
+  const u = Math.max(1, Math.round(tail / 8));
+  const at = (k: number): number => base + k * u;
+
+  const sourcePartial = sourceText.split(' ')[0] ?? sourceText;
+  const targetDelta = targetText.split(' ')[0] ?? targetText;
+  const chunk = (): Int16Array => fixturePcm(Math.max(1, Math.round((SAMPLE_RATE * u) / 1000)));
+
+  const marks: FixtureScriptEvent[] =
+    kind === 'realtime'
+      ? [
+          { at: at(0), type: 'timing', event: 'speech_end', utt: 0 },
+          { at: at(1), type: 'timing', event: 'server_speech_stopped', utt: 0 },
+          { at: at(5), type: 'timing', event: 'first_audio_delta', utt: 0 },
+        ]
+      : [
+          { at: at(0), type: 'timing', event: 'speech_end', utt: 0 },
+          { at: at(1), type: 'timing', event: 'vad_fired', utt: 0, stage: 'stt' },
+          { at: at(3), type: 'timing', event: 'stt_final', utt: 0, stage: 'stt' },
+          { at: at(4), type: 'timing', event: 'mt_first_token', utt: 0, stage: 'mt' },
+          { at: at(5), type: 'timing', event: 'tts_first_byte', utt: 0, stage: 'tts' },
+        ];
+
+  const script: FixtureScriptEvent[] = [
+    ...marks,
+    { at: at(2), type: 'sourceText', kind: 'partial', text: sourcePartial, utt: 0 },
+    { at: at(3), type: 'sourceText', kind: 'final', text: sourceText, utt: 0 },
+    { at: at(4), type: 'targetText', kind: 'delta', text: targetDelta, utt: 0 },
+    { at: at(5), type: 'audio', pcm: chunk(), utt: 0 },
+    { at: at(6), type: 'targetText', kind: 'final', text: targetText, utt: 0 },
+    { at: at(6), type: 'audio', pcm: chunk(), utt: 0 },
+    { at: at(7), type: 'utteranceComplete', record: { utt: 0 } },
+  ];
+
+  // Sorted here as well as in start(): callers read the script directly.
+  return script.sort((a, b) => a.at - b.at);
 }
 
 /** A FixtureTransport pre-loaded with `replayFixtureScript(opts)`. */
 export function createReplayFixtureTransport(
-  _opts: ReplayFixtureOptions & { armId?: string; providers?: ProviderTriple },
+  opts: ReplayFixtureOptions & { armId?: string; providers?: ProviderTriple },
 ): FixtureTransport {
-  throw new Error('not implemented');
+  return new FixtureTransport({
+    armId: opts.armId ?? `fixture-replay:${opts.recording.id}`,
+    kind: opts.kind ?? 'cascade',
+    label: 'Fixture (replay)',
+    script: replayFixtureScript(opts),
+    providers: opts.providers,
+  });
 }
