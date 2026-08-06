@@ -1,10 +1,10 @@
 ---
 id: 027
-title: Failed runs are invisible in Results — absent from By Recording, uncounted in provenance
+title: A failed run leaves no trace in Results — absorbed into its config row, failedCount never rendered
 status: pending
 source: qa
 depends_on: []
-touches: [src/client/views/ResultsView.tsx, src/client/views/ResultsView.test.tsx, src/client/state/ledger.ts, src/client/state/ledger.test.ts]
+touches: [src/client/views/ResultsView.tsx, src/client/views/ResultsView.test.tsx]
 iterations: 0
 test_files: []
 branch: ""
@@ -12,90 +12,75 @@ branch: ""
 
 ## Repro
 
-QA iteration 2, flow H (Results, both tabs, populated). Seeded via the real API against
-Recording `rec_mshzkyej001_c403e231` ("clinic intake · corpus"):
+QA iteration 2, flow H. Seeded via the real API against Recording `rec_mshzkyej001_c403e231`
+("clinic intake · corpus"):
 
-| run id | arm | origin | status |
+| run id | derived arm | origin | status |
 |---|---|---|---|
 | `run-b-sweep-1` | B | sweep | complete |
 | `run-c-sweep-1` | C | sweep | complete |
-| `run-adhoc-1` | derives ad-hoc | manual | complete |
+| `run-adhoc-1` | ad-hoc | manual | complete |
 | `run-failed-1` | B | sweep | **failed** |
 
-1. Start the API server and the client; seed the four Runs above.
-2. Results → **By Recording & category**.
-
-## Expected
-
-PRD §7: *"**Failed runs are saved, visible, and excluded from every aggregate.** … it belongs in
-the ledger **and in the per-Recording view**."*
-
-The design mock's By Recording table carries a `failed`-status row
-(`rrow('pharmacy dosage test', 'ad-hoc', 'manual', '—', '—', 'failed')`) — dashes for the
-figures, the status in the last column. Exclusion is a *label*, not a deletion.
-
-PRD §8, provenance: reports ACTUAL N. Two sweep attempts were made on Arm B against this
-Recording; one completed.
+Results → **By Recording & category**.
 
 ## Observed
 
-**By Recording — includes ad-hoc runs, excluded from experiments** renders exactly **three** rows:
+Three rows. `run-failed-1` produces no row of its own and no mark on any row:
 
 ```
-clinic intake · corpus | cascade · …→eleven_multilingual_v2 | ad-hoc | manual | 1 | 1.19 s | 1.19 s | $0.015 | excluded · ad-hoc
-clinic intake · corpus | cascade · …→gpt-4o-mini-tts        | Arm B  | sweep  | 1 | 1.05 s | 1.05 s | $0.015 | in experiments
-clinic intake · corpus | cascade · …→eleven_flash_v2_5      | Arm C  | sweep  | 1 | 0.93 s | 0.93 s | $0.015 | in experiments
+clinic intake · corpus | …→eleven_multilingual_v2 | ad-hoc | manual | 1 | 1.19 s | 1.19 s | $0.015 | excluded · ad-hoc
+clinic intake · corpus | …→gpt-4o-mini-tts        | Arm B  | sweep  | 1 | 1.05 s | 1.05 s | $0.015 | in experiments
+clinic intake · corpus | …→eleven_flash_v2_5      | Arm C  | sweep  | 1 | 0.93 s | 0.93 s | $0.015 | in experiments
 ```
 
-`run-failed-1` appears **nowhere**. There is no failed row and no indication that a run against
-this Recording failed. The manual/ad-hoc exclusion case is handled correctly (`excluded · ad-hoc`)
-— it is specifically the `status: 'failed'` case that is dropped rather than labelled.
+## Diagnosis — a render gap, not a model gap
 
-Consequently the Arm B row reads `N = 1` with nothing to suggest that figure came from one of two
-attempts, and the Experiments tab's Arm B provenance line reads:
+`groupByRecording` (`src/client/components/results/derive.ts:469`) groups on
+`(recordingId × configurationKey)`, which is deliberate and correct. `run-failed-1` shares Arm B's
+configuration, so it is **absorbed into the Arm B row** rather than dropped. The row model already
+carries everything needed:
 
-```
-Arm B · 1 utterances · 1 of 1 reps completed · endpointing pinned 500 ms · turn-final trigger · corpus version unrecorded
-```
+- `runCount: 2` vs `n: 1` — the group holds two runs, one measured
+- `failedCount: 1`
+- `exclusionReasons` includes `'failed'`
 
-`1 of 1` for a cell with two sweep attempts. A reader cannot tell a clean 1/1 from a 1/2 with a
-failure, which is exactly the provenance failure mode AGENTS.md names: *"A line that claims 5
-while aggregating 4 is the failure mode this project exists to prevent"* — here the denominator
-is understated rather than the numerator overstated, and the effect is the same: the reported
-line hides that something failed.
+`ResultsView.tsx:714` renders only `excludedFromExperiments`, which is **false** for this group
+(the complete Arm B run passes the gate), so the row prints `in experiments` and every failure
+signal in the model is discarded at the view boundary.
 
-## Scope of the defect
-
-The data is **not** lost, and no wrong number is reported:
-
-- Replay's runs list shows all four cards including the failed one, with the stage-named notice
-  *"tts stage timed out — run saved as failed, excluded from every aggregate"*.
-- The aggregation gate is correct: the failed run is properly excluded from every percentile,
-  cost figure and delta on the Experiments tab.
-
-The defect is confined to the **Results** view's secondary tab and its provenance denominator.
+So the figures are all correct — `n = 1`, p50 over the one measured run, cost over the measured
+runs only. What is missing is any indication that a second attempt against this configuration
+failed. PRD §7 requires failed runs to be *"saved, visible, and excluded from every aggregate"*;
+they are saved and excluded, but not visible here.
 
 ## Acceptance criteria
 
-- [ ] A `failed` Run appears as a row in **By Recording & category**, grouped like any other
-      configuration cell for that Recording
-- [ ] Its percentile and cost cells render `—` (never `0`, and never a figure) — a failed run has
-      no measurement, and a zero reads as one
-- [ ] Its experiment-status cell names the exclusion reason distinctly from the ad-hoc case
-      (e.g. `excluded · failed` alongside the existing `excluded · ad-hoc`)
-- [ ] `isAggregatableRun` is **unchanged** — this ticket changes what is *displayed*, never what
-      is aggregated. Every existing exclusion assertion stays green.
-- [ ] The Experiments provenance line's denominator counts **attempted** sweep reps for the cell,
-      so a cell with one completed and one failed sweep run reads `1 of 2 reps completed` while
-      the p50 beside it is still computed over the 1
-- [ ] With no failed runs present, every existing provenance string is byte-identical to today's
-      (`1 of 1 reps completed` stays `1 of 1`)
+- [ ] A group containing at least one `failed` Run renders its `failedCount` in the row — the
+      failure is visible without leaving Results
+- [ ] The distinction between `n` (measured) and `runCount` (attempted) is legible on such a row,
+      so `n = 1` cannot be read as "one attempt, clean"
+- [ ] A group that is BOTH gate-passing and partially failed shows both facts: it is still
+      `in experiments`, and it still shows the failure. These are not mutually exclusive and the
+      row must not have to choose.
+- [ ] A group whose runs are ALL failed keeps its existing `excluded · failed` treatment and
+      renders `—` for p50/p95/cost — never `0`
+- [ ] `groupByRecording`, `isAggregatableRun` and every figure are **unchanged**. This ticket
+      changes only what the view renders from an already-correct model; no aggregate moves.
+- [ ] A ledger with no failed runs renders byte-identically to today
 
 ## Notes for the implementer
 
-- The two changes are independent and both load-bearing; mutation-check them separately.
-- Deriving the denominator must not reach past the gate — count sweep-origin runs whose
-  configuration derives the same named arm, regardless of `status`, and keep the numerator on
-  the gate-passing set.
-- Grouping must not resurrect a failed run into a percentile input via a shared code path;
-  assert the p50 for a Recording is unchanged by adding a failed run to the ledger.
+- Do **not** give a failed run its own row. The `(recording × configuration)` grouping is
+  documented at `derive.ts:465` and is the right model — a failed run of Arm B's configuration is
+  a fact *about that cell*, not a separate configuration.
+- Mutation-check the "both gate-passing and failed" case specifically: it is the case the current
+  code gets wrong, and a fix that only handles the all-failed group would look green against a
+  carelessly written test.
+
+## See also
+
+Ticket **028** — the same failure is also invisible in the Experiments provenance line
+(`1 of 1 reps completed` for a cell with two attempts), but for an unrelated and deeper reason:
+nothing ever writes `repIndex` onto a persisted Run. That is a separate defect with a separate
+fix; this ticket is the view-layer one and does not resolve it.

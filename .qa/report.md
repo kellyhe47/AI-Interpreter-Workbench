@@ -13,8 +13,9 @@ iteration: 2 of max 6
 **Designs:** `design_handoff_interpreter_workbench/README.md` + `interpreter-workbench-v2.dc.html`. PRD wins on conflict.
 *(Iteration 1's report is archived at `.qa/report-iter1.md`; the v1 report at `.qa/report-v1.md`.)*
 
-**Verdict: NOT clean.** One finding, MODERATE, filed as ticket **027**. All seven iteration-1
-fixes verified in the running app. No regressions.
+**Verdict: NOT clean.** Two findings — **F10 HIGH** (ticket 028) and **F9 MODERATE** (ticket 027).
+All seven iteration-1 fixes verified in the running app. No regressions; both findings are
+pre-existing gaps this pass uncovered rather than anything the iteration-1 fixes broke.
 
 ## Part A — re-verification of the seven fixes
 
@@ -83,35 +84,82 @@ fixes verified in the running app. No regressions.
 
 ## Findings
 
+### F10 — Run annotations are never persisted · **HIGH** · ticket 028
+
+*Found by reading the write path after F9's provenance symptom did not match its apparent cause,
+then confirmed against the running app.*
+
+**Expected** (PRD §8, and AGENTS.md's statement of it): *"Provenance reports ACTUAL N, never
+intended N. … A line that claims 5 while aggregating 4 is the failure mode this project exists to
+prevent."* PRD §9: the six utterance categories are the analytical grouping.
+
+**Observed:** `AnnotatedRun`'s `annotations` envelope — `repIndex`, `utteranceId`, `category`,
+`corpusVersion`, `wer` — is read by every derivation in Results and **written by nothing outside
+test fixtures**. The persisted `Run` has no `annotations` field, and `category` / `utteranceId` /
+`corpusVersion` appear nowhere in `src/server` or `src/core`.
+
+Three consequences, all latent until the corpus exists:
+
+1. **Provenance can only ever read "N of N".** `intendedReps` falls back to `completedReps`
+   whenever no `repIndex` is present, which in production is always — the denominator is
+   structurally incapable of exceeding the numerator. Observed live: Arm B with one complete and
+   one failed sweep run reads `1 of 1 reps completed`. A sweep that loses reps to failures will
+   report as clean and complete.
+2. **The "By utterance category" table can never fill** — `groupByCategory` skips any run without
+   `annotations.category`, so it renders zero rows no matter how many real sweeps run.
+3. **`corpus version unrecorded` is permanent**, and WER has no write path at all.
+
+`repIndex` is fixable today and is the load-bearing one: `createRunOnceExecutor` already receives
+`request.repIndex` and already stamps `request.origin` onto the Run — it simply drops the index.
+The corpus-metadata fields need a model that does not yet exist; ticket 028 scopes the split.
+
+**This finding corrects two dismissals made earlier in this same report** (see "Checked and
+deliberately not filed", now amended): the empty category table and `corpus version unrecorded`
+are *not* test-data artifacts waiting on the corpus. The corpus alone will not fix either.
+
 ### F9 — Failed runs are invisible in Results · **MODERATE** · ticket 027
 
 *Flow H.* **Repro:** seed four Runs against one corpus Recording — Arm B/sweep/complete,
 Arm C/sweep/complete, ad-hoc/manual/complete, and **Arm B/sweep/failed** — then open
 Results → **By Recording & category**.
 
-**Expected** (PRD §7): *"**Failed runs are saved, visible, and excluded from every aggregate.** …
-it belongs in the ledger **and in the per-Recording view**."* The design mock's By Recording table
-carries a `failed`-status row with `—` for its figures.
+**Expected** (PRD §7): *"**Failed runs are saved, visible, and excluded from every aggregate.**"*
 
-**Observed:** the table renders **three** rows. `run-failed-1` appears nowhere, and nothing
-indicates a run against this Recording failed. The ad-hoc exclusion case is handled correctly
-(`excluded · ad-hoc`) — it is specifically `status: 'failed'` that is dropped rather than labelled.
-Downstream, Arm B's Exp 2 provenance reads **`1 of 1 reps completed`** for a cell with two sweep
-attempts, so a clean 1/1 is indistinguishable from a 1/2 with a failure.
+**Observed:** the table renders **three** rows and nothing indicates a run against this Recording
+failed.
 
-**Bounded:** no wrong number is reported and no data is lost. The aggregation gate is correct — the
-failed run is excluded from every percentile, cost and delta. Replay's runs list shows all four
-cards, the failed one carrying *"tts stage timed out — run saved as failed, excluded from every
-aggregate"*. The defect is confined to the Results secondary tab and the provenance denominator.
+**Diagnosis — a render gap, not a dropped record.** `groupByRecording` groups on
+`(recordingId × configurationKey)`, so `run-failed-1` — which shares Arm B's configuration — is
+**absorbed into the Arm B row**, not discarded. The row model already carries `runCount: 2` against
+`n: 1`, `failedCount: 1`, and `'failed'` in `exclusionReasons`. The view renders only
+`excludedFromExperiments`, which is `false` for this group because the complete Arm B run passes
+the gate — so the row prints `in experiments` and every failure signal in the model is discarded at
+the view boundary.
+
+*(My first pass at this finding claimed the row was missing entirely and demanded a separate
+`failed` row. Reading `derive.ts` before filing showed the grouping is deliberate and correct;
+ticket 027 was rewritten to the actual defect. A separate row would have fought the model.)*
+
+**Bounded:** no wrong number is reported and no data is lost. The figures on that row are right —
+`n = 1`, p50 over the one measured run, cost over measured runs only — and the aggregation gate
+correctly excludes the failed run from every percentile, cost and delta. Replay's runs list shows
+all four cards, the failed one carrying *"tts stage timed out — run saved as failed, excluded from
+every aggregate"*. The defect is that Results alone gives no sign a failure occurred.
+
+The provenance symptom in the same scenario (`1 of 1 reps completed` for two attempts) has a
+**different and deeper cause** and is filed separately as **F10 / ticket 028** — fixing this
+finding will not fix that line.
 
 ## Checked and deliberately **not** filed
 
-- **`corpus version unrecorded`** in the provenance lines — my seeded runs carry no corpus version;
-  the real corpus will. Test-data artifact.
+- ~~**`corpus version unrecorded`** — test-data artifact.~~ **AMENDED: this was wrong.** No write
+  path exists for `corpusVersion`; the real corpus will not fix it. Rolled into **F10 / ticket 028**.
+- ~~**Empty by-category table and WER** — known-empty by design, blocked on the corpus.~~
+  **AMENDED: also wrong** for the category table and WER — neither has a write path, so neither
+  fills when the corpus arrives. Rolled into **F10 / ticket 028**. Empty **adequacy/fluency** *is*
+  legitimately blocked on the operator (blind scoring needs a human), and stays not-filed.
 - **Run ids visible in `data-run` attributes** — seed ids encode the arm; production ids are opaque.
   Visible labels stay neutral (`Run 1/2/3`).
-- **Empty WER / adequacy / fluency / by-category table** — known-empty by design; blocked on the
-  operator's corpus.
 - **Ticket 026** (LiveSession records configured rather than actual providers) — filed and
   knowingly deferred; not re-filed.
 
