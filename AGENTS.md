@@ -150,6 +150,9 @@ These exist because a violation would produce a number that looks fine and is wr
   have been committed by accident before.
 - `.env` holds `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`.
 - Commit in logical units with meaningful messages; never push without being asked.
+- **A mutation you did not verify landed is worse than no mutation check** — it prints a
+  green-looking line and buys false confidence. Confirm each sabotage produces a non-empty
+  `git diff` in EXECUTABLE code (matching a comment does not count) before believing its result.
 - **Commit BEFORE running a mutation check, and confirm every file it touches is tracked.** The
   revert that undoes a sabotage also undoes uncommitted work, and an UNTRACKED file cannot be
   reverted at all — which silently contaminates the rest of the batch while appearing to succeed.

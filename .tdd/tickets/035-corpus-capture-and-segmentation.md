@@ -1,7 +1,7 @@
 ---
 id: 035
 title: Corpus capture core — record to 24 kHz WAV, and segment a take into utterances
-status: pending
+status: green
 source: v3-corpus
 depends_on: [030]
 touches: [src/client/replay/capture.ts, src/client/replay/segment.ts]
@@ -98,3 +98,53 @@ The UI, tagging, and the POST — all **036**. This ticket ships no user-visible
 - Keep the segmenter's defaults aligned with the pinned 500 ms endpointing control, and say so in
   a comment — a segmenter that disagrees with the measured VAD invites boundary disputes later.
 - No real API calls; tests run on synthetic waveforms via `generateClip`/hand-built `Int16Array`s.
+
+## Attempt log
+
+- Green in one implementation pass. Suite 1145/65 (+27), both tsconfigs clean.
+- `startTake` DELEGATES to `src/client/audio/capture.ts` rather than opening a second capture path;
+  a locked structural test scans the source to enforce that. `audio/capture.ts` was not modified —
+  it is on the Live path.
+- Test-writer proved the expectations achievable before handing over: it wrote a throwaway reference
+  implementation, got 27/27 green, then reverted to stubs and re-confirmed red. So every red was
+  "feature missing", never "expectation impossible". Worth repeating on any ticket with numeric
+  tolerances.
+- Implementer's calls on the two deliberately unpinned points:
+  - **Trailing remainder: accepted.** `audio/capture.ts`'s chunker is never flushed, so up to 479
+    samples (<20 ms) of the tail are dropped. Every alternative meant editing the Live path or
+    standing up a second chunker — the duplication the ticket forbids. Under one analysis frame.
+  - **`stop()` after `cancel()`** resolves to a frozen EMPTY take (0 samples, valid 44-byte WAV,
+    `durationMs: 0`) rather than throwing, so a UI racing cancel against stop cannot produce an
+    unhandled rejection.
+- Mutation-checked. **Four of five properties are independently defended:**
+  | mutation | result |
+  |---|---|
+  | WAV encoded at 16 kHz | 3 red |
+  | cap timer never scheduled | 5 red |
+  | silence gap always splits | 1 red |
+  | sliver filter off | 1 red |
+  | sample-accurate speech end -> frame end | **0 red — NOT COVERED** |
+
+### Known untested property (deliberately left, with reasoning)
+
+Replacing the sample-accurate backward scan for `trueSpeechEndMs` with "take the last sample of the
+frame run" passes all 27 tests: the locked test's **±1 frame (20 ms) tolerance is exactly wide
+enough to admit the frame-accurate answer**, so the refinement the AC asks for is unverified.
+
+Impact is bounded and was weighed rather than ignored: `trueSpeechEndMs` is t0 for every latency of
+that utterance, and it is **shared by every arm** replaying that Recording, so a ≤20 ms error is a
+constant offset that cancels in arm-vs-arm comparison — Experiments 1 and 2 are unaffected. It
+would bias ABSOLUTE latency figures by up to 20 ms, which is visible at the 2-decimal-second
+resolution the results view renders.
+
+**Follow-up:** tighten the tolerance to sample resolution through the test-writer (never by editing
+the locked test directly) before any absolute latency figure is published.
+
+### Method note
+
+My first mutation batch reported 4/4 "passed" — because the perl substitutions matched only
+COMMENT text (`writeWav(samples, 24_000)` in the header) and never the executable code, which uses
+`TAKE_RATE` and destructured options. A vacuous mutation is indistinguishable from a well-defended
+one unless you check. **Every mutation must be confirmed to produce a non-empty `git diff` in
+executable code before its result is believed** — the harness now aborts with `!! MUTATION DID NOT
+APPLY` instead of printing a green-looking line.
