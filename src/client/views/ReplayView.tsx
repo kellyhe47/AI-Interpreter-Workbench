@@ -109,6 +109,8 @@ import type {
   RecordingsClient,
   RunsClient,
 } from '../replay/recordingsClient';
+import type { CaptureDenied, RecordedTake, TakeRecorder } from '../replay/capture';
+import type { SegmentedUtterance } from '../replay/segment';
 import type { RunOnceConfig, RunOnceResult } from '../replay/runner';
 import type { BlindComparison, Recording, Run } from '../state/ledger';
 
@@ -125,6 +127,21 @@ export interface ReplayBatchRequest {
   configurations: BatchConfiguration[];
   reps: number;
   onProgress?: (progress: BatchProgress) => void;
+}
+
+/**
+ * TICKET 036 — the options the view hands the (pre-bound) take recorder. The
+ * browser bits (getUserMedia, the AudioContext factory, the capture pipeline)
+ * belong to the host bag, never to the view: what the view knows is the cap it
+ * wants enforced and the two callbacks it renders from.
+ */
+export interface ReplayTakeOptions {
+  /** Mic level bars 0..5 while recording. */
+  onLevel?: (bars: number) => void;
+  /** Fired once when the cap — not the operator — stopped the take. */
+  onMaxDuration?: (take: RecordedTake) => void;
+  /** Cap in ms; ticket 035 clamps it down to MAX_TAKE_MS. */
+  maxDurationMs?: number;
 }
 
 /** Everything the view reaches the outside world through. Nothing is global. */
@@ -162,6 +179,25 @@ export interface ReplayDeps {
    * therefore owns where a judgement lands.
    */
   blindComparisons?: BlindComparisonsClient;
+
+  /* --- ticket 036: the record-a-corpus-take seams (PRD §7 step 1) --- */
+
+  /**
+   * Starts a microphone take, PRE-BOUND to the host's browser seams. OPTIONAL,
+   * and the option is load-bearing in the same way blind compare's is: a host
+   * with no capture seams gets no record affordance rather than a fake one.
+   */
+  startTake?: (options: ReplayTakeOptions) => Promise<TakeRecorder | CaptureDenied>;
+  /** Splits a finished take into utterances the operator then confirms. */
+  segmentTake?: (samples: Int16Array) => SegmentedUtterance[];
+  /** On-demand playback of the recorded take. NEVER called at render. */
+  playTake?: (take: RecordedTake) => void;
+  /**
+   * The corpus version stamped onto a Recording saved as corpus. It is the
+   * HOST's fact, not the view's: provenance belongs to whoever assembled the
+   * corpus, not to the component that happened to render the form.
+   */
+  corpusVersion?: string;
 }
 
 export interface ReplayViewProps {

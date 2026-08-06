@@ -6,7 +6,7 @@ source: v3-corpus
 depends_on: [035]
 touches: [src/client/views/ReplayView.tsx, src/client/components/replay/RecordTake.tsx, src/client/replay/recordingsClient.ts, src/client/browserDeps.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/views/ReplayView.record.test.tsx]
 branch: ""
 ---
 

@@ -21,6 +21,7 @@
  * ==========================================================================
  */
 
+import type { CorpusUtterance } from '../../core/corpus';
 import type { BlindComparison, Recording, Run } from '../state/ledger';
 
 /** The closed server envelope vocabulary, plus a catch-all for anything else. */
@@ -60,6 +61,14 @@ export interface NewRecordingInput {
   origin: 'mic' | 'corpus';
   createdAt?: number;
   audioBase64: string;
+  /**
+   * TICKET 030/036 — the corpus utterance manifest. Present ONLY on a corpus
+   * take; a mic clip must omit the KEY, never send an empty array (which the
+   * server reads as "a corpus take with no utterances" and rejects).
+   */
+  utterances?: CorpusUtterance[];
+  /** Provenance for a corpus take; absent on an ad-hoc mic clip. */
+  corpusVersion?: string;
 }
 
 export interface RecordingsClient {
