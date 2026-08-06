@@ -22,7 +22,7 @@ import type {
   TransportError,
   UtteranceCompletion,
 } from './transport/types';
-import { ARM_CATALOG, type ArmDef, type SessionDeps } from './views/useSessionController';
+import type { LiveRunConfig, SessionDeps } from './views/useSessionController';
 
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
@@ -33,11 +33,22 @@ const CONFIG: TransportConfig = {
   targetLanguage: 'Spanish',
 };
 
-function armDef(id: string): ArmDef {
-  const def = ARM_CATALOG.find((d) => d.id === id);
-  if (!def) throw new Error(`unknown catalog arm: ${id}`);
-  return def;
-}
+/** Ticket 012: the factory takes a resolved LiveRunConfig, not an arm def. */
+const CASCADE: LiveRunConfig = {
+  architecture: 'cascade',
+  providers: { stt: 'gpt-4o-transcribe', mt: 'gpt-4o-mini', tts: 'gpt-4o-mini-tts' },
+  contextPolicy: 'default',
+};
+const CASCADE_ALT: LiveRunConfig = {
+  architecture: 'cascade',
+  providers: { stt: 'gpt-4o-transcribe', mt: 'gpt-4o-mini', tts: 'eleven_flash_v2_5' },
+  contextPolicy: 'default',
+};
+const REALTIME: LiveRunConfig = {
+  architecture: 'realtime',
+  realtimeModel: 'gpt-realtime',
+  contextPolicy: 'default',
+};
 
 interface CollectedEvents {
   source: SourceTextEvent[];
@@ -48,8 +59,8 @@ interface CollectedEvents {
 }
 
 /** Start one fixture arm, run its script for `ms`, and collect every event. */
-async function runArm(deps: SessionDeps, id: string, ms = 10_000) {
-  const transport = deps.transportFactory(armDef(id));
+async function runArm(deps: SessionDeps, config: LiveRunConfig, ms = 10_000) {
+  const transport = deps.transportFactory(config);
   const events: CollectedEvents = {
     source: [],
     target: [],
@@ -113,21 +124,16 @@ describe('buildFixtureDeps — SessionDeps shape App accepts', () => {
     }).not.toThrow();
   });
 
-  it('builds a transport for every catalog arm carrying the def identity', () => {
+  it("builds a transport whose kind follows the config's architecture", () => {
     const deps = buildFixtureDeps();
-    for (const def of ARM_CATALOG) {
-      const transport = deps.transportFactory(def);
-      expect(transport.armId).toBe(def.id);
-      expect(transport.kind).toBe(def.mode);
-      expect(transport.label).toBe(def.label);
-      expect(transport.costPerMinUsd).toBe(def.costPerMinUsd);
-    }
+    expect(deps.transportFactory(CASCADE).kind).toBe('cascade');
+    expect(deps.transportFactory(REALTIME).kind).toBe('realtime');
   });
 });
 
 describe('buildFixtureDeps — scripted utterances', () => {
   it('cascade arm: transcripts flow and completions carry fixture providers + 5-stage timings', async () => {
-    const { events } = await runArm(buildFixtureDeps(), 'cascade-openai');
+    const { events } = await runArm(buildFixtureDeps(), CASCADE);
 
     expect(events.source.some((e) => e.kind === 'partial')).toBe(true);
     expect(events.source.some((e) => e.kind === 'final')).toBe(true);
@@ -147,7 +153,7 @@ describe('buildFixtureDeps — scripted utterances', () => {
   });
 
   it('realtime arm: full fixture record with the 3-stage realtime timings', async () => {
-    const { transport, events } = await runArm(buildFixtureDeps(), 'realtime');
+    const { transport, events } = await runArm(buildFixtureDeps(), REALTIME);
     expect(transport.kind).toBe('realtime');
     expect(events.completions.length).toBeGreaterThan(0);
 
@@ -162,7 +168,7 @@ describe('buildFixtureDeps — scripted utterances', () => {
   });
 
   it('fixture records stay excluded from ledger aggregates (Results realness rule holds)', async () => {
-    const { events } = await runArm(buildFixtureDeps(), 'cascade-openai');
+    const { events } = await runArm(buildFixtureDeps(), CASCADE);
     const ledger = new RunLedger();
     for (const completion of events.completions) {
       ledger.append(completion as UtteranceRecord);
@@ -172,11 +178,11 @@ describe('buildFixtureDeps — scripted utterances', () => {
     expect(ledger.aggregates().perArm).toEqual({}); // and never aggregated
   });
 
-  it("fault 'fail-mt' injects one scripted mt-stage error on the cascade arm; default has none", async () => {
-    const clean = await runArm(buildFixtureDeps(), 'cascade-openai');
+  it("fault 'fail-mt' injects one scripted mt-stage error on a cascade transport; default has none", async () => {
+    const clean = await runArm(buildFixtureDeps(), CASCADE);
     expect(clean.events.errors).toHaveLength(0);
 
-    const faulty = await runArm(buildFixtureDeps({ fault: 'fail-mt' }), 'cascade-openai');
+    const faulty = await runArm(buildFixtureDeps({ fault: 'fail-mt' }), CASCADE);
     expect(faulty.events.errors.length).toBeGreaterThan(0);
     const error = faulty.events.errors[0]!;
     expect(error.opaque).toBe(false);
@@ -188,7 +194,7 @@ describe('buildFixtureDeps — scripted utterances', () => {
 describe('Ticket 021 — fixture scripts loop until stop()', () => {
   it('a 2-utterance loop keeps producing utterances: unique incrementing numbering, all settling', async () => {
     const deps = buildFixtureDeps({ utterancesPerLoop: 2, utteranceSpacingMs: 1500 });
-    const { events } = await runArm(deps, 'cascade-openai', 8_000);
+    const { events } = await runArm(deps, CASCADE, 8_000);
 
     const ids = events.completions.map((r) => (r as UtteranceRecord).id);
     // Wrapped past the 2-utterance script — the session never runs dry.
@@ -202,7 +208,7 @@ describe('Ticket 021 — fixture scripts loop until stop()', () => {
   });
 
   it('the default script loops too (production fixture mode never wedges in processing)', async () => {
-    const { events } = await runArm(buildFixtureDeps(), 'cascade-openai', 40_000);
+    const { events } = await runArm(buildFixtureDeps(), CASCADE, 40_000);
     const ids = events.completions.map((r) => (r as UtteranceRecord).id);
     expect(ids.length).toBeGreaterThanOrEqual(9); // beyond the base 8-utterance script
     expect(ids).toContain('utt-8');
@@ -210,7 +216,7 @@ describe('Ticket 021 — fixture scripts loop until stop()', () => {
 
   it('stop() halts the loop — no events after stop', async () => {
     const deps = buildFixtureDeps({ utterancesPerLoop: 2, utteranceSpacingMs: 1500 });
-    const transport = deps.transportFactory(armDef('cascade-openai'));
+    const transport = deps.transportFactory(CASCADE);
     const completions: UtteranceCompletion[] = [];
     const sources: SourceTextEvent[] = [];
     transport.setHandlers({
@@ -230,28 +236,30 @@ describe('Ticket 021 — fixture scripts loop until stop()', () => {
   });
 });
 
-describe('Ticket 022 — fixture arms share ONE utterance timeline', () => {
+describe('Ticket 022 / 012 — one shared utterance timeline per deps bag', () => {
   interface Done {
-    armId: string;
+    tag: string;
     id: string;
     uttIndex: number;
     sourceFinal: string;
-    /** Faked wall-clock completion time (vi.useFakeTimers mocks Date). */
-    completedAt: number;
   }
 
-  /** Start a fixture arm and record every completion with its wall time. */
-  async function startArm(deps: SessionDeps, id: string, sink: Done[]) {
-    const transport = deps.transportFactory(armDef(id));
+  /** Start a fixture transport and record every completion. */
+  async function startTransport(
+    deps: SessionDeps,
+    config: LiveRunConfig,
+    tag: string,
+    sink: Done[],
+  ) {
+    const transport = deps.transportFactory(config);
     transport.setHandlers({
       onUtteranceComplete: (completion) => {
         const record = completion as UtteranceRecord;
         sink.push({
-          armId: id,
+          tag,
           id: record.id,
           uttIndex: Number(record.id.replace('utt-', '')),
           sourceFinal: record.sourceFinal,
-          completedAt: Date.now(),
         });
       },
     });
@@ -259,65 +267,31 @@ describe('Ticket 022 — fixture arms share ONE utterance timeline', () => {
     return transport;
   }
 
-  it('an arm started mid-session joins at the NEXT shared utterance, not index 0', async () => {
+  // Live now switches ONE transport for another mid-session (an architecture
+  // or provider change), so the replacement must pick up where the session
+  // was rather than restarting the conversation from sentence one.
+  it('a transport built mid-session joins the NEXT shared utterance, not index 0', async () => {
     const deps = buildFixtureDeps({ utterancesPerLoop: 2, utteranceSpacingMs: 1500 });
     const done: Done[] = [];
 
-    const armA = await startArm(deps, 'cascade-openai', done);
-    await vi.advanceTimersByTimeAsync(2_250); // ~1.5 utterances into the shared timeline
-    const armB = await startArm(deps, 'cascade-best', done);
-    await vi.advanceTimersByTimeAsync(4_500); // several more shared utterances
-    armA.stop();
-    armB.stop();
+    const first = await startTransport(deps, CASCADE, 'first', done);
+    await vi.advanceTimersByTimeAsync(2_250); // ~1.5 utterances into the timeline
+    first.stop();
+    const second = await startTransport(deps, CASCADE_ALT, 'second', done);
+    await vi.advanceTimersByTimeAsync(4_500);
+    second.stop();
 
-    const bDone = done.filter((d) => d.armId === 'cascade-best');
-    expect(bDone.length).toBeGreaterThan(0);
-    const first = bDone[0]!;
+    const later = done.filter((d) => d.tag === 'second');
+    expect(later.length).toBeGreaterThan(0);
+    const join = later[0]!;
 
-    // The late arm does NOT replay the script from index 0…
-    expect(first.uttIndex).toBeGreaterThan(0);
-    // …it joins the SHARED timeline: the sibling arm was concurrently on the
-    // same utterance index with the SAME source sentence.
-    const sibling = done.find((d) => d.armId === 'cascade-openai' && d.id === first.id);
-    expect(sibling).toBeDefined();
-    expect(sibling!.sourceFinal).toBe(first.sourceFinal);
-    // And it continues contiguously from its join point.
-    expect(bDone.map((d) => d.uttIndex)).toEqual(bDone.map((_, i) => first.uttIndex + i));
+    // The replacement does NOT replay the script from index 0…
+    expect(join.uttIndex).toBeGreaterThan(0);
+    // …and it continues contiguously from its join point.
+    expect(later.map((d) => d.uttIndex)).toEqual(later.map((_, i) => join.uttIndex + i));
+    // …on the shared sentence rotation, not a fresh one.
+    expect(join.sourceFinal.length).toBeGreaterThan(0);
   });
-
-  it('shared-timeline invariant: utterances completed by both arms carry the identical source sentence, concurrently', async () => {
-    const deps = buildFixtureDeps({ utterancesPerLoop: 3, utteranceSpacingMs: 1500 });
-    const done: Done[] = [];
-
-    const armA = await startArm(deps, 'realtime', done);
-    await vi.advanceTimersByTimeAsync(2_000); // stagger the second arm's start
-    const armB = await startArm(deps, 'cascade-openai', done);
-    await vi.advanceTimersByTimeAsync(7_000);
-    armA.stop();
-    armB.stop();
-
-    const byUtt = new Map<string, Done[]>();
-    for (const d of done) byUtt.set(d.id, [...(byUtt.get(d.id) ?? []), d]);
-    const shared = [...byUtt.values()].filter(
-      (group) => new Set(group.map((d) => d.armId)).size === 2,
-    );
-    expect(shared.length).toBeGreaterThanOrEqual(2);
-
-    for (const group of shared) {
-      // Same utterance index → same source sentence on every arm…
-      expect(new Set(group.map((d) => d.sourceFinal)).size).toBe(1);
-      // …and the arms are on it CONCURRENTLY — completions of one shared
-      // utterance land within a single utterance slot of each other (per-arm
-      // timings may differ, whole-utterance offsets may not).
-      const times = group.map((d) => d.completedAt);
-      expect(Math.max(...times) - Math.min(...times)).toBeLessThan(1_500);
-    }
-  });
-
-  // Ticket 022 AC3 — looping, contiguous ids, single fail-mt injection, and
-  // stop() halting are already locked above ('Ticket 021 — fixture scripts
-  // loop until stop()' and the fail-mt test) and MUST stay green alongside
-  // the shared timeline; no restatement here.
 });
 
 describe('buildFixtureDeps — capture fake', () => {

@@ -1,5 +1,7 @@
 /**
- * Ticket 008 — Session lifecycle state machine + four-value mic permission.
+ * Ticket 008 / 012 — Session lifecycle state machine + four-value mic
+ * permission. Live is ONE architecture per session (PRD §17 19g); the
+ * multi-arm machinery was deleted in ticket 012.
  *
  * Pure reducer: `reduce(state, event) => state`. No timers and no side
  * effects live in here; wall-clock time arrives on event payloads as `now`
@@ -11,8 +13,14 @@
  *   'listening' | 'processing' | 'ready' | 'playing' | 'reconnecting' |
  *   'disconnected' | 'stopping' | 'stopped'. "Switch queued" is NOT a state —
  *   it is the `pending` overlay field carried alongside an active status.
+ *   `stateLabel(state)` derives the PRD's visible 'switch-queued' label from
+ *   the overlay so the UI can show it without the machine growing a state.
  * - `micPermission` is a SEPARATE four-value field ('not-requested' |
  *   'requesting' | 'granted' | 'denied') — never a boolean.
+ * - ONE ARCHITECTURE: no `arms`, no ADD_ARM/REMOVE_ARM, no autoplay
+ *   invariants. Live autoplay is on unconditionally.
+ * - Cascade per-stage selection lives in `providers` (defaulting to Arm B's
+ *   frozen triple) and realtime context policy in `contextPolicy`.
  * - Happy path: idle →START→ requesting-permission (mic 'requesting')
  *   →PERMISSION_GRANTED→ listening (mic 'granted') →SPEECH_DETECTED→
  *   processing →ARMS_SETTLED→ ready →PLAY→ playing →PLAYBACK_ENDED→ ready.
@@ -26,9 +34,8 @@
  *   now) - startedAt` — permission-denied always shows 00:00.
  * - SPEECH_DETECTED is accepted from both 'listening' and 'ready' (the next
  *   utterance can begin while the previous result is on screen).
- * - PLAY carries `armId` (which arm's audio is playing, kept in
- *   `playingArm`); PLAYBACK_ENDED clears it. PLAY is only meaningful from
- *   'ready'.
+ * - PLAY carries no payload (there is one architecture, so one output);
+ *   PLAYBACK_ENDED returns to 'ready'. PLAY is only meaningful from 'ready'.
  * - PERMISSION_DENIED → 'permission-denied' + micPermission 'denied'; START
  *   while micPermission is 'denied' is a no-op (blocking screen).
  * - REQUEST_SWITCH(kind, label, patch) — TICKET 019: queues ONLY while an
@@ -41,11 +48,9 @@
  *   'direction').
  * - UTTERANCE_BOUNDARY also increments `utteranceCount` — the transcript
  *   preservation marker that must survive reconnect cycles.
- * - Autoplay invariants: ADD_ARM taking arms to 2 or 3 forces
- *   `autoplay: false`; ADD_ARM beyond 3 arms or with a duplicate id is
- *   ignored; REMOVE_ARM back to exactly 1 arm restores `autoplay: true`;
- *   SET_AUTOPLAY(true) is ignored while arms.length > 1 (false is always
- *   accepted).
+ * - SET_PROVIDER({stage, model}) replaces one leg of the cascade triple;
+ *   SET_CONTEXT_POLICY({value}) sets the realtime context policy. Both apply
+ *   immediately — only mode / language / direction queue at a boundary.
  * - Reconnect: CONNECTION_LOST from a live state (listening | processing |
  *   ready | playing) → 'reconnecting', prior status remembered in
  *   `resumeStatus`. RECONNECT_ATTEMPT increments `reconnectAttempts` up to
@@ -64,30 +69,30 @@
  *   'listening' (browsers do not re-prompt); otherwise →
  *   'requesting-permission' with micPermission 'requesting'. Resets
  *   utteranceCount, reconnectAttempts, pending, summary, stoppedAt,
- *   playingArm, and sets startedAt = now.
+ *   and sets startedAt = now.
  * - Defaults (createInitialState): status 'idle', micPermission
  *   'not-requested', mode 'realtime' (TICKET 017 — the design mock's
  *   initial state governs; was 'cascade'), langIdx 0 (EN↔ES), reversed
- *   false, arms ['realtime'] (the catalog arm id for the default mode —
- *   TICKET 017; was ['arm-1']), autoplay true, pending null,
- *   reconnectAttempts 0,
- *   resumeStatus null, playingArm null, utteranceCount 0,
+ *   false, providers DEFAULT_CASCADE_TRIPLE (Arm B's frozen recipe),
+ *   contextPolicy 'default', autoplay true, pending null,
+ *   reconnectAttempts 0, resumeStatus null, utteranceCount 0,
  *   startedAt/stoppedAt null, summary null. Accepts a Partial override for
  *   test setup.
  * - `reduce` never mutates its input state.
+ * - LIVE_MAX_SESSION_MS (5 minutes) is the Live cap; the controller stops
+ *   the session when elapsed reaches it.
  *
  * Language/direction helpers (rule group 7) live in this file:
  * - `pairs`: [{src:'English', tgt:'Spanish'}, {src:'English', tgt:'Cantonese'}]
  * - `supportPill(langIdx)`: 'both modes' for EN↔ES, 'cascade only' for the
  *   Cantonese pair.
- * - `warnings(langIdx, reversed, modeOrArms)`: modeOrArms is either a single
- *   Mode or an array of arm modes; realtime is "involved" if any equals
- *   'realtime'. `targetCantoOnRealtime` fires ONLY when the target language
- *   is Cantonese (langIdx 1, not reversed) and realtime is involved;
- *   `inputCantoOnRealtime` fires ONLY when the source is Cantonese
- *   (langIdx 1, reversed) and realtime is involved.
+ * - `warnings(langIdx, reversed, mode)`: `targetCantoOnRealtime` fires ONLY
+ *   when the target language is Cantonese (langIdx 1, not reversed) and the
+ *   mode is realtime; `inputCantoOnRealtime` fires ONLY when the source is
+ *   Cantonese (langIdx 1, reversed) and the mode is realtime.
  */
 
+import type { ProviderTriple } from '../../core/arms';
 import type { Mode } from '../../core/timing';
 
 export type SessionStatus =
@@ -104,6 +109,15 @@ export type SessionStatus =
   | 'stopped';
 
 export type MicPermission = 'not-requested' | 'requesting' | 'granted' | 'denied';
+
+/** Realtime-only, Live-only conversation-context policy (PRD §5). */
+export type ContextPolicy = 'default' | 'trimmed';
+
+/** The three cascade legs a per-stage selector can change. */
+export type ProviderStage = 'stt' | 'mt' | 'tts';
+
+/** The Live cap: a session ends at five minutes (PRD §7). */
+export const LIVE_MAX_SESSION_MS = 300_000;
 
 export type SwitchKind = 'mode' | 'language' | 'direction';
 
@@ -138,15 +152,16 @@ export interface SessionState {
   langIdx: number;
   /** false = pairs[langIdx].src → tgt; true = tgt → src. */
   reversed: boolean;
-  /** Active arm ids, max 3. */
-  arms: string[];
+  /** Cascade per-stage model selection. Defaults to Arm B's frozen triple. */
+  providers: ProviderTriple;
+  /** Realtime-only context policy. */
+  contextPolicy: ContextPolicy;
+  /** Live autoplay is on unconditionally — one architecture collides with nothing. */
   autoplay: boolean;
   pending: PendingSwitch | null;
   reconnectAttempts: number;
   /** Status to resume after a successful reconnect; null outside a drop. */
   resumeStatus: SessionStatus | null;
-  /** Arm whose audio is currently playing; null outside 'playing'. */
-  playingArm: string | null;
   /** Transcript-preservation marker — must survive reconnect cycles. */
   utteranceCount: number;
   startedAt: number | null;
@@ -162,7 +177,7 @@ export type SessionEvent =
   | { type: 'PERMISSION_DENIED' }
   | { type: 'SPEECH_DETECTED' }
   | { type: 'ARMS_SETTLED' }
-  | { type: 'PLAY'; armId: string }
+  | { type: 'PLAY' }
   | { type: 'PLAYBACK_ENDED' }
   | { type: 'REQUEST_SWITCH'; kind: SwitchKind; label: string; patch: SwitchPatch }
   | { type: 'UTTERANCE_BOUNDARY' }
@@ -174,9 +189,8 @@ export type SessionEvent =
   | { type: 'STOP'; now: number }
   | { type: 'FLUSH_DONE'; summary: SessionSummary }
   | { type: 'NEW_SESSION'; now: number }
-  | { type: 'ADD_ARM'; armId: string }
-  | { type: 'REMOVE_ARM'; armId: string }
-  | { type: 'SET_AUTOPLAY'; value: boolean };
+  | { type: 'SET_PROVIDER'; stage: ProviderStage; model: string }
+  | { type: 'SET_CONTEXT_POLICY'; value: ContextPolicy };
 
 export const MAX_RECONNECT_ATTEMPTS = 5;
 
@@ -200,12 +214,13 @@ export function createInitialState(overrides?: Partial<SessionState>): SessionSt
     mode: 'realtime',
     langIdx: 0,
     reversed: false,
-    arms: ['realtime'],
+    // STUB (ticket 012 red phase): the default must be DEFAULT_CASCADE_TRIPLE.
+    providers: { stt: '', mt: '', tts: '' },
+    contextPolicy: 'default',
     autoplay: true,
     pending: null,
     reconnectAttempts: 0,
     resumeStatus: null,
-    playingArm: null,
     utteranceCount: 0,
     startedAt: null,
     stoppedAt: null,
@@ -263,12 +278,12 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
 
     case 'PLAY': {
       if (state.status !== 'ready') return state;
-      return { ...state, status: 'playing', playingArm: event.armId };
+      return { ...state, status: 'playing' };
     }
 
     case 'PLAYBACK_ENDED': {
       if (state.status !== 'playing') return state;
-      return { ...state, status: 'ready', playingArm: null };
+      return { ...state, status: 'ready' };
     }
 
     case 'REQUEST_SWITCH': {
@@ -294,21 +309,14 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
       return next;
     }
 
-    case 'ADD_ARM': {
-      if (state.arms.length >= 3 || state.arms.includes(event.armId)) return state;
-      const arms = [...state.arms, event.armId];
-      return { ...state, arms, autoplay: arms.length > 1 ? false : state.autoplay };
+    case 'SET_PROVIDER': {
+      // STUB (ticket 012 red phase).
+      return state;
     }
 
-    case 'REMOVE_ARM': {
-      if (!state.arms.includes(event.armId)) return state;
-      const arms = state.arms.filter((id) => id !== event.armId);
-      return { ...state, arms, autoplay: arms.length === 1 ? true : state.autoplay };
-    }
-
-    case 'SET_AUTOPLAY': {
-      if (event.value && state.arms.length > 1) return state;
-      return { ...state, autoplay: event.value };
+    case 'SET_CONTEXT_POLICY': {
+      // STUB (ticket 012 red phase).
+      return state;
     }
 
     case 'CONNECTION_LOST': {
@@ -363,7 +371,6 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
         pending: null,
         reconnectAttempts: 0,
         resumeStatus: null,
-        playingArm: null,
         utteranceCount: 0,
         // Ticket 016: only a session that actually starts (straight to
         // listening) gets a startedAt; otherwise it stays null until
@@ -383,19 +390,24 @@ export function supportPill(langIdx: number): 'both modes' | 'cascade only' {
   return langIdx === 1 ? 'cascade only' : 'both modes';
 }
 
+/**
+ * The PRD §7 visible state label. `switch-queued` is modelled as the
+ * `pending` OVERLAY (strictly more expressive: you can be 'processing' AND
+ * have a switch queued), so the label is derived here rather than added to
+ * the status union.
+ */
+export function stateLabel(state: SessionState): string {
+  // STUB (ticket 012 red phase).
+  return state.status;
+}
+
 export interface LanguageWarnings {
   targetCantoOnRealtime: boolean;
   inputCantoOnRealtime: boolean;
 }
 
-export function warnings(
-  langIdx: number,
-  reversed: boolean,
-  modeOrArms: Mode | readonly Mode[],
-): LanguageWarnings {
-  const realtimeInvolved = Array.isArray(modeOrArms)
-    ? (modeOrArms as readonly Mode[]).some((m) => m === 'realtime')
-    : modeOrArms === 'realtime';
+export function warnings(langIdx: number, reversed: boolean, mode: Mode): LanguageWarnings {
+  const realtimeInvolved = mode === 'realtime';
   const cantoPair = langIdx === 1;
   return {
     targetCantoOnRealtime: cantoPair && !reversed && realtimeInvolved,

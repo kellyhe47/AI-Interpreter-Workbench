@@ -22,18 +22,16 @@
  * Returns the SAME shape buildBrowserDeps returns — `<App deps={...} />`
  * accepts either (App selects via isFixtureMode(window.location.search)
  * and passes `fault` through). Contents:
- * - transportFactory: FixtureTransport per catalog ArmDef (armId / kind /
- *   label / costPerMinUsd taken from the def), loaded with scripted
- *   utterances: source partials + final, target deltas + final, audio, and
+ * - transportFactory: FixtureTransport per LiveRunConfig (kind taken from
+ *   config.architecture), loaded with scripted utterances: source partials + final, target deltas + final, audio, and
  *   per-stage timings — cascade arms with all FIVE cascade timestamps
  *   (deriveCascadeIntervals all non-null), the realtime arm with the THREE
  *   realtime stages (deriveRealtimeIntervals).
  * - Every utteranceComplete delivers a FULL UtteranceRecord whose providers
- *   are ALL 'fixture' — including the realtime arm — so isRealRecord is
- *   false and the ledger keeps excluding fixture records from
- *   Results/aggregates.
- * - options.fault === 'fail-mt' → the cascade-openai arm's script includes
- *   one error event { opaque: false, stage: 'mt' }. No fault → no errors.
+ *   are ALL 'fixture' — including realtime — so isRealRecord is false and the
+ *   ledger keeps excluding fixture records from Results/aggregates.
+ * - options.fault === 'fail-mt' → a CASCADE transport's script includes one
+ *   error event { opaque: false, stage: 'mt' }. No fault → no errors.
  * - startCapture: "grants" WITHOUT getUserMedia and emits synthetic mic
  *   activity on a timer until handle.stop().
  * - playbackContextFactory: silent no-op PlaybackAudioContextLike.
@@ -65,7 +63,7 @@ import type {
   TransportHandlers,
   TransportKind,
 } from './transport/types';
-import type { ArmDef, SessionDeps } from './views/useSessionController';
+import type { LiveRunConfig, SessionDeps } from './views/useSessionController';
 
 export interface FixtureModeSelection {
   enabled: boolean;
@@ -175,15 +173,15 @@ function realtimeOffsets(base: number): StageOffsets {
 }
 
 function fixtureRecord(
-  def: ArmDef,
+  config: LiveRunConfig,
   utt: number,
   sentence: { src: string; tgt: string },
   timings: Record<string, number>,
 ): UtteranceRecord {
   return {
     id: `utt-${utt}`,
-    arm: def.id,
-    mode: def.mode,
+    arm: 'fixture',
+    mode: config.architecture,
     languagePair: 'EN↔ES',
     direction: 'en→es',
     sourcePartials: [sentence.src.slice(0, 18), sentence.src.slice(0, 34)],
@@ -209,14 +207,15 @@ function fixtureRecord(
  * replaces the back half with a stage-attributed mt error (no completion —
  * the error IS the settle). */
 function utteranceScript(
-  def: ArmDef,
+  config: LiveRunConfig,
   utt: number,
   atBase: number,
   tBase: number,
   failMt: boolean,
 ): FixtureScriptEvent[] {
   const sentence = SENTENCES[utt % SENTENCES.length]!;
-  const offsets = def.mode === 'cascade' ? cascadeOffsets(tBase) : realtimeOffsets(tBase);
+  const offsets =
+    config.architecture === 'cascade' ? cascadeOffsets(tBase) : realtimeOffsets(tBase);
   const events: FixtureScriptEvent[] = [
     { at: atBase + 10, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 18), utt },
     { at: atBase + 220, type: 'sourceText', kind: 'partial', text: sentence.src.slice(0, 34), utt },
@@ -245,7 +244,7 @@ function utteranceScript(
     {
       at: atBase + 1100,
       type: 'utteranceComplete',
-      record: fixtureRecord(def, utt, sentence, offsets.timings),
+      record: fixtureRecord(config, utt, sentence, offsets.timings),
     },
   );
   return events;
@@ -260,9 +259,10 @@ interface LoopConfig {
 
 /**
  * Ticket 022 — the ONE shared utterance timeline for a buildFixtureDeps
- * call. Anchored (epoch ms) when the FIRST arm starts; utterance k begins
- * at anchor + k·spacing for every arm, with source sentence
- * SENTENCES[k % len] — identical across arms.
+ * call. Anchored (epoch ms) when the FIRST transport starts; utterance k
+ * begins at anchor + k·spacing with source sentence SENTENCES[k % len]. A
+ * transport built mid-session (an architecture switch) JOINS at the next
+ * shared utterance rather than replaying the script from index 0.
  */
 interface SharedTimeline {
   anchor: number | null;
@@ -282,26 +282,24 @@ interface SharedTimeline {
  * stop.
  */
 class LoopingFixtureTransport implements InterpreterTransport {
-  readonly armId: string;
   readonly kind: TransportKind;
   readonly label: string;
   readonly costPerMinUsd: number;
 
-  private readonly def: ArmDef;
+  private readonly config: LiveRunConfig;
   private readonly cfg: LoopConfig;
   private readonly timeline: SharedTimeline;
   private handlers: TransportHandlers = {};
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopped = false;
 
-  constructor(def: ArmDef, cfg: LoopConfig, timeline: SharedTimeline) {
-    this.def = def;
+  constructor(config: LiveRunConfig, cfg: LoopConfig, timeline: SharedTimeline) {
+    this.config = config;
     this.cfg = cfg;
     this.timeline = timeline;
-    this.armId = def.id;
-    this.kind = def.mode;
-    this.label = def.label;
-    this.costPerMinUsd = def.costPerMinUsd;
+    this.kind = config.architecture;
+    this.label = config.architecture === 'realtime' ? 'Realtime' : 'Cascade';
+    this.costPerMinUsd = 0;
   }
 
   async start(_config: TransportConfig): Promise<void> {
@@ -336,8 +334,8 @@ class LoopingFixtureTransport implements InterpreterTransport {
     const delay = Math.max(0, uttStart - this.cfg.now());
     // fail-mt: exactly ONE scripted mt-stage error, on the cascade-openai
     // arm's second shared utterance; everything else completes.
-    const failMt = fault === 'fail-mt' && this.def.id === 'cascade-openai' && utt === 1;
-    const events = utteranceScript(this.def, utt, 0, utt * utteranceSpacingMs, failMt);
+    const failMt = fault === 'fail-mt' && this.config.architecture === 'cascade' && utt === 1;
+    const events = utteranceScript(this.config, utt, 0, utt * utteranceSpacingMs, failMt);
     for (const ev of events) this.schedule(delay + ev.at, () => this.fire(ev));
     this.schedule(delay + utteranceSpacingMs, () => this.scheduleUtterance(utt + 1));
   }
@@ -423,7 +421,8 @@ export function buildFixtureDeps(options?: FixtureDepsOptions): SessionDeps {
   // the same utterance index / source sentence (like sharing one real mic).
   const timeline: SharedTimeline = { anchor: null };
   return {
-    transportFactory: (def: ArmDef) => new LoopingFixtureTransport(def, loopConfig, timeline),
+    transportFactory: (config: LiveRunConfig) =>
+      new LoopingFixtureTransport(config, loopConfig, timeline),
     // Grants WITHOUT getUserMedia; synthetic level/chunk emission on a timer
     // until stop(). Dev/QA path — never used when the flag is absent.
     startCapture: async ({ onChunk, onLevel }): Promise<CaptureResult> => {

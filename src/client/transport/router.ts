@@ -1,27 +1,34 @@
 /**
- * Ticket 011 — ArmRouter: fans mic audio out to every active arm and funnels
- * per-arm transport events back with the armId attached.
+ * Ticket 012 — TransportRouter: a SWITCH, not a fan-out.
+ *
+ * Live runs exactly ONE architecture per session (PRD §17 19g · 24a), so the
+ * router holds one active transport at a time. Fan-out existed to guarantee
+ * identical live input across arms; a saved Recording does that better and
+ * without concurrent-network contention, so comparison moved to Replay and
+ * the router went back to being a switch.
  *
  * ============================ API DESIGN (normative) =======================
  * Locked by router.test.ts:
  *
- * new ArmRouter()
- * - addArm(transport): registers the transport under transport.armId and
- *   wires transport.setHandlers with wrappers that inject the armId into
- *   every callback (see ArmRouterHandlers — every event object carries
- *   `armId`). Adding a duplicate armId throws. addArm does NOT start the
- *   transport — lifecycle stays with the caller.
- * - removeArm(armId): calls stop() on THAT transport only and removes it;
- *   other arms keep receiving sendAudio and keep delivering events. Unknown
- *   armId is a no-op.
- * - sendAudio(chunk): fans the SAME chunk reference out to every active
- *   arm's transport.sendAudio, in insertion order.
+ * new TransportRouter()
+ * - setTransport(transport): makes it the active transport, wiring
+ *   transport.setHandlers with wrappers that delegate to the CURRENT router
+ *   handlers. Setting a new transport calls stop() on the previous one and
+ *   detaches it: late events from a replaced transport never reach the
+ *   handlers.
+ *   setTransport does NOT start the transport — lifecycle stays with the
+ *   caller.
+ * - active: the current transport or null.
+ * - sendAudio(chunk): forwards the SAME chunk reference to the active
+ *   transport. With no active transport it is a NO-OP, never a throw — mic
+ *   frames can arrive before the transport is up or after it is torn down.
  * - setHandlers(handlers): router-level handlers; may be called before or
- *   after arms are added, and replaces the previous set for ALL arms (the
- *   per-arm wrappers always delegate to the current router handlers).
- * - armIds: string[] getter, insertion order.
- * - getArm(armId): the registered transport or undefined.
- * - stopAll(): stops and removes every arm.
+ *   after setTransport and replaces the previous set.
+ * - stop(): stops the active transport and clears it.
+ *
+ * EVENTS CARRY NO `armId`. There is one transport, so there is nothing to
+ * disambiguate; the field is gone from the handler payloads and from
+ * InterpreterTransport.
  * ==========================================================================
  */
 
@@ -35,78 +42,35 @@ import type {
   UtteranceCompletion,
 } from './types';
 
-export interface ArmRouterHandlers {
-  onSourceText?: (e: SourceTextEvent & { armId: string }) => void;
-  onTargetText?: (e: TargetTextEvent & { armId: string }) => void;
-  onAudio?: (e: { armId: string; pcm: Int16Array; utt: number }) => void;
-  onTiming?: (e: TimingMark & { armId: string }) => void;
-  onUtteranceComplete?: (e: { armId: string; record: UtteranceCompletion }) => void;
-  onError?: (e: TransportError & { armId: string }) => void;
-  onConnectionState?: (e: { armId: string; state: ConnectionState; attempt?: number }) => void;
+export interface RouterHandlers {
+  onSourceText?: (e: SourceTextEvent) => void;
+  onTargetText?: (e: TargetTextEvent) => void;
+  onAudio?: (e: { pcm: Int16Array; utt: number }) => void;
+  onTiming?: (e: TimingMark) => void;
+  onUtteranceComplete?: (e: { record: UtteranceCompletion }) => void;
+  onError?: (e: TransportError) => void;
+  onConnectionState?: (e: { state: ConnectionState; attempt?: number }) => void;
 }
 
-export class ArmRouter {
-  private readonly arms = new Map<string, InterpreterTransport>();
-  private handlers: ArmRouterHandlers = {};
-
-  get armIds(): string[] {
-    return [...this.arms.keys()];
+export class TransportRouter {
+  /** STUB (ticket 012 red phase). */
+  get active(): InterpreterTransport | null {
+    return null;
   }
 
-  getArm(armId: string): InterpreterTransport | undefined {
-    return this.arms.get(armId);
+  setTransport(_transport: InterpreterTransport): void {
+    // STUB (ticket 012 red phase).
   }
 
-  addArm(transport: InterpreterTransport): void {
-    const armId = transport.armId;
-    if (this.arms.has(armId)) {
-      throw new Error(`duplicate armId: ${armId}`);
-    }
-    this.arms.set(armId, transport);
-    const active = (): boolean => this.arms.get(armId) === transport;
-    transport.setHandlers({
-      onSourceText: (e) => {
-        if (active()) this.handlers.onSourceText?.({ ...e, armId });
-      },
-      onTargetText: (e) => {
-        if (active()) this.handlers.onTargetText?.({ ...e, armId });
-      },
-      onAudio: (pcm, utt) => {
-        if (active()) this.handlers.onAudio?.({ armId, pcm, utt });
-      },
-      onTiming: (e) => {
-        if (active()) this.handlers.onTiming?.({ ...e, armId });
-      },
-      onUtteranceComplete: (record) => {
-        if (active()) this.handlers.onUtteranceComplete?.({ armId, record });
-      },
-      onError: (e) => {
-        if (active()) this.handlers.onError?.({ ...e, armId });
-      },
-      onConnectionState: (state, attempt) => {
-        if (active()) this.handlers.onConnectionState?.({ armId, state, attempt });
-      },
-    });
+  sendAudio(_chunk: Int16Array): void {
+    // STUB (ticket 012 red phase).
   }
 
-  removeArm(armId: string): void {
-    const transport = this.arms.get(armId);
-    if (!transport) return;
-    this.arms.delete(armId);
-    transport.stop();
+  setHandlers(_handlers: RouterHandlers): void {
+    // STUB (ticket 012 red phase).
   }
 
-  sendAudio(chunk: Int16Array): void {
-    for (const transport of this.arms.values()) {
-      transport.sendAudio(chunk);
-    }
-  }
-
-  setHandlers(handlers: ArmRouterHandlers): void {
-    this.handlers = handlers;
-  }
-
-  stopAll(): void {
-    for (const armId of this.armIds) this.removeArm(armId);
+  stop(): void {
+    // STUB (ticket 012 red phase).
   }
 }

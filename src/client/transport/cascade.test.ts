@@ -87,7 +87,7 @@ function makeHarness(baseUrl = 'ws://test.local') {
     languagePair: 'EN↔ES',
     direction: 'en→es',
     targetLanguage: 'Spanish',
-    providers: { stt: 'deepgram', mt: 'gpt', tts: 'elevenlabs' },
+    providers: { stt: 'gpt-4o-transcribe', mt: 'gpt', tts: 'elevenlabs' },
   };
 
   return { transport, config, wsFactory, sockets, clock, source, target, audio, timings, completes, errors, states };
@@ -120,7 +120,7 @@ describe('CascadeTransport start()', () => {
       mode: 'cascade',
       languagePair: 'EN↔ES',
       direction: 'en→es',
-      providers: { stt: 'deepgram', mt: 'gpt', tts: 'elevenlabs' },
+      providers: { stt: 'gpt-4o-transcribe', mt: 'gpt', tts: 'elevenlabs' },
     });
     expect(h.states.map((s) => s.state)).toContain('connected');
   });
@@ -198,7 +198,7 @@ describe('CascadeTransport inbound mapping', () => {
       audioDurationMs: 640,
       timings: { speech_end: 100, audio_queued: 900 },
       speechEndSource: 'vad',
-      providers: { stt: 'deepgram', mt: 'gpt', tts: 'elevenlabs' },
+      providers: { stt: 'gpt-4o-transcribe', mt: 'gpt', tts: 'elevenlabs' },
       costUnits: 0.004,
       corpusId: 'c-1',
       runId: 'r-1',

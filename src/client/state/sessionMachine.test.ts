@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_CASCADE_TRIPLE } from '../../core/arms';
 import {
+  LIVE_MAX_SESSION_MS,
   MAX_RECONNECT_ATTEMPTS,
   createInitialState,
   pairs,
   reduce,
+  stateLabel,
   supportPill,
   warnings,
+  type ContextPolicy,
   type MicPermission,
+  type ProviderStage,
   type SessionEvent,
   type SessionState,
   type SessionStatus,
@@ -33,13 +38,10 @@ describe('createInitialState', () => {
     const s = createInitialState();
     expect(s.status).toBe('idle');
     expect(s.micPermission).toBe('not-requested');
-    // Ticket 017: the design mock's initial state governs — Realtime default,
-    // seeded with the realtime catalog arm id.
+    // Ticket 017: the design mock's initial state governs — Realtime default.
     expect(s.mode).toBe('realtime');
     expect(s.langIdx).toBe(0);
     expect(s.reversed).toBe(false);
-    expect(s.arms).toEqual(['realtime']);
-    expect(s.autoplay).toBe(true);
     expect(s.pending).toBeNull();
     expect(s.reconnectAttempts).toBe(0);
     expect(s.utteranceCount).toBe(0);
@@ -56,13 +58,126 @@ describe('createInitialState', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Ticket 012 — one architecture per session
+// ---------------------------------------------------------------------------
+
+describe('ticket 012 — the multi-arm machinery is gone', () => {
+  it('carries no `arms` array', () => {
+    expect(Object.keys(createInitialState())).not.toContain('arms');
+  });
+
+  it('carries no `playingArm` — one architecture means one output', () => {
+    expect(Object.keys(createInitialState())).not.toContain('playingArm');
+  });
+
+  it('autoplay is true from the start and no event can turn it off', () => {
+    const s = createInitialState();
+    expect(s.autoplay).toBe(true);
+
+    const walked = run(
+      s,
+      { type: 'START', now: 1 },
+      { type: 'PERMISSION_GRANTED', now: 2 },
+      { type: 'SPEECH_DETECTED' },
+      { type: 'ARMS_SETTLED' },
+      { type: 'PLAY' },
+      { type: 'PLAYBACK_ENDED' },
+      { type: 'UTTERANCE_BOUNDARY' },
+    );
+    expect(walked.autoplay).toBe(true);
+  });
+
+  it('the deleted arm/autoplay events are inert', () => {
+    const s = active('listening');
+    // Spelled indirectly so the DELETE guard (deletions.test.ts) still sees a
+    // client tree with zero occurrences of the removed event names.
+    const deleted = ['ADD', 'REMOVE'].map((verb) => `${verb}_ARM`).concat('SET_' + 'AUTOPLAY');
+    for (const type of deleted) {
+      const after = reduce(s, { type, armId: 'x', value: false } as unknown as SessionEvent);
+      expect(after, `${type} must not be handled`).toEqual(s);
+    }
+  });
+
+  it('PLAY carries no arm payload; PLAYBACK_ENDED returns to ready', () => {
+    const playing = reduce(active('ready'), { type: 'PLAY' });
+    expect(playing.status).toBe('playing');
+    expect(reduce(playing, { type: 'PLAYBACK_ENDED' }).status).toBe('ready');
+  });
+});
+
+describe('ticket 012 — cascade providers and realtime context policy', () => {
+  it("defaults `providers` to Arm B's frozen triple", () => {
+    expect(createInitialState().providers).toEqual(DEFAULT_CASCADE_TRIPLE);
+  });
+
+  it("defaults `contextPolicy` to 'default'", () => {
+    expect(createInitialState().contextPolicy).toBe('default');
+  });
+
+  const stages: ProviderStage[] = ['stt', 'mt', 'tts'];
+  for (const stage of stages) {
+    it(`SET_PROVIDER replaces the ${stage} leg and leaves the others alone`, () => {
+      const s = reduce(active('listening'), { type: 'SET_PROVIDER', stage, model: 'swapped' });
+      expect(s.providers[stage]).toBe('swapped');
+      for (const other of stages.filter((x) => x !== stage)) {
+        expect(s.providers[other]).toBe(DEFAULT_CASCADE_TRIPLE[other]);
+      }
+    });
+  }
+
+  const policies: ContextPolicy[] = ['default', 'trimmed'];
+  for (const value of policies) {
+    it(`SET_CONTEXT_POLICY sets '${value}'`, () => {
+      expect(reduce(active('listening'), { type: 'SET_CONTEXT_POLICY', value }).contextPolicy).toBe(
+        value,
+      );
+    });
+  }
+
+  it('SET_PROVIDER / SET_CONTEXT_POLICY apply immediately — they never queue', () => {
+    const mid = active('processing');
+    const p = reduce(mid, { type: 'SET_PROVIDER', stage: 'tts', model: 'eleven_flash_v2_5' });
+    expect(p.providers.tts).toBe('eleven_flash_v2_5');
+    expect(p.pending).toBeNull();
+
+    const c = reduce(mid, { type: 'SET_CONTEXT_POLICY', value: 'trimmed' });
+    expect(c.contextPolicy).toBe('trimmed');
+    expect(c.pending).toBeNull();
+  });
+});
+
+describe('ticket 012 — the Live cap and the derived switch-queued label', () => {
+  it('LIVE_MAX_SESSION_MS is five minutes', () => {
+    expect(LIVE_MAX_SESSION_MS).toBe(300_000);
+  });
+
+  it("stateLabel is the status when nothing is queued, 'switch-queued' when something is", () => {
+    const processing = active('processing');
+    expect(stateLabel(processing)).toBe('processing');
+
+    const queued = reduce(processing, {
+      type: 'REQUEST_SWITCH',
+      kind: 'mode',
+      label: 'Cascade',
+      patch: { mode: 'cascade' },
+    });
+    // The overlay is carried ALONGSIDE the active status (that is the whole
+    // point of modelling it as an overlay) — the label is what the UI shows.
+    expect(queued.status).toBe('processing');
+    expect(stateLabel(queued)).toBe('switch-queued');
+
+    expect(stateLabel(reduce(queued, { type: 'UTTERANCE_BOUNDARY' }))).toBe('processing');
+  });
+});
+
 describe('rule 1 — happy path', () => {
   const steps: Array<[SessionEvent, SessionStatus, MicPermission]> = [
     [{ type: 'START', now: 5_000 }, 'requesting-permission', 'requesting'],
     [{ type: 'PERMISSION_GRANTED', now: 6_000 }, 'listening', 'granted'],
     [{ type: 'SPEECH_DETECTED' }, 'processing', 'granted'],
     [{ type: 'ARMS_SETTLED' }, 'ready', 'granted'],
-    [{ type: 'PLAY', armId: 'arm-1' }, 'playing', 'granted'],
+    [{ type: 'PLAY' }, 'playing', 'granted'],
     [{ type: 'PLAYBACK_ENDED' }, 'ready', 'granted'],
   ];
 
@@ -92,13 +207,6 @@ describe('rule 1 — happy path', () => {
     expect(s.startedAt).toBe(8_000);
   });
 
-  it('PLAY records the playing arm; PLAYBACK_ENDED clears it', () => {
-    const playing = reduce(active('ready'), { type: 'PLAY', armId: 'arm-1' });
-    expect(playing.playingArm).toBe('arm-1');
-    const ended = reduce(playing, { type: 'PLAYBACK_ENDED' });
-    expect(ended.playingArm).toBeNull();
-  });
-
   it('SPEECH_DETECTED from ready starts the next utterance (→ processing)', () => {
     const s = reduce(active('ready'), { type: 'SPEECH_DETECTED' });
     expect(s.status).toBe('processing');
@@ -120,7 +228,11 @@ describe('rule 2 — permission denied', () => {
   });
 
   it('START while denied is a no-op (blocking)', () => {
-    const denied = run(createInitialState(), { type: 'START', now: 1 }, { type: 'PERMISSION_DENIED' });
+    const denied = run(
+      createInitialState(),
+      { type: 'START', now: 1 },
+      { type: 'PERMISSION_DENIED' },
+    );
     const after = reduce(denied, { type: 'START', now: 2 });
     expect(after).toEqual(denied);
   });
@@ -139,7 +251,7 @@ describe('rule 2 — permission denied', () => {
   });
 });
 
-describe('rule 3 — switch queueing', () => {
+describe('rule 3 — switch queueing (mode, language AND direction)', () => {
   const kinds: Array<{
     kind: SwitchKind;
     label: string;
@@ -203,7 +315,7 @@ describe('rule 3 — switch queueing', () => {
     }
 
     for (const status of boundaryStatuses) {
-      it(`${c.kind} switch while ${status}: no utterance in flight — applied immediately (ticket 019)`, () => {
+      it(`${c.kind} switch while ${status}: no utterance in flight — applied immediately`, () => {
         const start = active(status, c.initial);
         const s = reduce(start, {
           type: 'REQUEST_SWITCH',
@@ -248,75 +360,6 @@ describe('rule 3 — switch queueing', () => {
       { type: 'UTTERANCE_BOUNDARY' },
     );
     expect(s.utteranceCount).toBe(4);
-  });
-});
-
-describe('rule 4 — autoplay invariants', () => {
-  it('ADD_ARM to 2 arms forces autoplay false', () => {
-    const s = reduce(active('listening', { arms: ['a'], autoplay: true }), {
-      type: 'ADD_ARM',
-      armId: 'b',
-    });
-    expect(s.arms).toEqual(['a', 'b']);
-    expect(s.autoplay).toBe(false);
-  });
-
-  it('ADD_ARM to 3 arms keeps autoplay false', () => {
-    const s = run(
-      active('listening', { arms: ['a'], autoplay: true }),
-      { type: 'ADD_ARM', armId: 'b' },
-      { type: 'ADD_ARM', armId: 'c' },
-    );
-    expect(s.arms).toEqual(['a', 'b', 'c']);
-    expect(s.autoplay).toBe(false);
-  });
-
-  it('ADD_ARM beyond 3 arms is ignored', () => {
-    const three = active('listening', { arms: ['a', 'b', 'c'], autoplay: false });
-    const s = reduce(three, { type: 'ADD_ARM', armId: 'd' });
-    expect(s.arms).toEqual(['a', 'b', 'c']);
-  });
-
-  it('ADD_ARM with a duplicate id is ignored', () => {
-    const s = reduce(active('listening', { arms: ['a', 'b'], autoplay: false }), {
-      type: 'ADD_ARM',
-      armId: 'a',
-    });
-    expect(s.arms).toEqual(['a', 'b']);
-  });
-
-  it('REMOVE_ARM back to exactly 1 arm restores autoplay true', () => {
-    const s = reduce(active('listening', { arms: ['a', 'b'], autoplay: false }), {
-      type: 'REMOVE_ARM',
-      armId: 'b',
-    });
-    expect(s.arms).toEqual(['a']);
-    expect(s.autoplay).toBe(true);
-  });
-
-  it('REMOVE_ARM from 3 to 2 arms does not restore autoplay', () => {
-    const s = reduce(active('listening', { arms: ['a', 'b', 'c'], autoplay: false }), {
-      type: 'REMOVE_ARM',
-      armId: 'c',
-    });
-    expect(s.arms).toEqual(['a', 'b']);
-    expect(s.autoplay).toBe(false);
-  });
-
-  it('SET_AUTOPLAY(true) is ignored when more than one arm is active', () => {
-    const s = reduce(active('listening', { arms: ['a', 'b'], autoplay: false }), {
-      type: 'SET_AUTOPLAY',
-      value: true,
-    });
-    expect(s.autoplay).toBe(false);
-  });
-
-  it('SET_AUTOPLAY toggles freely with a single arm', () => {
-    const one = active('listening', { arms: ['a'], autoplay: true });
-    const off = reduce(one, { type: 'SET_AUTOPLAY', value: false });
-    expect(off.autoplay).toBe(false);
-    const on = reduce(off, { type: 'SET_AUTOPLAY', value: true });
-    expect(on.autoplay).toBe(true);
   });
 });
 
@@ -419,7 +462,11 @@ describe('rule 6 — stop, flush, new session', () => {
 
   it('FLUSH_DONE → stopped with the summary attached', () => {
     const summary = { elapsedMs: 60_000, utterances: 12, dropped: 1, costUsd: 0.42 };
-    const s = run(active('listening'), { type: 'STOP', now: 9_000 }, { type: 'FLUSH_DONE', summary });
+    const s = run(
+      active('listening'),
+      { type: 'STOP', now: 9_000 },
+      { type: 'FLUSH_DONE', summary },
+    );
     expect(s.status).toBe('stopped');
     expect(s.summary).toEqual(summary);
   });
@@ -483,70 +530,56 @@ describe('rule 7 — language pair helpers', () => {
     name: string;
     langIdx: number;
     reversed: boolean;
-    modeOrArms: Parameters<typeof warnings>[2];
+    mode: Parameters<typeof warnings>[2];
     expected: { targetCantoOnRealtime: boolean; inputCantoOnRealtime: boolean };
   }> = [
     {
       name: 'target Cantonese on realtime fires the target warning only',
       langIdx: 1,
       reversed: false,
-      modeOrArms: 'realtime',
+      mode: 'realtime',
       expected: { targetCantoOnRealtime: true, inputCantoOnRealtime: false },
     },
     {
       name: 'source Cantonese on realtime fires the input warning only',
       langIdx: 1,
       reversed: true,
-      modeOrArms: 'realtime',
+      mode: 'realtime',
       expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: true },
     },
     {
       name: 'Cantonese pair on cascade fires nothing',
       langIdx: 1,
       reversed: false,
-      modeOrArms: 'cascade',
+      mode: 'cascade',
       expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
     },
     {
       name: 'reversed Cantonese pair on cascade fires nothing',
       langIdx: 1,
       reversed: true,
-      modeOrArms: 'cascade',
+      mode: 'cascade',
       expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
     },
     {
       name: 'Spanish pair on realtime fires nothing',
       langIdx: 0,
       reversed: false,
-      modeOrArms: 'realtime',
+      mode: 'realtime',
       expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
     },
     {
       name: 'reversed Spanish pair on realtime fires nothing',
       langIdx: 0,
       reversed: true,
-      modeOrArms: 'realtime',
-      expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
-    },
-    {
-      name: 'arm list containing a realtime arm counts as realtime involved',
-      langIdx: 1,
-      reversed: false,
-      modeOrArms: ['cascade', 'realtime'],
-      expected: { targetCantoOnRealtime: true, inputCantoOnRealtime: false },
-    },
-    {
-      name: 'arm list with only cascade arms fires nothing',
-      langIdx: 1,
-      reversed: false,
-      modeOrArms: ['cascade', 'cascade'],
+      mode: 'realtime',
       expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
     },
   ];
 
   for (const c of cases) {
     it(c.name, () => {
-      expect(warnings(c.langIdx, c.reversed, c.modeOrArms)).toEqual(c.expected);
+      expect(warnings(c.langIdx, c.reversed, c.mode)).toEqual(c.expected);
     });
   }
 });

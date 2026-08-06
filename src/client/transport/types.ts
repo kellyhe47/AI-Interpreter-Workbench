@@ -1,8 +1,8 @@
 /**
- * Ticket 011 — Transport contracts. Both transports (realtime WebRTC,
- * cascade WS), the fixture transport, and the ArmRouter speak exactly this
- * surface; the UI (ticket 012) consumes it. Shapes here are NORMATIVE —
- * implementer and UI follow them.
+ * Ticket 011 / 012 — Transport contracts. Both transports (realtime WebRTC,
+ * cascade WS), the fixture transport, and the TransportRouter speak exactly
+ * this surface; the UI consumes it. Shapes here are NORMATIVE — implementer
+ * and UI follow them.
  *
  * Event shapes:
  * - onSourceText: { kind: 'partial' | 'final', text, utt } — source-language
@@ -102,8 +102,12 @@ export interface TransportConfig {
   providers?: { stt: string; mt: string; tts: string };
 }
 
+/**
+ * TICKET 012: no `armId`. Live runs ONE transport at a time (the router is a
+ * switch, not a fan-out), so there is nothing for an id to disambiguate.
+ * Concrete transports may still carry their own construction-time id.
+ */
 export interface InterpreterTransport {
-  readonly armId: string;
   readonly kind: TransportKind;
   readonly label: string;
   readonly costPerMinUsd: number;

@@ -38,7 +38,7 @@ function makeRecord(overrides: Partial<UtteranceRecord> = {}): UtteranceRecord {
     audioDurationMs: 900,
     timings: { speech_end: 1_000, audio_queued: 1_500 },
     speechEndSource: 'corpus',
-    providers: { stt: 'deepgram', mt: 'anthropic', tts: 'elevenlabs' },
+    providers: { stt: 'gpt-4o-transcribe', mt: 'anthropic', tts: 'elevenlabs' },
     costUnits: 0.01,
     corpusId: 'corpus-greeting-1',
     runId: 'run-1',
@@ -107,7 +107,7 @@ describe('append-only store', () => {
     const fresh = ledger.getRecords()[0]!;
     expect(fresh.sourceFinal).toBe('original');
     expect(fresh.sourcePartials).toEqual(['orig']);
-    expect(fresh.providers.stt).toBe('deepgram');
+    expect(fresh.providers.stt).toBe('gpt-4o-transcribe');
   });
 
   it('mutating a record after append does not affect the store', () => {
@@ -123,8 +123,8 @@ describe('realness rule', () => {
   it('isRealRecord: real by default; fixture provider, placeholder corpus, or fixture arm make it fake', () => {
     expect(isRealRecord(makeRecord())).toBe(true);
     expect(isRealRecord(makeRecord({ providers: { stt: 'fixture', mt: 'anthropic', tts: 'elevenlabs' } }))).toBe(false);
-    expect(isRealRecord(makeRecord({ providers: { stt: 'deepgram', mt: 'fixture', tts: 'elevenlabs' } }))).toBe(false);
-    expect(isRealRecord(makeRecord({ providers: { stt: 'deepgram', mt: 'anthropic', tts: 'fixture' } }))).toBe(false);
+    expect(isRealRecord(makeRecord({ providers: { stt: 'gpt-4o-transcribe', mt: 'fixture', tts: 'elevenlabs' } }))).toBe(false);
+    expect(isRealRecord(makeRecord({ providers: { stt: 'gpt-4o-transcribe', mt: 'anthropic', tts: 'fixture' } }))).toBe(false);
     expect(isRealRecord(makeRecord({ corpusId: 'placeholder-1' }))).toBe(false);
     expect(isRealRecord(makeRecord({ arm: 'fixture' }))).toBe(false);
   });

@@ -4,16 +4,15 @@
  * Comparison-mode-only blind A/B rating of the arms' TTS output, per PRD §9
  * and the blind-compare section of
  * design_handoff_interpreter_workbench/interpreter-workbench.dc.html.
- * SessionView renders this component after the arm-cards grid, ONLY while
- * more than one arm is active. First component under the ticket-012
- * decomposition directory src/client/components/session/.
+ * TICKET 012 left this component with no caller: Live is one architecture
+ * per session, so there is nothing to compare there. It is kept, compiling
+ * and prop-driven, for the Replay re-home in ticket 014.
  *
- * Wiring: the blind-compare LOGIC (open/close, draw, scores, submit) lives
- * in useSessionController as the `blind` slice + toggleBlind / scoreBlind /
- * submitBlind / playBlindSample actions (it needs deps.ledger, deps.rng,
- * deps.now and the per-arm playbacks); this component renders that slice.
+ * Wiring: the blind-compare LOGIC (open/close, draw, scores, submit) belongs
+ * to whoever owns the ledger, the rng and the playbacks; this component only
+ * renders the slice it is handed.
  *
- * ========================= CONTRACT (locked by BlindCompare.test.tsx) ======
+ * ========================= CONTRACT (to be re-locked in ticket 014) =======
  *
  * Visibility / trigger row:
  * - Rendered ONLY in comparison mode (>1 active arm): secondary button
@@ -54,17 +53,41 @@
  */
 
 import type { CSSProperties, ReactElement } from 'react';
-import {
-  ARM_CATALOG,
-  type BlindSampleKey,
-  type SessionController,
-} from '../../views/useSessionController';
 
-export interface BlindCompareProps {
-  controller: SessionController;
+export type BlindSampleKey = 'A' | 'B';
+
+/** The blind-compare slice its owner keeps. */
+export interface BlindSlice {
+  open: boolean;
+  revealed: boolean;
+  /** Presented configuration ids for the open draw; order[0] is Sample A. */
+  order: string[];
+  scores: Record<BlindSampleKey, number | null>;
+  /** True when the last settled utterance had at least one failure. */
+  lastUtteranceFailed: boolean;
 }
 
-const labelByArmId = new Map(ARM_CATALOG.map((d) => [d.id, d.label]));
+export interface BlindActions {
+  toggleBlind: () => void;
+  scoreBlind: (sample: BlindSampleKey, score: number) => void;
+  submitBlind: () => void;
+  playBlindSample: (sample: BlindSampleKey) => void;
+}
+
+/**
+ * TICKET 012: decoupled from the Live session controller. Live is ONE
+ * architecture per session, so blind compare no longer has two things to
+ * compare there; it is a Replay feature now and takes its data as props
+ * until ticket 014 re-homes it. `labels` maps a presented id to its display
+ * name — the caller's business now.
+ */
+export interface BlindCompareProps {
+  blind: BlindSlice;
+  labels: Record<string, string>;
+  utteranceCount: number;
+  candidateCount: number;
+  actions: BlindActions;
+}
 
 const cardStyle: CSSProperties = {
   background: 'var(--surface-card)',
@@ -181,9 +204,14 @@ function SamplePanel({
   );
 }
 
-export default function BlindCompare({ controller }: BlindCompareProps): ReactElement | null {
-  const { state, actions, blind } = controller;
-  if (state.arms.length <= 1) return null;
+export default function BlindCompare({
+  blind,
+  labels,
+  utteranceCount,
+  candidateCount,
+  actions,
+}: BlindCompareProps): ReactElement | null {
+  if (candidateCount <= 1) return null;
 
   const samples: BlindSampleKey[] = ['A', 'B'];
 
@@ -201,7 +229,7 @@ export default function BlindCompare({ controller }: BlindCompareProps): ReactEl
             marginLeft: 'auto',
           }}
         >
-          {`utterance ${state.utteranceCount} · ${state.arms.length} arms · ${
+          {`utterance ${utteranceCount} · ${candidateCount} arms · ${
             blind.lastUtteranceFailed ? 'one arm failed' : 'all succeeded'
           }`}
         </span>
@@ -231,7 +259,7 @@ export default function BlindCompare({ controller }: BlindCompareProps): ReactEl
                 key={sample}
                 sample={sample}
                 revealed={blind.revealed}
-                identity={labelByArmId.get(blind.order[i] ?? '') ?? null}
+                identity={labels[blind.order[i] ?? ''] ?? null}
                 score={blind.scores[sample]}
                 onScore={(n) => actions.scoreBlind(sample, n)}
                 onPlay={() => actions.playBlindSample(sample)}
