@@ -658,6 +658,137 @@ describe('ResultsView — secondary tab: per-recording table', () => {
   });
 });
 
+/* ===================================== ticket 027 — failures stay visible == */
+
+const MIXED_RECORDING_ID = 'rec-mixed';
+/** The one gate-passing sample in the mixed group. p50 = p95 = 1.05 s. */
+const MIXED_LATENCY_MS = 1_050;
+const MIXED_COST_USD = 0.002;
+
+/**
+ * Ticket 027 repro. ONE recording × ONE configuration holding a gate-passing
+ * complete Arm B run and — optionally — a SECOND attempt at the very same
+ * configuration that failed. The two share a (recording × configuration) group,
+ * so the failure never gets a row of its own: it is a fact about this cell, and
+ * the cell is the only place it can be told. The failed run carries the fat
+ * 5.00 s / $0.500 exclusion figures, so a leak into any aggregate is visible.
+ */
+function mixedLedger(options: { withFailed: boolean }): RunLedger {
+  const ledger = new RunLedger();
+  ledger.appendRecording(
+    makeRecordingEntity({ id: MIXED_RECORDING_ID, label: 'mixed clip' }),
+  );
+  ledger.appendRun(
+    runWithLatency(MIXED_LATENCY_MS, {
+      id: 'run-mixed-ok',
+      recordingId: MIXED_RECORDING_ID,
+      cost: MIXED_COST_USD,
+    }),
+  );
+  if (options.withFailed) {
+    ledger.appendRun(
+      runWithLatency(EXCLUDED_LATENCY_MS, {
+        id: 'run-mixed-failed',
+        recordingId: MIXED_RECORDING_ID,
+        status: 'failed',
+        errors: ['tts stage timed out'],
+        cost: EXCLUDED_COST_USD,
+      }),
+    );
+  }
+  return ledger;
+}
+
+describe('ResultsView — a failed run is visible on the row that absorbed it', () => {
+  it('a MIXED group is BOTH in experiments AND marked failed — it does not choose', () => {
+    const ledger = mixedLedger({ withFailed: true });
+    const model = groupByRecording(ledger);
+    expect(model).toHaveLength(1); // the failed run gets NO row of its own
+    const group = model[0]!;
+    expect(group).toMatchObject({ runCount: 2, failedCount: 1, n: 1 });
+
+    renderView(ledger);
+    showSecondaryTab();
+    const row = recordingRow(MIXED_RECORDING_ID);
+    const text = row.textContent ?? '';
+
+    // The gate still passes: one complete sweep run reaches the experiments.
+    expect(row).toHaveAttribute('data-excluded', 'false');
+    expect(text).toContain('in experiments');
+
+    // ...and the second, failed attempt is still on the row.
+    expect(row).toHaveAttribute('data-failed-count', String(group.failedCount));
+    expect(row).toHaveAttribute('data-run-count', String(group.runCount));
+    const note = row.querySelector('[data-failure-note]');
+    expect(note).not.toBeNull();
+    const noteText = (note!.textContent ?? '').trim();
+    expect(noteText).toMatch(/fail/i);
+    // n vs runCount is legible in the copy: 1 measured cannot read as 1 attempt.
+    expect(noteText).toContain(String(group.failedCount));
+    expect(noteText).toContain(String(group.runCount));
+  });
+
+  it('the failed run moves NO figure on the row it joined', () => {
+    const clean = groupByRecording(mixedLedger({ withFailed: false }))[0]!;
+    const mixed = groupByRecording(mixedLedger({ withFailed: true }))[0]!;
+    // The model itself is unchanged (derive.ts must not move) ...
+    expect(mixed.p50Ms).toBe(clean.p50Ms);
+    expect(mixed.p95Ms).toBe(clean.p95Ms);
+    expect(mixed.costUsd).toBe(clean.costUsd);
+    expect(mixed.n).toBe(clean.n);
+
+    // ... and so is every figure the row renders.
+    renderView(mixedLedger({ withFailed: true }));
+    showSecondaryTab();
+    const text = recordingRow(MIXED_RECORDING_ID).textContent ?? '';
+    expect(text).toContain(formatMs(MIXED_LATENCY_MS));
+    expect(text).toContain(formatUsd(MIXED_COST_USD));
+    expect(text).not.toContain(formatMs(EXCLUDED_LATENCY_MS));
+    expect(text).not.toContain(formatUsd(EXCLUDED_COST_USD));
+  });
+
+  it('an ALL-FAILED group keeps excluded · failed and shows no money at all', () => {
+    const ledger = new RunLedger();
+    seedCleanSweep(ledger); // so the view is non-empty
+    seedExclusionCases(ledger); // rec-failed holds exactly one failed run
+    renderView(ledger);
+    showSecondaryTab();
+
+    const row = recordingRow(FAILED_RECORDING_ID);
+    const text = row.textContent ?? '';
+    expect(row).toHaveAttribute('data-excluded', 'true');
+    expect(row.querySelector('[data-exclusion="failed"]')).not.toBeNull();
+    expect(text).toMatch(/excluded/i);
+
+    // p50, p95 and cost are all '—'. A $0.000 cost over zero samples is a
+    // fabricated figure: nothing was measured, so nothing is reported.
+    expect((text.match(/—/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(text).not.toContain('$');
+
+    expect(row).toHaveAttribute('data-failed-count', '1');
+  });
+
+  // REGRESSION GUARD — passes before the fix as well as after. A ledger with no
+  // failed run in any group must render exactly as it does today: no new hook,
+  // no new word, nothing.
+  it('GUARD: a ledger with no failed run grows no failure markup', () => {
+    const ledger = comparisonLedger();
+    seedCleanSweep(ledger);
+    expect(groupByRecording(ledger).every((r) => r.failedCount === 0)).toBe(true);
+
+    renderView(ledger);
+    showSecondaryTab();
+    const rows = Array.from(document.querySelectorAll('[data-recording-row]'));
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.querySelector('[data-failure-note]')).toBeNull();
+      expect(row.hasAttribute('data-failed-count')).toBe(false);
+      expect(row.hasAttribute('data-run-count')).toBe(false);
+      expect(row.textContent ?? '').not.toMatch(/fail/i);
+    }
+  });
+});
+
 describe('ResultsView — secondary tab: category table', () => {
   it('groups by utterance category, not by recording', () => {
     const ledger = new RunLedger();

@@ -6,7 +6,7 @@ source: qa
 depends_on: []
 touches: [src/client/views/ResultsView.tsx, src/client/views/ResultsView.test.tsx]
 iterations: 0
-test_files: []
+test_files: [src/client/views/ResultsView.test.tsx]
 branch: ""
 ---
 
