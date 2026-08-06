@@ -143,6 +143,20 @@ export interface LiveSessionUtterance {
   costUsd: number;
 }
 
+/**
+ * The conversation-context policy a LiveSession ran under (PRD §7 tier-2
+ * control · §17 21a/21e). Realtime-only: 'default' replays the whole
+ * conversation each turn, 'trimmed' deletes history after each response.
+ *
+ * TICKET 012 — 'n/a' is NOT a null-object. Cascade is context-free BY
+ * DESIGN, so the knob does not exist for it; recording 'default' would
+ * imply one and would pool cascade sessions into the `realtime-default`
+ * column of PRD §8's conversation-length card. 'n/a' says "this session had
+ * no policy", which is a different claim from "this session ran the default
+ * policy", and only one of them is true.
+ */
+export type LiveContextPolicy = 'default' | 'trimmed' | 'n/a';
+
 /** PRD §7. `quality.wer` is ALWAYS null in Live — there is no reference text. */
 export interface LiveSession {
   id: string;
@@ -151,6 +165,13 @@ export interface LiveSession {
   durationMs: number;
   architecture: Mode;
   providerTriple?: ProviderTriple;
+  /**
+   * TICKET 012 (additive): the policy IN FORCE AT STOP. PRD §8's
+   * conversation-length card renders realtime-default / realtime-trimmed /
+   * cascade from LiveSessions, and without this field the trimmed column is
+   * structurally unfillable. Optional so pre-012 sessions still parse.
+   */
+  contextPolicy?: LiveContextPolicy;
   modelSnapshots: Record<string, string>;
   utterances: LiveSessionUtterance[];
   latency: { p50: number | null; p95: number | null; driftMinute1ToEnd: number | null };

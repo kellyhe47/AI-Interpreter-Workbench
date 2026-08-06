@@ -3,10 +3,10 @@
  *
  * 52px sticky bar per the design mock: mic glyph + 'Interpreter workbench'
  * wordmark, Session/Results segmented control, and the right-hand status
- * area. Lives at app level (not inside SessionView) because it hosts the
+ * area. Lives at app level (not inside the Live view) because it hosts the
  * view tabs; App owns the current view and passes it down.
  *
- * DOM contract (locked by App.test.tsx + SessionView tests):
+ * DOM contract (locked by App.test.tsx + LiveView tests):
  * - Tab buttons named exactly 'Session' and 'Results', with aria-pressed
  *   reflecting the current view.
  * - Pulsing live dot + 'live' text, marked [data-live-dot], rendered ONLY

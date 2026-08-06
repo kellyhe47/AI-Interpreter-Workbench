@@ -1,140 +1,94 @@
 /**
- * Ticket 012 — Session view.
+ * Ticket 012 — Live view (renamed from the v1 session view; ONE architecture).
  *
- * `<SessionView controller={useSessionController(deps)} />` — recreates the
- * design mock (design_handoff_interpreter_workbench/interpreter-workbench.dc.html,
- * Session view) in React/TS on top of the REAL session machine, transports,
- * audio, and ledger. The controller hook is owned by App (it also feeds the
- * TopBar live dot); this component renders what the controller returns.
- * Styles/copy follow the mock exactly through tokens.css CSS vars, with the
- * PRD-mandated deviations below.
+ * `<LiveView controller={useSessionController(deps)} />` — recreates the Live
+ * section of design_handoff_interpreter_workbench/interpreter-workbench-v2.dc.html
+ * in React/TS on top of the REAL session machine, transport, audio and
+ * ledger. Styles come from tokens.css CSS variables only.
  *
  * ========================= DOM CONTRACT (locked) ===========================
- * Locked by SessionView.test.tsx + SessionView.flow.test.tsx. Test hooks are
+ * Locked by LiveView.test.tsx + LiveView.flow.test.tsx. Test hooks are
  * style-agnostic data attributes; user-facing copy is asserted verbatim.
  *
  * DEVIATIONS FROM THE MOCK (PRD wins — do not "fix" these back):
  * - NO "Mock state" chips row. The text 'Mock state' must never render.
- * - Mic permission is a LIVE four-value indicator (see below), not the
- *   mock's hardcoded 'mic allowed'.
- * - The stopped banner shows REAL machine-summary numbers, never the mock's
- *   'Session stopped · 5:02 · 32 utterances · 0 dropped · $0.71' string.
- * - Session footer figures come from ledger aggregates for the live session;
- *   the amber 'figures illustrative' pill NEVER renders (it existed only for
- *   the mock's made-up figures). The utterance count still renders.
- * - Cantonese warnings render whenever warnings() fires and status is not
- *   'stopped' — including idle (see useSessionController.ts).
+ * - Mic permission is a LIVE four-value indicator, never hardcoded, never
+ *   optimistic.
+ * - The stopped banner shows REAL machine-summary numbers.
+ * - Session footer figures come from ledger aggregates; the amber 'figures
+ *   illustrative' pill NEVER renders.
+ * - NO comparison grid: no arm cards, no add-arm pill, no audible-arm
+ *   selector and no autoplay switch. Live runs one architecture and autoplay
+ *   is unconditionally on, so there is nothing to choose between.
  *
- * Idle card (status 'idle'):
- *   'No active session' + subline
- *   '{src} → {tgt} · {Mode label} · autoplay on. Your browser will ask for
- *    microphone permission.' + primary button 'Start microphone'.
+ * Header: 'Live' + purpose line
+ *   'One architecture, voice in → voice out, up to 5 minutes. Metrics are
+ *    saved; audio is discarded. Nothing here becomes experimental evidence.'
  *
- * Mic indicator — single element [data-mic-indicator="<value>"]:
- *   not-requested → 'mic not requested' (muted)
- *   requesting    → 'mic prompt open…'  (amber)
- *   granted       → 'mic allowed'       (green, mic icon)
- *   denied        → 'mic blocked'       (red)
+ * Controls card row 1:
+ *   Realtime / Cascade segmented buttons, aria-pressed = APPLIED mode.
+ *   [data-arm-tag="A|B|C|ad-hoc"] pill, text 'this is Arm B' | 'ad-hoc'. It
+ *   is a READOUT: a span with no interactive descendant, because membership
+ *   is derived from the recipe and never declared by a control.
+ *   Language button labelled '{src} → {tgt}'; direction button aria-label
+ *   'Swap direction'; support pill 'both modes' | 'cascade only';
+ *   'Stop session' while stoppable, 'Start new session' when stopped.
+ * Controls card row 2:
+ *   cascade → three [data-stage-select="stt|mt|tts"] buttons, text = the
+ *     selected model id, click cycles through MENUS[stage].
+ *   realtime → [data-context-policy="default|trimmed"] containing buttons
+ *     'default' / 'trimmed' with aria-pressed, plus the cost note.
  *
- * Permission-denied BLOCKING card [data-denied-card] (replaces the idle
- * card, idle-card visual pattern, NOT dismissible — no close control):
- *   heading 'Microphone blocked'
- *   'This session cannot start until the microphone is unblocked.'
- *   'Check the browser site permission: allow microphone access for this
- *    site (look for the mic icon in the address bar).'
- *   'Check the OS microphone setting: your system privacy settings must
- *    allow this browser to use the microphone.'
- *   'Browsers do not re-prompt after a denial — reset the site permission
- *    first, then retry.'
- *   button 'Retry microphone' (dispatches START — a machine no-op while
- *   denied, so capture is NOT re-invoked).
+ * Status strip:
+ *   [data-mic-indicator="<value>"] — 'mic not requested' | 'mic prompt open…'
+ *     | 'mic allowed' | 'mic blocked'.
+ *   [data-conn] 'no connection' | 'connected' | 'reconnecting…' | 'disconnected'.
+ *   [data-input-meter] with five [data-meter-bar] children.
+ *   [data-state-label] = stateLabel(state) (mono) — 'switch-queued' overlays.
+ *   [data-elapsed] = '{M:SS} / 5:00 · autoplay on'.
  *
- * Controls card (always visible): mode buttons 'Realtime' / 'Cascade' with
- * aria-pressed reflecting the APPLIED mode; language button labelled
- * '{src} → {tgt}'; direction button aria-label 'Swap direction'; support
- * pill 'both modes' | 'cascade only'; autoplay checkbox labelled 'autoplay'
- * (rendered only when exactly one arm and not stopped); 'Stop session'
- * while stoppable, 'Start new session' when stopped.
+ * Banners (copy verbatim): switch-queued, reconnecting, disconnected +
+ * 'Reconnect', Cantonese warnings (warn, never block), stopped summary.
+ * Banner copy sits in DIRECT text nodes so getByText matches the banner
+ * itself rather than an ancestor.
  *
- * Status strip: [data-conn] 'no connection' (idle/stopped) | 'connected' |
- * 'reconnecting…' | 'disconnected'; [data-state-label] = machine status
- * (mono); [data-elapsed] mm:ss zero-padded ('00:00' idle, frozen at stop);
- * [data-autoplay-label] 'autoplay on' | 'autoplay off'.
+ * Permission-denied BLOCKING card [data-denied-card]: names BOTH the site
+ * permission and the OS permission layers, says browsers do not re-prompt,
+ * and offers 'Retry microphone' (a machine no-op while denied).
  *
- * Banners (copy verbatim):
- *   switch queued  'switching to {label} after this sentence finishes'
- *   reconnecting   'Reconnecting — attempt {n} of 5 · transcript history
- *                   preserved'
- *   disconnected   'Disconnected — reconnect attempts exhausted (5 of 5) ·
- *                   transcript history intact' + button 'Reconnect'
- *   canto target   'Realtime does not list Cantonese as a supported output
- *                   language — the run proceeds to observe the actual
- *                   failure mode. Text may look correct while audio
- *                   pronunciation is not.'
- *   canto input    'Realtime does not document Cantonese speech input —
- *                   recognition quality in this direction is unverified.
- *                   The run proceeds to observe actual behavior.'
- *   stopped (green)'Session stopped · {m:ss} · {n} utterances · {d} dropped
- *                   · ${costUsd.toFixed(2)}' — REAL summary numbers.
+ * Session cards: [data-source-card]; exactly ONE [data-target-card] with
+ * [data-target-status] in 'in-flight' | 'ready' | 'playing' | 'failed',
+ * [data-target-arch] naming the architecture, [data-stage-row="<label>"]
+ * rows carrying LABELLED milliseconds, and the intervals note.
  *
- * Arms strip (visible when not idle): label 'Arms'; per-arm pill
- * [data-arm-pill="<armId>"] (Realtime accent-soft, cascades gray), remove
- * button aria-label 'remove {label}' when >1 arm; dashed add pill button
- * '+ {label} · ${cost.toFixed(3)}/min' while <3 arms; multi-arm note
- * 'autoplay off — two arms would talk over each other'.
- *
- * Source card [data-source-card]: 'Source · {srcLang}' plus
- * ' — shared by every arm' suffix only in comparison mode; accumulated
- * partial text replaced by the final transcript.
- *
- * Arm cards [data-arm-card="<armId>"] with [data-arm-status] in
- * 'in-flight' | 'ready' | 'playing' | 'failed':
- *   in-flight → indeterminate bar [data-inflight-bar]
- *   ready     → target text; play button 'play' + mono duration
- *               `${(durationMs/1000).toFixed(1)} s`; stage rows
- *               [data-stage-row="<label>"] with LABELLED mono ms
- *               (`${ms} ms`) — cascade rows endpointing/stt/mt/tts/queue,
- *               realtime rows endpointing/model/queue; footer 'total'
- *               `${totalMs} ms` + `$${costPerMinUsd.toFixed(3)}/min` +
- *               intervals note '5 intervals · all visible' (cascade) |
- *               '3 intervals · 1 opaque' (realtime); realtime additionally
- *               renders the opaque footnote 'model interval is opaque —
- *               recognition, translation and voice happen inside one model
- *               · source transcript comes from a parallel recognizer, not
- *               the model itself'.
- *   failed    → cascade: '{server message} — session still running';
- *               realtime: 'opaque failure — no stage attribution · session
- *               still running'. Session survives (status strip stays live).
- *
- * Session footer [data-session-footer]: '{utteranceCount} utterances',
- * 'p50' / 'p95' with mono `${(ms/1000).toFixed(2)} s` (or '—' with no
- * samples), 'session' with `$${costUsd.toFixed(2)}` — all from
- * ledger.aggregates(sessionRunId). NO 'figures illustrative' pill, ever.
+ * [data-session-footer]: '{n} utterances', p50 / p95 / session $ from
+ * ledger.aggregates(sessionRunId).
  * ==========================================================================
  */
 
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
+import { MENUS, armLabel } from '../../core/arms';
 import {
   deriveCascadeIntervals,
   deriveRealtimeIntervals,
   type CascadeTimestamps,
   type RealtimeTimestamps,
 } from '../../core/timing';
-import BlindCompare from '../components/session/BlindCompare';
 import {
+  LIVE_MAX_SESSION_MS,
   MAX_RECONNECT_ATTEMPTS,
   pairs,
+  stateLabel,
   supportPill,
   warnings,
+  type ProviderStage,
   type SessionStatus,
 } from '../state/sessionMachine';
-import type { ArmDef, ArmUtteranceView, SessionController } from './useSessionController';
+import type { SessionController, TargetView } from './useSessionController';
 
-export interface SessionViewProps {
+export interface LiveViewProps {
   controller: SessionController;
 }
-
-const AMBER = 'oklch(45% 0.12 75)';
 
 const CONNECTED_STATUSES: readonly SessionStatus[] = [
   'listening',
@@ -154,14 +108,14 @@ const STOPPABLE_STATUSES: readonly SessionStatus[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Shared styles (mirroring the mock's inline styles via tokens.css vars)
+// Shared styles — tokens.css CSS variables only (no colour literals)
 // ---------------------------------------------------------------------------
 
 const cardStyle: CSSProperties = {
   background: 'var(--surface-card)',
   border: '1px solid var(--border-default)',
-  borderRadius: 12,
-  boxShadow: '0 1px 2px rgba(0,0,0,.05)',
+  borderRadius: 'var(--radius-lg)',
+  boxShadow: 'var(--shadow-card)',
 };
 
 const centeredCardStyle: CSSProperties = {
@@ -180,7 +134,7 @@ const eyebrowStyle: CSSProperties = {
 const segWrapStyle: CSSProperties = {
   display: 'flex',
   border: '1px solid var(--border-default)',
-  borderRadius: 8,
+  borderRadius: 'var(--radius-md)',
   overflow: 'hidden',
   font: '500 12.5px var(--font-sans)',
 };
@@ -198,7 +152,7 @@ function segBtnStyle(on: boolean): CSSProperties {
 
 const primaryBtnStyle: CSSProperties = {
   border: 'none',
-  borderRadius: 8,
+  borderRadius: 'var(--radius-md)',
   background: 'var(--btn-primary-bg)',
   color: 'var(--text-inverse)',
   font: '500 13px var(--font-sans)',
@@ -216,7 +170,7 @@ const smallPrimaryBtnStyle: CSSProperties = {
 
 const smallSecondaryBtnStyle: CSSProperties = {
   border: '1px solid var(--border-default)',
-  borderRadius: 8,
+  borderRadius: 'var(--radius-md)',
   background: 'var(--surface-card)',
   color: 'var(--text-body)',
   font: '500 12px var(--font-sans)',
@@ -232,7 +186,7 @@ function bannerStyle(background: string, color: string): CSSProperties {
     gap: 9,
     background,
     color,
-    borderRadius: 8,
+    borderRadius: 'var(--radius-md)',
     padding: '10px 14px',
     font: '400 12.5px var(--font-sans)',
   };
@@ -241,7 +195,7 @@ function bannerStyle(background: string, color: string): CSSProperties {
 const monoStyle: CSSProperties = { fontFamily: 'var(--font-mono)', fontSize: 11 };
 
 // ---------------------------------------------------------------------------
-// Icons (Lucide-style outline, 1.5px stroke — copied from the mock)
+// Icons (Lucide-style outline, 1.5px stroke — from the design mock)
 // ---------------------------------------------------------------------------
 
 function MicIcon({ size, stroke }: { size: number; stroke: string }): ReactElement {
@@ -419,30 +373,27 @@ function SwapIcon(): ReactElement {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-/** mm:ss with both fields zero-padded (status strip). */
-function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
-
-/** m:ss with unpadded minutes (stopped summary banner). */
-function formatSummaryElapsed(ms: number): string {
+/** m:ss with unpadded minutes — the Live clock reads against '5:00'. */
+function formatClock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-interface StageRow {
+interface StageRowData {
   label: string;
   ms: number | null;
+  /** Realtime's model interval: the asymmetry is the PRD finding. */
+  opaque?: boolean;
 }
 
-function stageRowsFor(def: ArmDef, view: ArmUtteranceView): { rows: StageRow[]; total: number | null } {
-  if (def.mode === 'cascade') {
-    const iv = deriveCascadeIntervals(view.timings as CascadeTimestamps);
+function stageRowsFor(
+  architecture: 'cascade' | 'realtime',
+  target: TargetView,
+): { rows: StageRowData[]; total: number | null } {
+  if (architecture === 'cascade') {
+    const iv = deriveCascadeIntervals(target.timings as CascadeTimestamps);
     return {
       rows: [
         { label: 'endpointing', ms: iv.endpointing },
@@ -454,11 +405,11 @@ function stageRowsFor(def: ArmDef, view: ArmUtteranceView): { rows: StageRow[]; 
       total: iv.endToEnd,
     };
   }
-  const iv = deriveRealtimeIntervals(view.timings as RealtimeTimestamps);
+  const iv = deriveRealtimeIntervals(target.timings as RealtimeTimestamps);
   return {
     rows: [
       { label: 'endpointing', ms: iv.endpointing },
-      { label: 'model', ms: iv.model },
+      { label: 'model', ms: iv.model, opaque: true },
       { label: 'queue', ms: iv.queue },
     ],
     total: iv.endToEnd,
@@ -477,118 +428,59 @@ function Banner({
   children: ReactNode;
 }): ReactElement {
   const styles: Record<string, CSSProperties> = {
-    warning: bannerStyle('var(--warning-soft)', AMBER),
+    warning: bannerStyle('var(--warning-soft)', 'var(--warning)'),
     negative: bannerStyle('var(--negative-soft)', 'var(--negative)'),
     positive: bannerStyle('var(--positive-soft)', 'var(--positive)'),
   };
   return <div style={styles[tone]}>{children}</div>;
 }
 
-function AutoplaySwitch({
-  checked,
-  onChange,
-}: {
-  checked: boolean;
-  onChange: (value: boolean) => void;
-}): ReactElement {
-  return (
-    <label
-      style={{
-        position: 'relative',
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 7,
-        font: '400 12px var(--font-sans)',
-        color: 'var(--text-secondary)',
-        cursor: 'pointer',
-      }}
-    >
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        style={{
-          position: 'absolute',
-          opacity: 0,
-          width: 36,
-          height: 20,
-          margin: 0,
-          cursor: 'pointer',
-        }}
-      />
-      <span
-        aria-hidden
-        style={{
-          width: 36,
-          height: 20,
-          borderRadius: 999,
-          background: checked ? 'var(--accent)' : 'var(--gray-300)',
-          position: 'relative',
-          display: 'inline-block',
-          transition: 'background 150ms var(--ease-out)',
-        }}
-      >
-        <i
-          style={{
-            position: 'absolute',
-            top: 2,
-            left: checked ? 18 : 2,
-            width: 16,
-            height: 16,
-            borderRadius: 999,
-            background: '#fff',
-            boxShadow: '0 1px 2px rgba(0,0,0,.15)',
-            transition: 'left 150ms var(--ease-out)',
-          }}
-        />
-      </span>
-      autoplay
-    </label>
-  );
-}
-
-function ArmCard({
-  def,
-  view,
+/** The one target card. There is no grid: one architecture, one output. */
+function TargetCard({
+  architecture,
+  recipe,
+  target,
   playing,
   stopped,
   onTogglePlay,
 }: {
-  def: ArmDef;
-  view: ArmUtteranceView;
+  architecture: 'cascade' | 'realtime';
+  recipe: string;
+  target: TargetView;
   playing: boolean;
   stopped: boolean;
   onTogglePlay: () => void;
 }): ReactElement {
-  const failed = view.status === 'failed';
-  const inFlight = view.status === 'in-flight';
-  const ready = !inFlight && !failed;
-  const displayStatus = failed ? 'failed' : playing ? 'playing' : view.status;
+  const failed = target.status === 'failed';
+  const inFlight = target.status === 'in-flight';
+  const displayStatus = failed ? 'failed' : playing ? 'playing' : target.status;
   const statusLabel = failed ? 'failed' : inFlight ? 'in flight' : playing ? 'playing' : 'ready';
   const statusColor = failed
     ? 'var(--negative)'
     : inFlight
       ? 'var(--text-secondary)'
       : 'var(--positive)';
-  const { rows, total } = stageRowsFor(def, view);
-  const showDetails = ready && view.hasData;
+  const archLabel = architecture === 'realtime' ? 'Realtime' : 'Cascade';
+  const { rows, total } = stageRowsFor(architecture, target);
+  const showDetails = !failed && !inFlight && target.hasData;
 
   return (
     <div
-      data-arm-card={def.id}
-      data-arm-status={displayStatus}
-      style={{
-        ...cardStyle,
-        padding: '16px 18px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
-      }}
+      data-target-card
+      data-target-status={displayStatus}
+      style={{ ...cardStyle, padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}
     >
       <div
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}
       >
-        <span style={{ font: '600 13px var(--font-sans)' }}>{def.label}</span>
+        <span data-target-arch style={{ font: '600 13px var(--font-sans)' }}>
+          {archLabel}
+          <span
+            style={{ ...monoStyle, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}
+          >
+            {recipe}
+          </span>
+        </span>
         <span
           style={{
             font: '400 11px var(--font-sans)',
@@ -605,7 +497,12 @@ function ArmCard({
       {inFlight && (
         <div
           data-inflight-bar
-          style={{ height: 5, background: 'var(--gray-100)', borderRadius: 3, overflow: 'hidden' }}
+          style={{
+            height: 5,
+            background: 'var(--gray-100)',
+            borderRadius: 3,
+            overflow: 'hidden',
+          }}
         >
           <i
             style={{
@@ -621,7 +518,7 @@ function ArmCard({
 
       {!failed && (
         <div style={{ font: '400 14px/1.6 var(--font-sans)', minHeight: 44 }}>
-          {view.targetText}
+          {target.targetText}
         </div>
       )}
 
@@ -630,12 +527,12 @@ function ArmCard({
           style={{
             background: 'var(--negative-soft)',
             color: 'var(--negative)',
-            borderRadius: 8,
+            borderRadius: 'var(--radius-md)',
             padding: '9px 12px',
             font: '400 12px var(--font-sans)',
           }}
         >
-          {view.failMessage}
+          {target.failMessage}
         </div>
       )}
 
@@ -647,7 +544,7 @@ function ArmCard({
             alignItems: 'center',
             gap: 7,
             border: `1px solid ${playing ? 'var(--accent)' : 'var(--border-default)'}`,
-            borderRadius: 8,
+            borderRadius: 'var(--radius-md)',
             padding: '7px 12px',
             background: 'var(--surface-card)',
             font: '500 12px var(--font-sans)',
@@ -659,7 +556,7 @@ function ArmCard({
           {playing ? <PauseGlyph /> : <PlayGlyph />}
           {playing ? 'pause' : 'play'}
           <span style={{ ...monoStyle, color: 'var(--text-muted)', marginLeft: 'auto' }}>
-            {(view.durationMs / 1000).toFixed(1)} s
+            {(target.durationMs / 1000).toFixed(1)} s
           </span>
         </button>
       )}
@@ -686,13 +583,18 @@ function ArmCard({
                 data-stage-row={row.label}
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: '82px 1fr 58px',
+                  gridTemplateColumns: '110px 1fr 58px',
                   gap: '0 10px',
                   alignItems: 'center',
                   font: '400 11.5px var(--font-sans)',
                 }}
               >
-                <span style={{ color: 'var(--text-secondary)' }}>{row.label}</span>
+                <span style={{ color: 'var(--text-secondary)' }}>
+                  {row.label}
+                  {row.opaque && (
+                    <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>opaque</span>
+                  )}
+                </span>
                 <span
                   style={{
                     height: 5,
@@ -746,18 +648,17 @@ function ArmCard({
               {total === null ? '—' : `${total} ms`}
             </b>
           </span>
-          <span style={monoStyle}>{`$${def.costPerMinUsd.toFixed(3)}/min`}</span>
           <span style={{ color: 'var(--text-muted)' }}>
-            {def.mode === 'cascade' ? '5 intervals · all visible' : '3 intervals · 1 opaque'}
+            {architecture === 'cascade' ? '5 intervals · all visible' : '3 intervals · 1 opaque'}
           </span>
         </div>
       )}
 
-      {showDetails && def.mode === 'realtime' && (
+      {showDetails && architecture === 'realtime' && (
         <div
           style={{
             background: 'var(--surface-sunken)',
-            borderRadius: 8,
+            borderRadius: 'var(--radius-md)',
             padding: '8px 11px',
             font: '400 11px/1.5 var(--font-sans)',
             color: 'var(--text-secondary)',
@@ -775,8 +676,8 @@ function ArmCard({
 // Main view
 // ---------------------------------------------------------------------------
 
-export default function SessionView({ controller }: SessionViewProps): ReactElement {
-  const { state, actions, footer } = controller;
+export default function LiveView({ controller }: LiveViewProps): ReactElement {
+  const { state, actions, footer, target, runConfig, armTag } = controller;
   const status = state.status;
   const pair = pairs[state.langIdx] ?? pairs[0]!;
   const src = state.reversed ? pair.tgt : pair.src;
@@ -786,23 +687,20 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
   const idleLike = status === 'idle' || status === 'requesting-permission';
   const denied = status === 'permission-denied';
   const showSessionArea = !idleLike && !denied;
-  const multi = state.arms.length > 1;
-  const singleArm = state.arms.length === 1;
   const stoppable = STOPPABLE_STATUSES.includes(status);
   const live = CONNECTED_STATUSES.includes(status);
-  const warn = warnings(
-    state.langIdx,
-    state.reversed,
-    controller.activeArms.map((d) => d.mode),
-  );
+  const warn = warnings(state.langIdx, state.reversed, state.mode);
   const pill = supportPill(state.langIdx);
+  const cascade = state.mode === 'cascade';
+  const recipe = cascade
+    ? `${state.providers.stt} → ${state.providers.mt} → ${state.providers.tts}`
+    : (runConfig.realtimeModel ?? '');
 
-  // Connection label derives from machine status.
   let connLabel: string;
   let connColor: string;
   if (status === 'reconnecting') {
     connLabel = 'reconnecting…';
-    connColor = AMBER;
+    connColor = 'var(--warning)';
   } else if (status === 'disconnected') {
     connLabel = 'disconnected';
     connColor = 'var(--text-muted)';
@@ -816,104 +714,196 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
 
   const micByPermission: Record<string, { label: string; color: string; icon: boolean }> = {
     'not-requested': { label: 'mic not requested', color: 'var(--text-muted)', icon: false },
-    requesting: { label: 'mic prompt open…', color: AMBER, icon: false },
+    requesting: { label: 'mic prompt open…', color: 'var(--warning)', icon: false },
     granted: { label: 'mic allowed', color: 'var(--positive)', icon: true },
     denied: { label: 'mic blocked', color: 'var(--negative)', icon: false },
   };
   const mic = micByPermission[state.micPermission]!;
 
   const meterHeights = [5, 9, 13, 7, 4];
+  const stages: ProviderStage[] = ['stt', 'mt', 'tts'];
 
   return (
     <>
+      {/* header + purpose line */}
+      <div style={{ padding: '0 4px' }}>
+        <div style={{ font: '600 18px var(--font-sans)', letterSpacing: 'var(--tracking-heading)' }}>
+          Live
+        </div>
+        <div
+          style={{
+            font: '400 12.5px/1.6 var(--font-sans)',
+            color: 'var(--text-secondary)',
+            marginTop: 4,
+            maxWidth: 720,
+          }}
+        >
+          One architecture, voice in → voice out, up to 5 minutes. Metrics are saved; audio is
+          discarded. Nothing here becomes experimental evidence.
+        </div>
+      </div>
+
       {/* controls card — always visible per PRD */}
       <div
         style={{
           ...cardStyle,
           display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          flexWrap: 'wrap',
+          flexDirection: 'column',
+          gap: 12,
           padding: '14px 16px',
-          boxShadow: 'var(--shadow-card, 0 1px 2px rgba(0,0,0,.05))',
         }}
       >
-        <div style={segWrapStyle}>
-          <button
-            aria-pressed={state.mode === 'realtime'}
-            onClick={() => actions.requestMode('realtime')}
-            style={segBtnStyle(state.mode === 'realtime')}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <div style={segWrapStyle}>
+            <button
+              aria-pressed={state.mode === 'realtime'}
+              onClick={() => actions.requestMode('realtime')}
+              style={segBtnStyle(state.mode === 'realtime')}
+            >
+              Realtime
+            </button>
+            <button
+              aria-pressed={state.mode === 'cascade'}
+              onClick={() => actions.requestMode('cascade')}
+              style={segBtnStyle(state.mode === 'cascade')}
+            >
+              Cascade
+            </button>
+          </div>
+
+          {/* DERIVED readout — never a picker (PRD §6, decisions 22d-22e). */}
+          <span
+            data-arm-tag={armTag}
+            style={{
+              font: '400 11px var(--font-sans)',
+              borderRadius: 'var(--radius-pill)',
+              padding: '4px 11px',
+              background: armTag === 'ad-hoc' ? 'var(--surface-selected)' : 'var(--accent-soft)',
+              color: armTag === 'ad-hoc' ? 'var(--text-secondary)' : 'var(--accent)',
+            }}
           >
-            Realtime
+            {armTag === 'ad-hoc' ? 'ad-hoc' : `this is ${armLabel(armTag)}`}
+          </span>
+
+          <button
+            onClick={() => actions.cycleLanguage()}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              padding: '7px 12px',
+              background: 'var(--surface-card)',
+              font: '400 13px var(--font-sans)',
+              color: 'var(--text-body)',
+              cursor: 'pointer',
+            }}
+          >
+            {`${src} → ${tgt}`}
+            <ChevronIcon />
           </button>
           <button
-            aria-pressed={state.mode === 'cascade'}
-            onClick={() => actions.requestMode('cascade')}
-            style={segBtnStyle(state.mode === 'cascade')}
+            aria-label="Swap direction"
+            title="Swap direction"
+            onClick={() => actions.swapDirection()}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              padding: '7px 9px',
+              background: 'var(--surface-card)',
+              cursor: 'pointer',
+            }}
           >
-            Cascade
+            <SwapIcon />
           </button>
+          <span
+            style={{
+              font: '400 10.5px var(--font-sans)',
+              borderRadius: 'var(--radius-pill)',
+              padding: '3px 9px',
+              background:
+                pill === 'cascade only' ? 'var(--warning-soft)' : 'var(--surface-selected)',
+              color: pill === 'cascade only' ? 'var(--warning)' : 'var(--text-secondary)',
+            }}
+          >
+            {pill}
+          </span>
+
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
+            {stopped && (
+              <button onClick={() => actions.newSession()} style={smallPrimaryBtnStyle}>
+                Start new session
+              </button>
+            )}
+            {stoppable && (
+              <button onClick={() => actions.stop()} style={smallSecondaryBtnStyle}>
+                Stop session
+              </button>
+            )}
+          </div>
         </div>
-        <button
-          onClick={() => actions.cycleLanguage()}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 8,
-            border: '1px solid var(--border-default)',
-            borderRadius: 8,
-            padding: '7px 12px',
-            background: 'var(--surface-card)',
-            font: '400 13px var(--font-sans)',
-            color: 'var(--text-body)',
-            cursor: 'pointer',
-          }}
-        >
-          {`${src} → ${tgt}`}
-          <ChevronIcon />
-        </button>
-        <button
-          aria-label="Swap direction"
-          title="Swap direction"
-          onClick={() => actions.swapDirection()}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            border: '1px solid var(--border-default)',
-            borderRadius: 8,
-            padding: '7px 9px',
-            background: 'var(--surface-card)',
-            cursor: 'pointer',
-          }}
-        >
-          <SwapIcon />
-        </button>
-        <span
-          style={{
-            font: '400 10.5px var(--font-sans)',
-            borderRadius: 999,
-            padding: '3px 9px',
-            background: pill === 'cascade only' ? 'var(--warning-soft)' : 'var(--surface-selected)',
-            color: pill === 'cascade only' ? AMBER : 'var(--text-secondary)',
-          }}
-        >
-          {pill}
-        </span>
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10 }}>
-          {singleArm && !stopped && (
-            <AutoplaySwitch checked={state.autoplay} onChange={actions.setAutoplay} />
-          )}
-          {stopped && (
-            <button onClick={() => actions.newSession()} style={smallPrimaryBtnStyle}>
-              Start new session
-            </button>
-          )}
-          {stoppable && (
-            <button onClick={() => actions.stop()} style={smallSecondaryBtnStyle}>
-              Stop session
-            </button>
-          )}
-        </div>
+
+        {/* row 2 — the second control row follows the architecture */}
+        {cascade ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={eyebrowStyle}>Stages</span>
+            {stages.map((stage) => (
+              <button
+                key={stage}
+                data-stage-select={stage}
+                onClick={() => actions.cycleProvider(stage)}
+                title={`cycle ${stage} model (${MENUS[stage].length} options)`}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 7,
+                  border: '1px solid var(--border-default)',
+                  borderRadius: 'var(--radius-md)',
+                  padding: '5px 10px',
+                  background: 'var(--surface-card)',
+                  font: '400 11.5px var(--font-sans)',
+                  color: 'var(--text-body)',
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ color: 'var(--text-muted)' }}>{stage}</span>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>{state.providers[stage]}</span>
+                <ChevronIcon />
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div
+            data-context-policy={state.contextPolicy}
+            style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}
+          >
+            <span style={eyebrowStyle}>Context</span>
+            <div style={segWrapStyle}>
+              <button
+                aria-pressed={state.contextPolicy === 'default'}
+                onClick={() => actions.setContextPolicy('default')}
+                style={segBtnStyle(state.contextPolicy === 'default')}
+              >
+                default
+              </button>
+              <button
+                aria-pressed={state.contextPolicy === 'trimmed'}
+                onClick={() => actions.setContextPolicy('trimmed')}
+                style={segBtnStyle(state.contextPolicy === 'trimmed')}
+              >
+                trimmed
+              </button>
+            </div>
+            <span style={{ font: '400 11.5px var(--font-sans)', color: 'var(--text-secondary)' }}>
+              {state.contextPolicy === 'default'
+                ? 'full conversation replayed each turn — cost climbs with session length'
+                : 'history deleted after each response — flat cost, measured against default'}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* status strip */}
@@ -943,18 +933,20 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
         </span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           input
-          <span style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 14 }}>
+          <span
+            data-input-meter
+            style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 14 }}
+          >
             {meterHeights.map((h, i) => (
               <i
                 key={i}
+                data-meter-bar
                 style={{
                   width: 3,
                   height: h,
                   borderRadius: 1,
                   background:
-                    live && i < Math.max(controller.level, 1)
-                      ? 'var(--accent)'
-                      : 'var(--gray-300)',
+                    live && i < Math.max(controller.level, 1) ? 'var(--accent)' : 'var(--gray-300)',
                   display: 'block',
                 }}
               />
@@ -962,20 +954,10 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
           </span>
         </span>
         <span data-state-label style={monoStyle}>
-          {status}
+          {stateLabel(state)}
         </span>
-        <span
-          style={{
-            marginLeft: 'auto',
-            ...monoStyle,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 4,
-          }}
-        >
-          <span data-elapsed>{formatElapsed(controller.elapsedMs)}</span>
-          {' · '}
-          <span data-autoplay-label>{state.autoplay ? 'autoplay on' : 'autoplay off'}</span>
+        <span data-elapsed style={{ marginLeft: 'auto', ...monoStyle }}>
+          {`${formatClock(controller.elapsedMs)} / ${formatClock(LIVE_MAX_SESSION_MS)} · autoplay on`}
         </span>
       </div>
 
@@ -1015,7 +997,7 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
             style={{
               marginLeft: 'auto',
               border: '1px solid var(--negative)',
-              borderRadius: 8,
+              borderRadius: 'var(--radius-md)',
               padding: '5px 12px',
               background: 'none',
               color: 'var(--negative)',
@@ -1030,7 +1012,7 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
       {stopped && state.summary && (
         <Banner tone="positive">
           <CheckCircleIcon />
-          {`Session stopped · ${formatSummaryElapsed(state.summary.elapsedMs)} · ${state.summary.utterances} utterances · ${state.summary.dropped} dropped · $${state.summary.costUsd.toFixed(2)}`}
+          {`Session ended · ${formatClock(state.summary.elapsedMs)} · ${state.summary.utterances} utterances · LiveSession metrics saved — audio discarded`}
         </Banner>
       )}
 
@@ -1047,7 +1029,7 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
               marginBottom: 18,
             }}
           >
-            {`${src} → ${tgt} · ${modeLabel} · autoplay ${state.autoplay ? 'on' : 'off'}. Your browser will ask for microphone permission.`}
+            {`${src} → ${tgt} · ${modeLabel} · autoplay on · up to 5 minutes. Your browser will ask for microphone permission.`}
           </div>
           <button onClick={() => actions.start()} style={primaryBtnStyle}>
             Start microphone
@@ -1055,7 +1037,7 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
         </div>
       )}
 
-      {/* permission-denied blocking card (replaces the idle card, not dismissible) */}
+      {/* permission-denied BLOCKING card (replaces the idle card, not dismissible) */}
       {denied && (
         <div data-denied-card style={centeredCardStyle}>
           <MicIcon size={26} stroke="var(--negative)" />
@@ -1096,76 +1078,6 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
 
       {showSessionArea && (
         <>
-          {/* arms strip */}
-          <div
-            style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '0 4px' }}
-          >
-            <span style={eyebrowStyle}>Arms</span>
-            {controller.activeArms.map((def) => (
-              <span
-                key={def.id}
-                data-arm-pill={def.id}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  font: '400 11.5px var(--font-sans)',
-                  background:
-                    def.id === 'realtime' ? 'var(--accent-soft)' : 'var(--surface-selected)',
-                  color: def.id === 'realtime' ? 'var(--accent)' : 'var(--text-body)',
-                  borderRadius: 999,
-                  padding: '4px 11px',
-                }}
-              >
-                {def.label}
-                {multi && (
-                  <button
-                    aria-label={`remove ${def.label}`}
-                    onClick={() => actions.removeArm(def.id)}
-                    style={{
-                      border: 'none',
-                      background: 'none',
-                      cursor: 'pointer',
-                      padding: 0,
-                      marginLeft: 5,
-                      color: 'inherit',
-                      font: 'inherit',
-                      lineHeight: 1,
-                    }}
-                  >
-                    ×
-                  </button>
-                )}
-              </span>
-            ))}
-            {controller.nextArm && !stopped && (
-              <button
-                onClick={() => actions.addArm()}
-                style={{
-                  font: '400 11.5px var(--font-sans)',
-                  border: '1px dashed var(--border-strong)',
-                  color: 'var(--text-secondary)',
-                  borderRadius: 999,
-                  padding: '4px 11px',
-                  background: 'none',
-                  cursor: 'pointer',
-                }}
-              >
-                {`+ ${controller.nextArm.label} · $${controller.nextArm.costPerMinUsd.toFixed(3)}/min`}
-              </button>
-            )}
-            {multi && (
-              <span
-                style={{
-                  font: '400 11.5px var(--font-sans)',
-                  color: 'var(--text-muted)',
-                  marginLeft: 'auto',
-                }}
-              >
-                autoplay off — two arms would talk over each other
-              </span>
-            )}
-          </div>
-
           {/* source card */}
           <div data-source-card style={{ ...cardStyle, padding: '16px 18px' }}>
             <div
@@ -1176,9 +1088,7 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
                 gap: 12,
               }}
             >
-              <span style={eyebrowStyle}>
-                {`Source · ${src}${multi ? ' — shared by every arm' : ''}`}
-              </span>
+              <span style={eyebrowStyle}>{`Source · ${src}`}</span>
               <span style={{ ...monoStyle, color: 'var(--text-muted)' }}>
                 utterance {state.utteranceCount}
               </span>
@@ -1188,28 +1098,15 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
             </div>
           </div>
 
-          {/* arm cards */}
-          <div
-            style={{
-              display: 'grid',
-              gridTemplateColumns: `repeat(${Math.min(Math.max(state.arms.length, 1), 3)},1fr)`,
-              gap: 14,
-            }}
-          >
-            {controller.activeArms.map((def) => (
-              <ArmCard
-                key={def.id}
-                def={def}
-                view={controller.armViews[def.id] ?? { ...emptyArmView }}
-                playing={state.playingArm === def.id}
-                stopped={stopped}
-                onTogglePlay={() => actions.togglePlay(def.id)}
-              />
-            ))}
-          </div>
-
-          {/* blind compare — comparison mode only (ticket 014) */}
-          {multi && <BlindCompare controller={controller} />}
+          {/* THE single target card — no grid, no add pill, no audible selector */}
+          <TargetCard
+            architecture={state.mode}
+            recipe={recipe}
+            target={target}
+            playing={status === 'playing'}
+            stopped={stopped}
+            onTogglePlay={() => actions.togglePlay()}
+          />
         </>
       )}
 
@@ -1248,16 +1145,3 @@ export default function SessionView({ controller }: SessionViewProps): ReactElem
     </>
   );
 }
-
-const emptyArmView: ArmUtteranceView = {
-  utt: -1,
-  status: 'ready',
-  hasData: false,
-  targetText: '',
-  targetPartials: [],
-  sourcePartials: [],
-  sourceFinal: '',
-  failMessage: null,
-  timings: {},
-  durationMs: 0,
-};

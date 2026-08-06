@@ -1,5 +1,5 @@
 /**
- * Ticket 012 — App shell: TopBar tabs switch between SessionView and
+ * Ticket 012 — App shell: TopBar tabs switch between LiveView and
  * ResultsView; run provenance renders only on Results.
  */
 

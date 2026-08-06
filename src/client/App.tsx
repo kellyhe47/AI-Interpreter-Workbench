@@ -2,11 +2,11 @@
  * Ticket 012 — App shell.
  *
  * `<App deps={sessionDeps} />` hosts TopBar + view switching between
- * SessionView and ResultsView over ONE shared deps bag (the ledger inside
+ * LiveView and ResultsView over ONE shared deps bag (the ledger inside
  * `deps` is the same instance both views read, so a stopped session's
  * appended records are immediately visible on Results).
  *
- * Contract (locked by App.test.tsx and exercised by every SessionView test,
+ * Contract (locked by App.test.tsx and exercised by every LiveView test,
  * all of which render <App deps={...} />):
  * - Default view is Session (idle card on first load).
  * - TopBar tabs switch views; exactly one view is mounted at a time.
@@ -18,7 +18,7 @@
  *   real AudioContexts, real transports, localStorage-backed RunLedger,
  *   Date.now). Tests always inject fakes.
  *
- * The session controller hook lives HERE (not inside SessionView) so the
+ * The session controller hook lives HERE (not inside LiveView) so the
  * TopBar live dot reads the same machine state the session view renders,
  * and session state survives tab switches.
  */
@@ -29,7 +29,7 @@ import { buildFixtureDeps, isFixtureMode } from './fixtureDeps';
 import TopBar, { type WorkbenchView } from './components/TopBar';
 import type { SessionStatus } from './state/sessionMachine';
 import ResultsView from './views/ResultsView';
-import SessionView from './views/SessionView';
+import LiveView from './views/LiveView';
 import { useSessionController, type SessionDeps } from './views/useSessionController';
 
 export type AppDeps = SessionDeps;
@@ -85,7 +85,7 @@ export default function App(props: AppProps): ReactElement {
         }}
       >
         {view === 'session' ? (
-          <SessionView controller={controller} />
+          <LiveView controller={controller} />
         ) : (
           <ResultsView ledger={deps.ledger} />
         )}

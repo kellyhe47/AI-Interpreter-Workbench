@@ -15,7 +15,7 @@ import { RunLedger } from './state/ledger';
 import { CascadeTransport, type WsLike } from './transport/cascade';
 import { RealtimeTransport, type RtcPeerConnectionLike } from './transport/realtime';
 import type { InterpreterTransport } from './transport/types';
-import type { ArmDef, CaptureCallbacks, SessionDeps } from './views/useSessionController';
+import type { CaptureCallbacks, LiveRunConfig, SessionDeps } from './views/useSessionController';
 
 /** ScriptProcessor-based capture pipeline (source -> processor -> emit). */
 const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
@@ -42,10 +42,14 @@ export function buildBrowserDeps(): SessionDeps {
   // re-read this on every connect). Exercised by browser QA, not unit tests.
   let liveMicStream: MediaStream | null = null;
 
-  const transportFactory = (def: ArmDef): InterpreterTransport => {
-    if (def.mode === 'realtime') {
+  // Ticket 012 — ONE transport per session, built from the resolved recipe.
+  // `config.realtimeModel` is already resolved by the controller (never left
+  // to the transport's cheap dev default), so what runs is what the derived
+  // arm pill claims.
+  const transportFactory = (config: LiveRunConfig): InterpreterTransport => {
+    if (config.architecture === 'realtime') {
       return new RealtimeTransport(
-        { armId: def.id, label: def.label, costPerMinUsd: def.costPerMinUsd },
+        { armId: 'live', label: 'Realtime', costPerMinUsd: 0, model: config.realtimeModel },
         {
           fetchImpl: ((input: RequestInfo | URL, init?: RequestInit) =>
             fetch(input, init)) as typeof fetch,
@@ -57,9 +61,9 @@ export function buildBrowserDeps(): SessionDeps {
     }
     return new CascadeTransport(
       {
-        armId: def.id,
-        label: def.label,
-        costPerMinUsd: def.costPerMinUsd,
+        armId: 'live',
+        label: 'Cascade',
+        costPerMinUsd: 0,
         baseUrl: wsBase,
       },
       {
