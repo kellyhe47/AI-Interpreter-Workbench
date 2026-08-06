@@ -57,6 +57,8 @@ Both transports already emit `utterance.complete` per utterance
 | 032 | Aggregate over utterance records | the gate, groupBy*, provenance, experiments |
 | 033 | `corpusVersion` stamped by the runner | the last of 028's fields; trivial once 030 lands |
 | 034 | WER write path | post-hoc scoring against `referenceText` |
+| 035 | Corpus capture + segmentation core | pure modules; no user-visible change |
+| 036 | Wire "Record new clip" — record, tag, save | the flow PRD §7 step 1 always required |
 
 030 makes "my corpus is saved" true. 031 + 032 make "its analysis can run against it" true. 033
 completes provenance. 034 adds the one metric that needs a second pass.
@@ -99,3 +101,19 @@ differs per arm. Recording in-app does not weaken that: the boundary is computed
 captured waveform, at record time — and then frozen into the manifest. Every Run of that Recording
 then shares it. What §8 forbids is deriving it per-run inside the measured path, and that stays
 forbidden.
+
+
+## The ingestion gap (found 2026-08-06, after the tickets above were written)
+
+PRD §7 Replay step 1 — *"Record a clip — maximum 1 minute. It is saved and appears in the UI"* —
+**was never built.** Ticket 013 scoped it to a caption (its only AC was that the affordance "states
+the 1 minute cap") and deferred the recorder to "the Live view's recorder"; no ticket ever picked it
+up. `ReplayView.tsx:189` says so in the source: `'Microphone capture is not wired into Replay yet'`.
+
+Six QA iterations missed it because no flow ever walked "record a clip" — the manual-qa rule
+*"a requirement no flow touches is a finding"* was not applied to §7's first step. **Any future QA
+pass must walk ingestion, not only what happens to data already in the store.**
+
+Tickets 035 and 036 close it. Good news on scope: `src/client/audio/capture.ts` (ticket 010) already
+does getUserMedia behind injectable seams, resamples to 24 kHz and emits 480-sample PCM16 frames, so
+035 accumulates those rather than writing a second capture path.
