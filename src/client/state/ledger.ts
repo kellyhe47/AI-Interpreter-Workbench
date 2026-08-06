@@ -495,6 +495,22 @@ export class RunLedger {
     this.persist();
   }
 
+  /* --- ticket 016: pairwise blind comparisons (STUBS, additive) ---------
+   *
+   * The ticket-014 BlindComparison type had no persistence at all. These two
+   * are strictly ADDITIVE: nothing above changes, so every locked ledger test
+   * keeps its meaning. */
+
+  /** Appends one completed pairwise blind comparison. */
+  recordBlindComparison(_comparison: BlindComparison): void {
+    throw new Error('RunLedger.recordBlindComparison is not implemented');
+  }
+
+  /** Every persisted pairwise blind comparison, in append order. */
+  getBlindComparisons(): BlindComparison[] {
+    throw new Error('RunLedger.getBlindComparisons is not implemented');
+  }
+
   exportRuns(): LedgerExport {
     const runIds: string[] = [];
     for (const r of this.records) {

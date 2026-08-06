@@ -21,7 +21,11 @@
 
 import type { CSSProperties, ReactElement } from 'react';
 
-export type WorkbenchView = 'session' | 'results';
+/**
+ * Ticket 016 — four tabs. 'session' was renamed 'live' so the value matches
+ * the tab the user sees; Replay and Help joined it.
+ */
+export type WorkbenchView = 'live' | 'replay' | 'results' | 'help';
 
 export interface TopBarProps {
   view: WorkbenchView;
@@ -95,9 +99,9 @@ export default function TopBar({ view, onViewChange, live, provenance }: TopBarP
         }}
       >
         <button
-          aria-pressed={view === 'session'}
-          onClick={() => onViewChange('session')}
-          style={tabStyle(view === 'session')}
+          aria-pressed={view === 'live'}
+          onClick={() => onViewChange('live')}
+          style={tabStyle(view === 'live')}
         >
           Session
         </button>

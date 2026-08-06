@@ -30,9 +30,22 @@ import TopBar, { type WorkbenchView } from './components/TopBar';
 import type { SessionStatus } from './state/sessionMachine';
 import ResultsView from './views/ResultsView';
 import LiveView from './views/LiveView';
+import type { ReplayDeps } from './views/ReplayView';
 import { useSessionController, type SessionDeps } from './views/useSessionController';
 
-export type AppDeps = SessionDeps;
+/**
+ * Ticket 016 — one deps bag for all four views.
+ *
+ * `replay` carries the Replay-view seams (recordings/runs clients, the
+ * executors, playback, clock, id minter). The three BLIND seams are
+ * deliberately NOT part of what a host has to supply: App itself supplies
+ * `rng`, `evaluatorLanguage` and `recordBlindComparison`, because they are
+ * optional on ReplayDeps and a host that forgets them gets no blind-compare
+ * trigger at all — absent, not disabled.
+ */
+export interface AppDeps extends SessionDeps {
+  replay?: ReplayDeps;
+}
 
 export interface AppProps {
   deps?: AppDeps;
@@ -60,9 +73,9 @@ export default function App(props: AppProps): ReactElement {
   const deps = depsRef.current;
 
   const controller = useSessionController(deps);
-  const [view, setView] = useState<WorkbenchView>('session');
+  const [view, setView] = useState<WorkbenchView>('live');
 
-  const live = view === 'session' && LIVE_STATUSES.includes(controller.state.status);
+  const live = view === 'live' && LIVE_STATUSES.includes(controller.state.status);
   const provenance =
     view === 'results'
       ? `run ${new Date(deps.now()).toISOString().slice(0, 10)} · corpus v1`
@@ -84,7 +97,7 @@ export default function App(props: AppProps): ReactElement {
           gap: 16,
         }}
       >
-        {view === 'session' ? (
+        {view === 'live' ? (
           <LiveView controller={controller} />
         ) : (
           <ResultsView ledger={deps.ledger} />
