@@ -1,11 +1,11 @@
 ---
 id: 010
 title: Ledger becomes the client view over Recording / Run / LiveSession
-status: pending
+status: green
 depends_on: [001]
 touches: [src/client/state/ledger.ts, src/client/state/ledger.test.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/state/ledger.test.ts]
 branch: ""
 ---
 
@@ -76,3 +76,5 @@ cases as a table over `{origin, status, triple} → aggregated?` so all four exc
 are covered without four near-duplicate test bodies.
 
 ## Attempt log
+
+- iter 1: green. 63 tests (36 new + 27 guards). Mutation-checked by the orchestrator: weakening ANY of the three gate conditions (armTag/origin/status) turns tests red, so each is independently load-bearing.

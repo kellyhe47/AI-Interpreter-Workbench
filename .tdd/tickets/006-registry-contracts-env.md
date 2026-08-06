@@ -1,11 +1,11 @@
 ---
 id: 006
 title: Registry entries for the new adapters + contract-suite provider list
-status: pending
+status: green
 depends_on: [004, 005]
 touches: [src/core/registry.ts, src/core/registry-adapters.test.ts, src/core/contracts/contracts.test.ts, .env.example]
 iterations: 0
-test_files: []
+test_files: [src/core/registry-adapters.test.ts, src/core/contracts/contracts.test.ts]
 branch: ""
 ---
 
@@ -64,3 +64,5 @@ fixture-backed transports for the contract registrations must produce a well-for
 than vacuous.
 
 ## Attempt log
+
+- iter 1: green. 50 tests. Both new adapters pass the shared suite with contracts/index.ts byte-identical — interchangeability demonstrated, not asserted.
