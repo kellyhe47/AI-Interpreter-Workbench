@@ -233,3 +233,22 @@ case).
 6. **Deploy** — AWS credentials absent; EC2+Caddy per PRD §13 when you're ready.
 7. Real-mic + real-provider browser session — 2-minute sanity pass on your machine
    (`npm run dev`, speak into it); everything below that layer is smoke-tested.
+
+---
+
+# v2 — Replay flow
+
+Driven by `CHANGE_MANIFEST.md` (authoritative scope) against `PRD.md` v2 (§7 Product Flow &
+Storage, §8 Measurement) and `design_handoff_interpreter_workbench/`. Incremental: the
+adapter / orchestrator / contract foundation survives; the client view layer is reworked.
+
+## Preflight (before any ticket)
+
+- **`data/` added to `.gitignore`.** Storage writes recordings, run records, output WAVs and
+  `ledger.jsonl` there; `results/` stays committed as the artifact of record (PRD §7, 20c).
+- **Token sync was a no-op — verified, not assumed.** The manifest expected
+  `src/client/styles/tokens.css` to lag `design_system/tokens/*.css` (32 vs 64 lines). It
+  does not: the four token files total 32 lines of declarations, and a mechanical diff of all
+  **76 custom properties** found zero missing or differing values. The v1 scaffold had
+  already inlined them, and `fonts.css`'s `@import` is served instead by the preconnect +
+  stylesheet link in `index.html`. No edit made.
