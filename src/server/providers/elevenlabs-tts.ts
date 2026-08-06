@@ -1,12 +1,15 @@
 /**
- * ElevenLabs streaming-input TTS adapter. STUB — tests first (TDD).
+ * ElevenLabs streaming-input TTS adapter.
  *
  * The ONE provider with true streaming text input (streamingInput = TRUE).
  *
  * Design decisions pinned by elevenlabs-tts.test.ts:
  * - Transport: WebSocket to
  *   wss://api.elevenlabs.io/v1/text-to-speech/<voiceId>/stream-input
- *     ?model_id=eleven_flash_v2_5&output_format=pcm_24000&auto_mode=true
+ *     ?model_id=<modelId>&output_format=pcm_24000&auto_mode=true
+ *   where modelId defaults to ELEVENLABS_DEFAULT_MODEL_ID ('eleven_flash_v2_5')
+ *   and config.modelId overrides it (e.g. 'eleven_multilingual_v2'). Voice id,
+ *   output_format and auto_mode are NOT configurable — only the model is.
  *   with header `xi-api-key: <key>`, created through injected `deps.wsFactory`.
  * - API key resolved AT CONSTRUCTION: `config.apiKey ?? process.env.ELEVENLABS_API_KEY`.
  * - Default voiceId '21m00Tcm4TlvDq8ikWAM' (config.voiceId overrides the URL).
@@ -42,6 +45,14 @@ import {
 import { envVar, type WsFactory } from './transport';
 
 export const ELEVENLABS_DEFAULT_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
+
+/**
+ * Default `model_id`. Flash v2.5 is the latency-optimised model and stays the
+ * default; it is parameterised (ticket 005) only so Multilingual v2 can be
+ * offered as a menu option — every other adapter already parameterises its
+ * model, and this URL hardcode was the lone outlier blocking that.
+ */
+export const ELEVENLABS_DEFAULT_MODEL_ID = 'eleven_flash_v2_5';
 
 export interface ElevenLabsTtsConfig {
   apiKey?: string;
@@ -84,9 +95,10 @@ export class ElevenLabsTts implements TtsProvider {
     const wsFactory = this.deps.wsFactory ?? (await loadDefaultWsFactory());
     if (signal?.aborted) return;
     const voiceId = this.config.voiceId ?? ELEVENLABS_DEFAULT_VOICE_ID;
+    const modelId = this.config.modelId ?? ELEVENLABS_DEFAULT_MODEL_ID;
     const url =
       `wss://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream-input` +
-      '?model_id=eleven_flash_v2_5&output_format=pcm_24000&auto_mode=true';
+      `?model_id=${modelId}&output_format=pcm_24000&auto_mode=true`;
     const ws = wsFactory(url, { headers: { 'xi-api-key': this.apiKey ?? '' } });
 
     const queue = new AsyncQueue<Int16Array>();
