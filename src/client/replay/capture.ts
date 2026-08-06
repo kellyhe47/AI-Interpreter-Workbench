@@ -1,9 +1,6 @@
 /**
  * Ticket 035 — record a Replay TAKE to 24 kHz mono PCM16 + WAV.
  *
- * STUB — types and constants only. The implementation lands with ticket 035's
- * green pass; every behavior below is pinned by capture.test.ts.
- *
  * ============================ API DESIGN (normative) =======================
  * This module REUSES src/client/audio/capture.ts (`startCapture`) — there is
  * exactly one getUserMedia path in the client. It accumulates the 480-sample
@@ -11,17 +8,42 @@
  * them to a transport.
  *
  * startTake(opts) -> Promise<TakeRecorder | CaptureDenied>
- *   - denial propagates `startCapture`'s four-value model UNCHANGED
+ *   - the union is discriminated by `'status' in result`: a recorder has no
+ *     `status` field, a denial is the four-value model UNCHANGED
  *     ({ status: 'denied', reason: 'blocked' | 'unavailable' }) and starts no
- *     context and no pipeline;
+ *     context, no pipeline and no timer;
  *   - on grant, schedules a single cap timer through the injected `timers`
  *     seam at min(opts.maxDurationMs ?? MAX_TAKE_MS, MAX_TAKE_MS). When it
  *     fires the take STOPS ITSELF (mic released, no further frames retained)
  *     and `opts.onMaxDuration` is invoked with the finished take. PRD §7's
  *     1-minute cap is enforced here, not merely captioned.
+ *   - the take is frozen exactly once — by stop(), by cancel(), or by the cap
+ *     — so stop() is idempotent and every later call returns the same object.
+ *     durationMs = round(samples.length / 24000 * 1000) and
+ *     wav = writeWav(samples, 24_000): 24 kHz, never 16 kHz (AGENTS.md).
+ *
+ * TWO DELIBERATE CALLS the tests leave unpinned:
+ *
+ * 1. TRAILING SUB-FRAME REMAINDER. `startCapture`'s chunker carries a
+ *    remainder and is never flushed, so up to 479 samples (< 20 ms) of the
+ *    tail are dropped. Flushing would mean changing audio/capture.ts, which is
+ *    on the Live path and pinned by its own tests. We ACCEPT the drop: < 20 ms
+ *    is under one analysis frame of segment.ts and well inside its stated
+ *    tolerance, and the alternative (a second chunker here, fed from a second
+ *    subscription) would be exactly the duplicated capture path this ticket
+ *    forbids.
+ *
+ * 2. stop() AFTER cancel(). cancel() ABANDONS the take: it discards every
+ *    buffered frame and freezes an EMPTY take. A subsequent stop() therefore
+ *    resolves — it never throws and never hands back partial audio — to
+ *    { samples: length 0, wav: a valid 44-byte header, durationMs: 0 }. An
+ *    empty take is the honest answer to "what did the abandoned recording
+ *    capture", and keeping stop() total means a UI that races cancel against
+ *    stop cannot end up with an unhandled rejection.
  * ==========================================================================
  */
 
+import { writeWav } from '../../harness/wav';
 import {
   startCapture,
   type CaptureAudioContextLike,
@@ -29,6 +51,9 @@ import {
   type CaptureResult,
   type MediaStreamLike,
 } from '../audio/capture';
+
+/** Every take is 24 kHz mono PCM16 — src/core/protocol.ts SAMPLE_RATE. */
+const TAKE_RATE = 24_000;
 
 /** PRD §7 hard cap: a Replay clip is at most one minute. */
 export const MAX_TAKE_MS = 60_000;
@@ -74,9 +99,87 @@ export interface StartTakeOptions {
   onMaxDuration?: (take: RecordedTake) => void;
 }
 
+/** Falls back to the ambient clock when no timer seam is injected. */
+const globalTimers: TakeTimers = {
+  // Cast: @types/node is on the compile path and widens the return to Timeout.
+  setTimeout: (fn, ms) => setTimeout(fn, ms) as unknown as number,
+  clearTimeout: (id) => {
+    clearTimeout(id);
+  },
+};
+
+function joinFrames(frames: readonly Int16Array[], total: number): Int16Array {
+  const out = new Int16Array(total);
+  let offset = 0;
+  for (const f of frames) {
+    out.set(f, offset);
+    offset += f.length;
+  }
+  return out;
+}
+
 export async function startTake(
-  _opts: StartTakeOptions,
+  opts: StartTakeOptions,
 ): Promise<TakeRecorder | CaptureDenied> {
-  void startCapture;
-  throw new Error('startTake is not implemented (ticket 035)');
+  const timers = opts.timers ?? globalTimers;
+  const capMs = Math.min(opts.maxDurationMs ?? MAX_TAKE_MS, MAX_TAKE_MS);
+
+  let frames: Int16Array[] = [];
+  let total = 0;
+
+  const result = await startCapture({
+    getUserMedia: opts.getUserMedia,
+    audioContextFactory: opts.audioContextFactory,
+    pipeline: opts.pipeline,
+    onChunk: (frame) => {
+      frames.push(frame);
+      total += frame.length;
+    },
+    onLevel: (bars) => opts.onLevel?.(bars),
+  });
+
+  // Denial: no context, no pipeline, no cap timer — nothing to release.
+  if (result.status === 'denied') return result;
+  const handle = result.handle;
+
+  let capId: number | null = null;
+  let take: RecordedTake | null = null;
+
+  const clearCap = (): void => {
+    if (capId === null) return;
+    timers.clearTimeout(capId);
+    capId = null;
+  };
+
+  /** Releases the mic and freezes the take; every path funnels through here. */
+  const finish = (): RecordedTake => {
+    if (take) return take;
+    clearCap();
+    handle.stop();
+    const samples = joinFrames(frames, total);
+    take = {
+      samples,
+      wav: writeWav(samples, TAKE_RATE),
+      durationMs: Math.round((samples.length / TAKE_RATE) * 1000),
+    };
+    return take;
+  };
+
+  capId = timers.setTimeout(() => {
+    capId = null; // already fired; nothing left to clear
+    if (take) return;
+    opts.onMaxDuration?.(finish());
+  }, capMs);
+
+  return {
+    async stop(): Promise<RecordedTake> {
+      return finish();
+    },
+    cancel(): void {
+      if (take) return;
+      frames = [];
+      total = 0;
+      finish(); // freezes an empty take — see the header note on cancel/stop
+    },
+  };
 }
