@@ -54,6 +54,9 @@
  *   [data-time-to-add]             one of the three time-to-add tiles
  *   [data-category-row][data-category="<category>"]
  *   [data-recording-row][data-recording="<id>"][data-arm][data-excluded]
+ *   [data-failed-count][data-run-count]  on a recording row, ONLY when the
+ *                                        group absorbed a failed run
+ *   [data-failure-note]            that row's 'x of y attempts failed' note
  *   [data-exclusion="ad-hoc"|"manual"|"failed"|"fixture"]
  *
  * TICKET 019 — HYDRATION IS AN INJECTED, OPTIONAL SEAM.
@@ -712,6 +715,9 @@ function RecordingCard(props: { rows: RecordingGroupRow[] }): ReactElement {
             data-recording={row.recordingId}
             data-arm={row.arm}
             data-excluded={row.excludedFromExperiments ? 'true' : 'false'}
+            {...(row.failedCount > 0
+              ? { 'data-failed-count': String(row.failedCount), 'data-run-count': String(row.runCount) }
+              : {})}
             style={gridStyle(RECORDING_COLUMNS, false)}
           >
             <div style={labelCellStyle}>{row.recordingLabel ?? row.recordingId}</div>
@@ -723,7 +729,10 @@ function RecordingCard(props: { rows: RecordingGroupRow[] }): ReactElement {
             <div style={cellStyle}>{row.n}</div>
             <div style={cellStyle}>{formatMs(row.p50Ms)}</div>
             <div style={cellStyle}>{formatMs(row.p95Ms)}</div>
-            <div style={cellStyle}>{formatUsd(row.costUsd)}</div>
+            {/* n === 0 means nothing was measured, so there is no money to
+                report: a zero cost over zero samples reads as a measurement.
+                p50 / p95 already dash through formatMs's null. */}
+            <div style={cellStyle}>{formatUsd(row.n === 0 ? null : row.costUsd)}</div>
             <div style={cellStyle}>
               {row.excludedFromExperiments ? (
                 <span style={{ color: 'var(--text-muted)' }}>
@@ -737,6 +746,18 @@ function RecordingCard(props: { rows: RecordingGroupRow[] }): ReactElement {
               ) : (
                 <span style={{ color: 'var(--text-secondary)' }}>in experiments</span>
               )}
+              {/* A failed run is absorbed into its (recording × configuration)
+                  group, so without this note n = 1 over two attempts reads as
+                  'one attempt, clean'. Independent of the gate: a group can be
+                  both in experiments AND partially failed, and says both. */}
+              {row.failedCount > 0 ? (
+                <div
+                  data-failure-note=""
+                  style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}
+                >
+                  {`${row.failedCount} of ${row.runCount} attempts failed`}
+                </div>
+              ) : null}
             </div>
           </div>
         ))}
