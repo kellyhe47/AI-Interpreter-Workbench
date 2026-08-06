@@ -1,11 +1,11 @@
 ---
 id: 014
 title: Blind compare moves to Replay — pairwise, playback-only, persisted draw
-status: pending
+status: green
 depends_on: [010, 013]
 touches: [src/client/components/replay/BlindCompare.tsx, src/client/components/replay/BlindCompare.test.tsx, src/client/components/session/BlindCompare.tsx, src/client/components/session/BlindCompare.test.tsx, src/client/views/ReplayView.tsx]
 iterations: 0
-test_files: []
+test_files: [src/client/components/replay/BlindCompare.test.tsx]
 branch: ""
 ---
 
@@ -67,3 +67,18 @@ persisted draw). The old session-mode test asserting the two-arm live comparison
 — update it in place rather than leaving a stale pin.
 
 ## Attempt log
+
+- iter 1: green. 48 tests. Mutation-checked: bypassing the identity reveal gate fails 33 tests —
+  the blinding is enforced, not merely intended.
+- Reshaped rather than relocated. The Live-era props (single score per sample, `utteranceCount`,
+  `lastUtteranceFailed`) could not express PRD §10's requirement of TWO dimensions per sample over
+  TWO Runs, so the component and the ledger's draw record were both redesigned for the Replay unit
+  of comparison. `BlindComparison` is additive; all 63 locked ledger tests untouched.
+- Non-obvious inference the implementer had to make: two locked tests jointly pin the pair picker.
+  A third pick must not create a third sample, AND re-picking must draw again — but only twice
+  across four picks. The only model satisfying both is two round-robin slots with a fresh rng draw
+  ONLY on the pick that completes the pair. Swapping one half of a standing pair keeps the standing
+  draw, which is also the right product behaviour: do not re-roll the assignment under an evaluator
+  who has already listened to the half that stayed.
+- Identity reveal derives `armLabel(runArmTag(run))` from the PERSISTED order, not the stored
+  armTag — so what is revealed is what was recorded.

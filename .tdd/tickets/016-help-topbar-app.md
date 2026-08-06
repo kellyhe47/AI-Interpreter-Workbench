@@ -3,7 +3,7 @@ id: 016
 title: Help view, four-tab TopBar, App routes four views
 status: pending
 depends_on: [012, 013, 015]
-touches: [src/client/views/HelpView.tsx, src/client/views/HelpView.test.tsx, src/client/components/TopBar.tsx, src/client/App.tsx, src/client/views/App.test.tsx]
+touches: [src/client/views/HelpView.tsx, src/client/views/HelpView.test.tsx, src/client/components/TopBar.tsx, src/client/App.tsx, src/client/views/App.test.tsx, src/client/browserDeps.ts, src/client/fixtureDeps.ts, src/client/state/ledger.ts]
 iterations: 0
 test_files: []
 branch: ""
@@ -33,6 +33,28 @@ The shell that ties v2 together.
 5. **How to use it** — the four numbered steps (Live → Replay → Run/Batch → Compare blind).
 6. **How to read it** — p50/p95, cost slope, provenance lines, and the "illustrative" badges.
 
+## Inherited from ticket 014 — this ticket owns the wiring
+
+014 extended `ReplayDeps` with three **optional** fields:
+
+```ts
+rng?: () => number;
+evaluatorLanguage?: string;
+recordBlindComparison?: (comparison: BlindComparison) => void;
+```
+
+They are optional only so ticket 013's locked `ReplayView.test.tsx` object literal keeps
+type-checking. The pinned consequence: **a host supplying none of them gets no blind-compare
+trigger at all** — absent, not disabled. That is a deliberately quiet failure mode, so it needs a
+test here rather than a hope: **App must supply all three**, and a test must assert the trigger is
+actually reachable through the real `<App />`. Without that, blind scoring silently would not
+exist and every suite would still be green.
+
+Also inherited: **`RunLedger` has no `recordBlindComparison` method.** 014 added the
+`BlindComparison` type additively but no persistence. This ticket either adds that method to the
+ledger (strictly additive — all 63 `ledger.test.ts` tests are locked and must stay green) or wires
+`recordBlindComparison` to whatever else persists it. Say which in the implementation.
+
 ## Acceptance criteria
 
 - [ ] TopBar renders exactly four tabs in order: Live, Replay, Results, Help
@@ -50,6 +72,11 @@ The shell that ties v2 together.
 - [ ] HelpView renders six cards, including the three-entity explainer, the derived-tag
       statement and the non-pooling statement
 - [ ] Styling uses tokens only; the topbar is 52px and sticky
+- [ ] **App supplies `rng`, `evaluatorLanguage` and `recordBlindComparison` to `ReplayView`**, and
+      the blind-compare trigger is reachable through the real `<App />` on a Recording with two
+      completed runs — the optional deps must not silently disable the feature
+- [ ] A submitted blind comparison is **persisted** — the drawn order, both dimensions for both
+      samples, the two run ids and the evaluator language survive into the ledger
 
 ## Test plan
 
