@@ -1,11 +1,11 @@
 ---
 id: 013
 title: Replay view — recordings library, run config panel, runs list, batch progress
-status: pending
+status: green
 depends_on: [001, 008, 009]
 touches: [src/client/views/ReplayView.tsx, src/client/views/ReplayView.test.tsx, src/client/components/replay/]
 iterations: 0
-test_files: []
+test_files: [src/client/views/ReplayView.test.tsx]
 branch: ""
 ---
 
@@ -86,3 +86,17 @@ New `ReplayView.test.tsx` plus co-located component tests, RTL/jsdom, following 
 `SessionView.test.tsx` style (render with injected fakes; never touch real browser APIs).
 
 ## Attempt log
+
+- iter 1: green, after ONE test-writer correction round (not an implementation iteration).
+- The implementer hit 23 failures and correctly STOPPED, reporting a defect in the LOCKED tests
+  rather than editing them: `makeFakes` shallow-copied the recordings array but shared the element
+  objects, and the `remove` fake wrote `deletedAt` through to the module-level `MIC_REC` const —
+  so the delete test poisoned every later mount. Order-dependent pollution, real regardless of the
+  implementation. Verified by the orchestrator, fixed through the test-writer (fixture isolation
+  only, zero assertions touched), re-verified order-independent across five shuffled seeds.
+  Had the implementer been free to edit tests, the cheapest green would have been relaxing the
+  row-count guard — silently dropping the assertion that a soft delete keeps its Runs listed.
+- Runtime: 52 tests in ~370 ms. The earlier ~24 s was pure waitFor-timeout accumulation.
+- Process finding from the test-writer, worth keeping: a bare `tsc -p tsconfig.json` in an agent
+  bash thread can silently typecheck the MAIN repo instead of the worktree and still print OK.
+  vitest fails loudly in that situation; tsc does not. Gate typechecks with explicit paths.
