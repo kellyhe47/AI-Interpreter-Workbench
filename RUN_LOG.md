@@ -252,3 +252,87 @@ adapter / orchestrator / contract foundation survives; the client view layer is 
   **76 custom properties** found zero missing or differing values. The v1 scaffold had
   already inlined them, and `fonts.css`'s `@import` is served instead by the preconnect +
   stylesheet link in `index.html`. No edit made.
+
+## Build — ticket board
+
+`/tdd-orchestrator` against the manifest sequence. 17 tickets, dependency-ordered, worked in
+parallel waves where `touches` sets are provably disjoint. Baseline at v2 start: **34 test
+files / 461 tests green**, both typechecks clean.
+
+The v1 board was archived to `.tdd/tickets-v1/` rather than reconciled — it is history, and
+resuming against it would have re-litigated settled v1 decisions.
+
+### Wave 1 — 001 (seq), then 002 ‖ 004 ‖ 005 ‖ 007
+
+| Ticket | Result |
+|---|---|
+| 001 `src/core/arms.ts` — frozen arms + `deriveArmTag` | green, 1 iteration, 40 tests |
+| 002 protocol run identity + filesystem storage | green, 1 iteration, 32 tests |
+| 004 ElevenLabs Scribe v2 STT adapter | green, 1 iteration, 17 tests |
+| 005 Anthropic MT adapter + EL TTS `model_id` param | green, 1 iteration, 31 tests |
+| 007 replay pacer (1× / 20 ms) | green, 1 iteration, 16 tests |
+
+### Wave 2 — 003 ‖ 006 ‖ 010
+
+| Ticket | Result |
+|---|---|
+| 003 recordings/runs REST routes + ws run identity | green, 1 iteration, 24 tests |
+| 006 registry entries + contract-suite provider list | green, 1 iteration, 50 tests |
+| 010 ledger entities + aggregation gate | green, 1 iteration, 63 tests |
+
+**654 tests / 41 files green after Wave 2**, both typechecks and the production build clean.
+
+## Decisions and corrections (v2)
+
+**`REALTIME_MODEL` is `gpt-realtime`, but the transport and token defaults stay
+`gpt-realtime-mini`.** Arm A's frozen recipe is the full model (the rubric requires it);
+`-mini` is the PRD §5/§14 *development* model kept for cost control. The consequence is that
+`deriveArmTag` tags a mini-model run `ad-hoc` — which is **correct**, not a bug: a cheap dev
+run must never count as Arm A evidence. The obligation this creates is that the Replay and
+Live paths pass the model explicitly rather than inheriting the dev default, or Arm A would
+never appear in the ledger at all. Written into tickets 008 and 012 as a pinned constraint.
+
+**`switch-queued` stays an overlay field, not a state.** PRD §7's table lists it as a state,
+but the v1 machine already models it as `pending` carried alongside an active status — which
+is strictly more expressive (you can be `processing` *and* have a switch queued) and matches
+the design mock's own `pending`. Keeping the overlay; the UI renders a derived `switch-queued`
+label so the PRD's visible-state requirement is still met.
+
+**`recordingId` maps to the utterance record's `corpusId`; `origin` is stamped in `ws.ts`.**
+`UtteranceRecord` has `corpusId` and `runId` but no `recordingId`, and PRD §7 is explicit that
+corpus clips *are* Recordings flowing through one path — so one identity field is right, not
+two. `src/core/timing.ts` is a KEEP file and was never opened; the canonical timing vocabulary
+has four consumers and growing it per caller is how those four definitions drift apart.
+
+**Two adapter wire formats are assumptions, isolated and documented.** Neither ElevenLabs
+Scribe's nor Anthropic's exact streaming shape is verifiable without a live call. Each adapter
+documents what it assumed in its header and accepts both plausible encodings; the guess lives
+in the adapter file, not spread through the tests. The operator's smoke tests resolve them.
+
+**Minor, logged not fixed:** `GET /api/recordings/:id/audio` on an unknown id answers
+`recording-audio-missing` rather than `recording-not-found`. Both are machine-readable, both
+map to 404, and PRD §12 prescribes identical client behaviour either way.
+
+## Verification beyond "the suite is green"
+
+Two properties carry the project's credibility, so both were mutation-tested by the
+orchestrator rather than taken on trust:
+
+- **1× replay pacing (PRD §13 test 7).** Forcing the frame delay to zero — the "dump the
+  buffer" bug the PRD warns *would look like it worked* — turns all three pacing assertions
+  red, including the one checking a 1-second clip costs ~1000 ms of virtual time. Reverted and
+  re-verified green.
+- **The aggregation gate (PRD §8, §17 22d).** Weakening **any one** of the three conditions
+  (`armTag` / `origin` / `status`) independently turns tests red. No future refactor can quietly
+  drop the `origin === 'sweep'` check and start folding manual runs into experiment aggregates.
+
+**Interchangeability is demonstrated, not asserted.** `src/core/contracts/index.ts` is
+**byte-identical to its v1 state** while now carrying two new providers from two new vendors.
+The registry grew two lines; the shared assertions grew nothing. `gpt-4o-mini-transcribe` and
+ElevenLabs Multilingual v2 needed no registry entries at all — they are config-only model
+variants, reachable once the hardcoded `model_id` was parameterized.
+
+**Live boot probe (ticket 003).** Unit-green is not runtime-green, so the first ticket landing
+a real HTTP surface got a real server process, real filesystem, real requests: `POST
+/api/recordings` → 201 with a generated id, `GET /:id/audio` → 200 `audio/wav` byte-identical,
+`DELETE` on a corpus Recording → **409 `corpus-undeletable`**, `/api/health` → 200.
