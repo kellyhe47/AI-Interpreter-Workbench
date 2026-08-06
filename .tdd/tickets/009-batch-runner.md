@@ -1,11 +1,11 @@
 ---
 id: 009
 title: Batch runner — sequential sweep with counterbalancing and warmup discard
-status: pending
+status: green
 depends_on: [001, 008]
 touches: [src/client/batch/runner.ts, src/client/batch/runner.test.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/batch/runner.test.ts]
 branch: ""
 ---
 
@@ -89,3 +89,10 @@ retained". That was **wrong**, and the tests faithfully encoded it. The PRD pins
 retained (§8's 60-sample arithmetic, §17 22c's "5 repetitions retained", §7's 30-run matrix), so
 the warmup is an **additional** execution. Corrected through the test-writer, not by editing
 locked tests.
+
+- iter 1 (after a test-writer correction pass on reps semantics): green. 18 tests, `tests 6ms` —
+  a nominally ~68-minute sweep is exercised entirely on a fake clock.
+- Mutation-checked, both sweep controls independently: removing counterbalancing (always declared
+  order) fails 2 tests; promoting the warmup to a counted rep fails 4. PRD §13 test 9 holds.
+- Per-run timeout closes the hang gap ticket 008 left open: rejection, resolved-`failed`, and
+  timeout all funnel to one failure path, each retried once.
