@@ -1,11 +1,11 @@
 ---
 id: 016
 title: Help view, four-tab TopBar, App routes four views
-status: pending
+status: green
 depends_on: [012, 013, 015]
 touches: [src/client/views/HelpView.tsx, src/client/views/HelpView.test.tsx, src/client/components/TopBar.tsx, src/client/App.tsx, src/client/views/App.test.tsx, src/client/browserDeps.ts, src/client/fixtureDeps.ts, src/client/state/ledger.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/views/App.test.tsx, src/client/views/HelpView.test.tsx]
 branch: ""
 ---
 
@@ -85,3 +85,19 @@ The TopBar tab set is currently two — survey for stale two-tab pins across the
 before writing.
 
 ## Attempt log
+
+- iter 1: green. 24 tests (15 App + 9 Help). Mutation-checked: reintroducing the
+  `view === 'live' &&` gate fails the navigate-away test.
+- Killed a real bug: App gated the live indicator on being ON the Live tab, so a running session
+  — still burning its 5-minute budget — showed no indicator once you opened Replay.
+- App fills `rng` / `evaluatorLanguage` / `recordBlindComparison` itself rather than passing the
+  host bag through, so the optional trio cannot silently disable blind scoring in the shipped app.
+- `browserDeps`/`fixtureDeps` gained real `buildReplayDeps()`. Fixture mode deliberately uses the
+  REAL replay deps: fixture mode exists because a QA browser has no grantable microphone, and
+  Replay needs no microphone — faking its seams would only hide the real server.
+- Ledger's `blindComparisons` store is deliberately NOT in `LedgerExport`: that envelope's shape is
+  pinned by locked round-trip tests, so export/import stayed untouched.
+- ORCHESTRATOR ERROR: I ran the mutation check BEFORE checkpointing, and the `git checkout --`
+  that reverted my sabotage also destroyed the implementer's uncommitted `App.tsx`. Damage was
+  confined to that one file; the other five were committed immediately and the implementer redid
+  it from context. Correct order is commit → mutate → revert, and it exists for exactly this.
