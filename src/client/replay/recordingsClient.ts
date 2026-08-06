@@ -82,10 +82,10 @@ export interface RunsClient {
 }
 
 /**
- * STUB (ticket 023 — test-writer). The REST seam a submitted blind comparison
- * travels over. PRD §7: the server owns the store; the client reads and writes
- * it over REST. Scores that live only in localStorage are absent from the
- * exported bundle and unreachable from a second machine (QA F6).
+ * Ticket 023 — the REST seam a submitted blind comparison travels over. PRD §7:
+ * the server owns the store; the client reads and writes it over REST. Scores
+ * that live only in localStorage are absent from the exported bundle and
+ * unreachable from a second machine (QA F6).
  */
 export interface BlindComparisonsClient {
   create(comparison: BlindComparison): Promise<BlindComparison>;
@@ -222,11 +222,35 @@ export function createRecordingsClient(deps: ApiClientDeps): RecordingsClient {
   };
 }
 
-/** STUB (ticket 023 — test-writer). NO IMPLEMENTATION. */
-export function createBlindComparisonsClient(_deps: ApiClientDeps): BlindComparisonsClient {
+/**
+ * Ticket 023 — the blind-comparisons client.
+ *
+ * NO per-endpoint `fallback` code is declared. The server's rejection code
+ * (`invalid-blind-comparison`) is outside this module's closed vocabulary on
+ * purpose: it is a request-shape complaint, not one of the four states a caller
+ * branches on, so it surfaces as a plain 'http-error' carrying the server's own
+ * `message`. Widening ApiErrorCode for it would make every existing exhaustive
+ * `code` switch in the app incomplete for no behavioural gain.
+ */
+export function createBlindComparisonsClient(deps: ApiClientDeps): BlindComparisonsClient {
+  const http = createRequester(deps);
+
   return {
-    create: () => Promise.reject(new Error('createBlindComparisonsClient: not implemented')),
-    list: () => Promise.reject(new Error('createBlindComparisonsClient: not implemented')),
+    create: (comparison) =>
+      http.json<BlindComparison>('/api/blind-comparisons', {
+        method: 'POST',
+        body: comparison,
+      }),
+
+    // The unfiltered listing keeps a bare path — an empty query string would
+    // be a second URL for the same resource (same rule as createRunsClient).
+    list: (recordingId) =>
+      http.json<BlindComparison[]>(
+        recordingId === undefined
+          ? '/api/blind-comparisons'
+          : `/api/blind-comparisons?recordingId=${encodeURIComponent(recordingId)}`,
+        { method: 'GET' },
+      ),
   };
 }
 

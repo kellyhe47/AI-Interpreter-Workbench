@@ -877,6 +877,21 @@ function isFixtureOnly(row: RecordingGroupRow): boolean {
   );
 }
 
+/**
+ * TICKET 025 — the ONE definition of "Results has nothing to show", exported
+ * because the App shell needs the same answer: the run-provenance stamp lives
+ * in the TopBar, outside this component, and a stamp over 'No runs recorded'
+ * asserts a corpus version over nothing (QA F8). Two copies of this predicate
+ * could drift, and the drift would be a screen claiming provenance it does not
+ * have — so there is one, and the view below reads it too.
+ *
+ * Emptiness is decided on real content, never on record count: a ledger holding
+ * nothing but fixture runs has recorded nothing.
+ */
+export function resultsAreEmpty(ledger: RunLedger): boolean {
+  return deriveLiveModel(ledger).empty && groupByRecording(ledger).every(isFixtureOnly);
+}
+
 function tabStyle(selected: boolean): CSSProperties {
   return {
     appearance: 'none',
@@ -931,9 +946,10 @@ export default function ResultsView(props: ResultsViewProps): ReactElement {
   const categoryRows = groupByCategory(props.ledger);
   const live = deriveLiveModel(props.ledger);
 
-  // Emptiness is decided on real content, never on record count: a ledger
-  // holding nothing but fixture runs has recorded nothing.
-  const empty = live.empty && recordingRows.every(isFixtureOnly);
+  // Emptiness is decided on real content, never on record count — and by the
+  // shared predicate, so the TopBar's provenance stamp cannot disagree with
+  // what this panel renders (ticket 025).
+  const empty = resultsAreEmpty(props.ledger);
 
   const exp1 = empty ? null : deriveComparison(props.ledger, 'A', 'B');
   const exp2 = empty ? null : deriveComparison(props.ledger, 'B', 'C');

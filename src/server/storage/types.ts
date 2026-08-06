@@ -60,7 +60,7 @@ export interface Run {
 }
 
 /**
- * STUB (ticket 023 — test-writer). One sample's two scores (PRD §10).
+ * Ticket 023 — one sample's two scores (PRD §10).
  * Mirrors src/client/state/ledger.ts's BlindComparison field-for-field, for
  * the same reason the Recording/Run shapes are mirrored: tsconfig.json excludes
  * src/server from the client program, so neither side may import the other.
@@ -71,8 +71,8 @@ export interface BlindSampleScores {
 }
 
 /**
- * STUB (ticket 023 — test-writer). A submitted pairwise blind comparison.
- * Server-side twin of the client type.
+ * Ticket 023 — a submitted pairwise blind comparison. Server-side twin of the
+ * client type; it lands in its own append-only `comparisons.jsonl`.
  */
 export interface BlindComparison {
   id: string;

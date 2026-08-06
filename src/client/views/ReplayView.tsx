@@ -155,8 +155,8 @@ export interface ReplayDeps {
   recordBlindComparison?: (comparison: BlindComparison) => void;
 
   /**
-   * STUB (ticket 023 — test-writer). The REST seam a submitted comparison is
-   * persisted through. OPTIONAL and NOT consumed by this view: like the
+   * TICKET 023 — the REST seam a submitted comparison is persisted through.
+   * OPTIONAL and NOT consumed by this view: like the
    * recordings/runs clients it lives on the Replay bag, but it is APP that
    * reads it, because App owns the default `recordBlindComparison` and
    * therefore owns where a judgement lands.
