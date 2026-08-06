@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/fonts.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/colors.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/typography.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/spacing.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/tokens/effects.css">
+<link rel="stylesheet" href="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/styles.css">
+<script src="_ds/interpreter-workbench-design-system-971789f3-a2e2-4ef7-aca1-b91d935b1ed8/_ds_bundle.js"></script>
+<style>
+body{margin:0;background:var(--surface-app);color:var(--text-body);font-family:var(--font-sans)}
+a{color:var(--text-link);text-decoration:none}a:hover{color:var(--accent-strong);text-decoration:underline}
+@keyframes wb-dot{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes wb-fill{from{width:8%}to{width:92%}}
+[data-tip]:hover>[data-tip-body]{opacity:1 !important}
+</style>
+</helmet>
+
+<div style="min-height:100vh;display:flex;flex-direction:column">
+  <!-- top bar -->
+  <div style="display:flex;align-items:center;gap:16px;padding:0 24px;height:52px;background:var(--surface-card);border-bottom:1px solid var(--border-default);position:sticky;top:0;z-index:20">
+    <div style="display:flex;align-items:center;gap:9px;font:600 14px var(--font-sans);letter-spacing:-0.01em">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><path d="M12 19v3"></path></svg>
+      Interpreter workbench
+    </div>
+    <div style="display:flex;border:1px solid var(--border-default);border-radius:8px;overflow:hidden;font:500 12.5px var(--font-sans)">
+      <button onClick="{{ goLive }}" style="{{ tabLive }}" style-hover="background:var(--surface-hover)">Live</button>
+      <button onClick="{{ goReplay }}" style="{{ tabReplay }}" style-hover="background:var(--surface-hover)">Replay</button>
+      <button onClick="{{ goResults }}" style="{{ tabResults }}" style-hover="background:var(--surface-hover)">Results</button>
+      <button onClick="{{ goHelp }}" style="{{ tabHelp }}" style-hover="background:var(--surface-hover)">Help</button>
+    </div>
+    <div style="margin-left:auto;display:flex;align-items:center;gap:10px;font:400 12px var(--font-sans);color:var(--text-secondary)">
+      <sc-if value="{{ isLive }}" hint-placeholder-val="{{ false }}">
+        <span style="display:inline-flex;align-items:center;gap:6px"><i style="width:7px;height:7px;border-radius:99px;background:var(--accent);animation:wb-dot 1.6s infinite"></i>live session</span>
+      </sc-if>
+    </div>
+  </div>
+
+  <!-- ======================= LIVE ======================= -->
+  <sc-if value="{{ onLive }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1;padding:24px 32px 48px;max-width:960px;width:100%;margin:0 auto;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <div style="font:600 18px var(--font-sans);letter-spacing:-0.01em">Live</div>
+      <div style="font:400 12.5px var(--font-sans);color:var(--text-secondary)">One architecture, voice in → voice out, up to 5 minutes. Metrics are saved; audio is discarded. Nothing here becomes experimental evidence.</div>
+    </div>
+
+    <!-- mock state chips -->
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Mock state</span>
+      <sc-for list="{{ stateChips }}" as="chip" hint-placeholder-count="5">
+        <button onClick="{{ chip.select }}" style="{{ chip.style }}" style-hover="border-color:var(--border-strong)">{{ chip.label }}</button>
+      </sc-for>
+    </div>
+
+    <!-- controls card -->
+    <div style="display:flex;flex-direction:column;gap:12px;background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div style="display:flex;border:1px solid var(--border-default);border-radius:8px;overflow:hidden;font:500 12.5px var(--font-sans)">
+          <button onClick="{{ pickRealtime }}" style="{{ modeRealtime }}" style-hover="background:var(--surface-hover)">Realtime</button>
+          <button onClick="{{ pickCascade }}" style="{{ modeCascade }}" style-hover="background:var(--surface-hover)">Cascade</button>
+        </div>
+        <span data-tip="true" title="{{ armTagTip }}" style="{{ armTagStyle }}">{{ armTagLabel }}</span>
+        <button onClick="{{ cycleLang }}" style="display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border-default);border-radius:8px;padding:7px 12px;background:var(--surface-card);font:400 13px var(--font-sans);color:var(--text-body);cursor:pointer" style-hover="background:var(--surface-hover)">
+          {{ langLabel }}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"></path></svg>
+        </button>
+        <button onClick="{{ swapDirection }}" title="Swap direction" style="display:inline-flex;align-items:center;border:1px solid var(--border-default);border-radius:8px;padding:7px 9px;background:var(--surface-card);cursor:pointer" style-hover="background:var(--surface-hover)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--gray-500)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3 4 7l4 4"></path><path d="M4 7h16"></path><path d="m16 21 4-4-4-4"></path><path d="M20 17H4"></path></svg>
+        </button>
+        <span style="{{ langSupportStyle }}">{{ langSupportLabel }}</span>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+          <sc-if value="{{ isStopped }}" hint-placeholder-val="{{ false }}">
+            <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" onClick="{{ startSession }}" hint-size="auto,32px">Start new session</x-import>
+          </sc-if>
+          <sc-if value="{{ notStopped }}" hint-placeholder-val="{{ true }}">
+            <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" variant="secondary" onClick="{{ stopSession }}" hint-size="auto,32px">Stop session</x-import>
+          </sc-if>
+        </div>
+      </div>
+      <!-- per-stage selector (cascade) / context policy (realtime) -->
+      <sc-if value="{{ isCascade }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid var(--border-default);padding-top:12px">
+          <sc-for list="{{ stageSelectors }}" as="sel" hint-placeholder-count="3">
+            <div style="display:flex;flex-direction:column;gap:4px">
+              <span style="font:500 10px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">{{ sel.stage }}</span>
+              <button onClick="{{ sel.cycle }}" title="{{ sel.disabledNote }}" style="{{ sel.style }}" style-hover="border-color:var(--border-strong)">
+                {{ sel.model }}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"></path></svg>
+              </button>
+            </div>
+          </sc-for>
+          <span style="font:400 11px/1.5 var(--font-sans);color:var(--text-muted);max-width:250px;margin-left:auto">{{ selectorNote }}</span>
+        </div>
+      </sc-if>
+      <sc-if value="{{ isRealtime }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid var(--border-default);padding-top:12px">
+          <span style="font:500 10px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Context policy</span>
+          <div style="display:flex;border:1px solid var(--border-default);border-radius:8px;overflow:hidden;font:500 12px var(--font-sans)">
+            <button onClick="{{ pickCtxDefault }}" style="{{ ctxDefault }}" style-hover="background:var(--surface-hover)">default</button>
+            <button onClick="{{ pickCtxTrimmed }}" style="{{ ctxTrimmed }}" style-hover="background:var(--surface-hover)">trimmed</button>
+          </div>
+          <span style="font:400 11px/1.5 var(--font-sans);color:var(--text-muted)">{{ ctxNote }}</span>
+        </div>
+      </sc-if>
+    </div>
+
+    <!-- status strip -->
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;font:400 12px var(--font-sans);color:var(--text-secondary);padding:0 4px">
+      <span style="{{ micStyle }}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path></svg>
+        {{ micLabel }}
+      </span>
+      <span style="{{ connStyle }}">{{ connLabel }}</span>
+      <span style="display:inline-flex;align-items:center;gap:6px">input
+        <span style="display:flex;gap:2px;align-items:flex-end;height:14px">
+          <sc-for list="{{ meterBars }}" as="bar" hint-placeholder-count="5">
+            <i style="{{ bar.style }}"></i>
+          </sc-for>
+        </span>
+      </span>
+      <span style="font-family:var(--font-mono);font-size:11px">{{ stateLabel }}</span>
+      <span style="margin-left:auto;font-family:var(--font-mono);font-size:11px">{{ elapsedLabel }} / 5:00 · autoplay on</span>
+    </div>
+
+    <!-- banners -->
+    <sc-if value="{{ showSwitchBanner }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 3"></path></svg>
+        {{ switchBannerText }}
+      </div>
+    </sc-if>
+    <sc-if value="{{ showReconnectBanner }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>
+        Reconnecting — attempt 2 of 5 · transcript history preserved
+      </div>
+    </sc-if>
+    <sc-if value="{{ isDisconnected }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--negative-soft);color:var(--negative);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6"></path><path d="m15 9-6 6"></path></svg>
+        Disconnected — reconnect attempts exhausted (5 of 5) · transcript history intact
+        <button onClick="{{ reconnect }}" style="margin-left:auto;border:1px solid var(--negative);border-radius:8px;padding:5px 12px;background:none;color:var(--negative);font:500 12px var(--font-sans);cursor:pointer" style-hover="background:var(--negative-soft)">Reconnect</button>
+      </div>
+    </sc-if>
+    <sc-if value="{{ showCantoneseWarn }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path></svg>
+        Realtime does not list Cantonese as a supported output language — text may look correct while audio pronunciation is not. The session proceeds to observe the actual failure mode.
+      </div>
+    </sc-if>
+    <sc-if value="{{ isStopped }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:9px;background:var(--positive-soft);color:var(--positive);border-radius:8px;padding:10px 14px;font:400 12.5px var(--font-sans)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><path d="m9 11 3 3L22 4"></path></svg>
+        Session ended · 5:00 · 32 utterances · LiveSession metrics saved — audio discarded
+      </div>
+    </sc-if>
+
+    <!-- idle / permission-denied entry -->
+    <sc-if value="{{ isPermDenied }}" hint-placeholder-val="{{ false }}">
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:56px 24px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--negative)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="4" y1="4" x2="20" y2="20"></line></svg>
+        <div style="font:600 14px var(--font-sans);margin-top:12px">Microphone access is blocked</div>
+        <div style="font:400 12.5px/1.7 var(--font-sans);color:var(--text-secondary);margin-top:6px;margin-bottom:6px;max-width:440px;margin-left:auto;margin-right:auto">Your browser will not re-ask after a denial — retrying alone will appear to do nothing. Allow the microphone in <b style="color:var(--text-body)">both</b> places, then retry:</div>
+        <div style="font:400 12.5px/1.8 var(--font-sans);color:var(--text-secondary);max-width:440px;margin:0 auto 18px;text-align:left;display:inline-block">1 · Site permission — the mic icon in the address bar → Allow<br>2 · System permission — OS Settings → Privacy → Microphone → allow this browser</div>
+        <div><x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" onClick="{{ startSession }}" hint-size="auto,36px">Retry microphone</x-import></div>
+        <div style="font:400 11.5px var(--font-sans);color:var(--text-muted);margin-top:12px">Session start is blocked until resolved. Replay and Results remain available.</div>
+      </div>
+    </sc-if>
+    <sc-if value="{{ isIdle }}" hint-placeholder-val="{{ false }}">
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:56px 24px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><path d="M12 19v3"></path></svg>
+        <div style="font:600 14px var(--font-sans);margin-top:12px">No active session</div>
+        <div style="font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:4px;margin-bottom:18px">{{ langLabel }} · {{ idleModeLabel }} · autoplay on · up to 5 minutes. Your browser will ask for microphone permission.</div>
+        <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" onClick="{{ startSession }}" hint-size="auto,36px">Start microphone</x-import>
+      </div>
+    </sc-if>
+
+    <!-- transcript cards -->
+    <sc-if value="{{ sessionActive }}" hint-placeholder-val="{{ true }}">
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+          <span style="font:500 11px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Source · {{ srcLang }}</span>
+          <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);white-space:nowrap;flex-shrink:0">utterance 19</span>
+        </div>
+        <div style="font:400 15px/1.6 var(--font-sans);margin-top:8px">{{ srcText }}</div>
+      </div>
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.05);display:flex;flex-direction:column;gap:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+          <span style="display:inline-flex;align-items:center;gap:6px;font:600 13px var(--font-sans)">{{ activeArchName }}
+            <span data-tip="true" style="position:relative;display:inline-flex;cursor:help;z-index:30">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></svg>
+              <span data-tip-body="true" style="position:absolute;left:50%;bottom:calc(100% + 8px);transform:translateX(-50%);width:260px;background:var(--surface-card);border:1px solid var(--border-default);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.1);padding:10px 12px;font:400 11.5px/1.55 var(--font-sans);color:var(--text-secondary);opacity:0;pointer-events:none;transition:opacity 150ms ease-out">{{ archTip }}</span>
+            </span>
+          </span>
+          <span style="{{ liveCardStatusStyle }}">{{ liveCardStatus }}</span>
+        </div>
+        <sc-if value="{{ inFlight }}" hint-placeholder-val="{{ false }}">
+          <div style="height:5px;background:var(--gray-100);border-radius:3px;overflow:hidden"><i style="display:block;height:5px;border-radius:3px;background:var(--accent);animation:wb-fill 1.4s infinite alternate ease-in-out"></i></div>
+        </sc-if>
+        <sc-if value="{{ liveCardFailed }}" hint-placeholder-val="{{ false }}">
+          <div style="background:var(--negative-soft);color:var(--negative);border-radius:8px;padding:9px 12px;font:400 12px var(--font-sans)">{{ liveFailText }}</div>
+        </sc-if>
+        <sc-if value="{{ liveCardReady }}" hint-placeholder-val="{{ true }}">
+          <div style="font:400 14px/1.6 var(--font-sans);min-height:40px">{{ tgtText }}</div>
+          <div style="display:grid;grid-template-columns:82px 1fr 58px;gap:6px 10px;align-items:center;font:400 11.5px var(--font-sans);border-top:1px solid var(--border-default);padding-top:10px">
+            <sc-for list="{{ liveStages }}" as="st" hint-placeholder-count="3">
+              <span style="color:var(--text-secondary)">{{ st.label }}</span>
+              <span style="height:5px;background:var(--gray-100);border-radius:3px;overflow:hidden;display:block"><i style="{{ st.barStyle }}"></i></span>
+              <span style="text-align:right;font-family:var(--font-mono);font-size:11px">{{ st.ms }}</span>
+            </sc-for>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font:400 11.5px var(--font-sans);color:var(--text-secondary);border-top:1px solid var(--border-default);padding-top:9px">
+            <span>total <b style="color:var(--text-body);font-weight:600;font-family:var(--font-mono);font-size:11.5px">{{ liveTotal }}</b></span>
+            <span style="font-family:var(--font-mono);font-size:11px">{{ liveCost }}</span>
+            <span style="color:var(--text-muted)">{{ liveIntervalsNote }}</span>
+          </div>
+        </sc-if>
+        <sc-if value="{{ opaqueNote }}" hint-placeholder-val="{{ true }}">
+          <div style="background:var(--surface-sunken);border-radius:8px;padding:8px 11px;font:400 11px/1.5 var(--font-sans);color:var(--text-secondary)">model interval is opaque — recognition, translation and voice happen inside one model · source transcript comes from a parallel recognizer (sidecar), not the model itself</div>
+        </sc-if>
+      </div>
+      <div style="display:flex;gap:18px;flex-wrap:wrap;font:400 11.5px var(--font-sans);color:var(--text-muted);border-top:1px solid var(--border-default);padding-top:12px;padding-left:4px">
+        <span>19 utterances</span><span>p50 <span style="font-family:var(--font-mono)">1.02 s</span></span><span>p95 <span style="font-family:var(--font-mono)">1.31 s</span></span><span>session <span style="font-family:var(--font-mono)">$0.29</span></span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font-size:10px;letter-spacing:.04em">figures illustrative</span>
+      </div>
+    </sc-if>
+  </div>
+  </sc-if>
+
+  <!-- ======================= REPLAY ======================= -->
+  <sc-if value="{{ onReplay }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1;padding:24px 32px 48px;max-width:1100px;width:100%;margin:0 auto;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+
+    <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+      <div style="font:600 18px var(--font-sans);letter-spacing:-0.01em">Replay</div>
+      <div style="font:400 12.5px var(--font-sans);color:var(--text-secondary)">Record once, run it through any configuration. Runs of the same Recording are comparable by construction.</div>
+      <div style="margin-left:auto"><x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" variant="secondary" hint-size="auto,32px">Record new clip · max 1 min</x-import></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:330px 1fr;gap:16px;align-items:start">
+      <!-- recordings library -->
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;box-shadow:0 1px 2px rgba(0,0,0,.05);overflow:hidden">
+        <div style="padding:13px 16px;border-bottom:1px solid var(--border-default);font:600 13px var(--font-sans)">Recordings</div>
+        <sc-for list="{{ recordings }}" as="rec" hint-placeholder-count="4">
+          <button onClick="{{ rec.select }}" style="{{ rec.style }}" style-hover="background:var(--surface-hover)">
+            <span style="display:flex;align-items:center;gap:8px;min-width:0">
+              <span style="font:500 12.5px var(--font-sans);color:var(--text-body);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ rec.label }}</span>
+              <span style="{{ rec.originStyle }}">{{ rec.origin }}</span>
+            </span>
+            <span style="display:flex;gap:10px;font:400 11px var(--font-sans);color:var(--text-muted);font-family:var(--font-mono)">
+              <span>{{ rec.lang }}</span><span>{{ rec.dur }}</span><span>{{ rec.runCount }} runs</span>
+            </span>
+          </button>
+        </sc-for>
+        <div style="padding:11px 16px;font:400 11px/1.5 var(--font-sans);color:var(--text-muted);border-top:1px solid var(--border-default)">Labels are editable; audio is immutable. Deleting hides a Recording but keeps its Runs. Corpus Recordings can't be deleted — experiments depend on them.</div>
+      </div>
+
+      <!-- right column -->
+      <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+        <!-- configuration panel -->
+        <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:16px 18px;box-shadow:0 1px 2px rgba(0,0,0,.05);display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span style="font:600 13px var(--font-sans)">Run configuration</span>
+            <span style="font:400 11.5px var(--font-sans);color:var(--text-muted)">against “{{ selRecLabel }}”</span>
+            <span data-tip="true" title="{{ armTagTip }}" style="margin-left:auto"><span style="{{ replayArmTagStyle }}">{{ replayArmTagLabel }}</span></span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <div style="display:flex;border:1px solid var(--border-default);border-radius:8px;overflow:hidden;font:500 12.5px var(--font-sans)">
+              <button onClick="{{ pickRealtime }}" style="{{ modeRealtime }}" style-hover="background:var(--surface-hover)">Realtime</button>
+              <button onClick="{{ pickCascade }}" style="{{ modeCascade }}" style-hover="background:var(--surface-hover)">Cascade</button>
+            </div>
+            <sc-if value="{{ isCascade }}" hint-placeholder-val="{{ true }}">
+              <sc-for list="{{ stageSelectors }}" as="sel" hint-placeholder-count="3">
+                <div style="display:flex;flex-direction:column;gap:4px">
+                  <span style="font:500 10px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">{{ sel.stage }}</span>
+                  <button onClick="{{ sel.cycle }}" style="{{ sel.style }}" style-hover="border-color:var(--border-strong)">
+                    {{ sel.model }}
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round"><path d="m6 9 6 6 6-6"></path></svg>
+                  </button>
+                </div>
+              </sc-for>
+            </sc-if>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-top:1px solid var(--border-default);padding-top:12px">
+            <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" onClick="{{ triggerRun }}" hint-size="auto,32px">Run</x-import>
+            <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" variant="secondary" onClick="{{ toggleBatch }}" hint-size="auto,32px">Batch sweep…</x-import>
+            <span style="font:400 11px/1.5 var(--font-sans);color:var(--text-muted)">context pinned to zero in Replay · voice pinned per vendor · replay paced at 1× · manual runs are explorable but never aggregated into experiments</span>
+          </div>
+          <sc-if value="{{ batchOpen }}" hint-placeholder-val="{{ false }}">
+            <div style="background:var(--surface-sunken);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px">
+              <div style="display:flex;align-items:center;gap:10px;font:400 12px var(--font-sans);color:var(--text-secondary)">
+                <span style="font:600 12px var(--font-sans);color:var(--text-body)">Batch sweep running</span>
+                <span style="font-family:var(--font-mono);font-size:11px">run 17 of 45 · rec-en-02 × Arm B · rep 3/5</span>
+                <span style="margin-left:auto;font-family:var(--font-mono);font-size:11px">elapsed 24:06 · est. remaining 41:30</span>
+              </div>
+              <div style="height:5px;background:var(--gray-200);border-radius:3px;overflow:hidden"><i style="display:block;height:5px;width:38%;border-radius:3px;background:var(--accent)"></i></div>
+              <div style="display:flex;align-items:center;gap:10px;font:400 11px var(--font-sans);color:var(--text-muted)">
+                counterbalanced order · first run per configuration discarded as warmup · failures retried once, then the batch continues · origin: sweep
+                <button onClick="{{ toggleBatch }}" style="margin-left:auto;border:1px solid var(--border-default);border-radius:8px;padding:4px 11px;background:var(--surface-card);font:500 11.5px var(--font-sans);color:var(--text-body);cursor:pointer" style-hover="background:var(--surface-hover)">Cancel — keep completed runs</button>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+
+        <!-- runs of selected recording -->
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <span style="font:600 13px var(--font-sans)">Runs of “{{ selRecLabel }}”</span>
+          <span style="font:400 11.5px var(--font-sans);color:var(--text-muted)">identical input — directly comparable</span>
+          <sc-if value="{{ canBlind }}" hint-placeholder-val="{{ true }}">
+            <span style="margin-left:auto"><x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" variant="secondary" onClick="{{ toggleBlind }}" hint-size="auto,32px">{{ blindBtnLabel }}</x-import></span>
+          </sc-if>
+        </div>
+        <sc-for list="{{ runs }}" as="run" hint-placeholder-count="3">
+          <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:14px 16px;box-shadow:0 1px 2px rgba(0,0,0,.05);display:flex;flex-direction:column;gap:9px">
+            <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+              <span style="{{ run.tagStyle }}">{{ run.tag }}</span>
+              <span style="font:600 12.5px var(--font-sans)">{{ run.config }}</span>
+              <span style="font:400 10.5px var(--font-sans);color:var(--text-muted);font-family:var(--font-mono)">{{ run.meta }}</span>
+              <span style="{{ run.statusStyle }}">{{ run.status }}</span>
+            </div>
+            <sc-if value="{{ run.ok }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+                <button onClick="{{ run.togglePlay }}" style="{{ run.playStyle }}" style-hover="background:var(--surface-hover)">
+                  <sc-if value="{{ run.playing }}" hint-placeholder-val="{{ false }}">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>
+                  </sc-if>
+                  <sc-if value="{{ run.notPlaying }}" hint-placeholder-val="{{ true }}">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5.5v13a1 1 0 0 0 1.54.84l10-6.5a1 1 0 0 0 0-1.68l-10-6.5A1 1 0 0 0 7 5.5z"></path></svg>
+                  </sc-if>
+                  {{ run.playLabel }}
+                </button>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;font:400 11.5px var(--font-sans);color:var(--text-secondary)">
+                  <sc-for list="{{ run.stages }}" as="st" hint-placeholder-count="5">
+                    <span>{{ st.label }} <b style="font-family:var(--font-mono);font-weight:600;color:var(--text-body);font-size:11.5px">{{ st.ms }}</b></span>
+                  </sc-for>
+                </div>
+                <span style="margin-left:auto;font:400 11.5px var(--font-sans);color:var(--text-secondary)">total <b style="font-family:var(--font-mono);font-weight:600;color:var(--text-body)">{{ run.total }}</b> · <span style="font-family:var(--font-mono)">{{ run.cost }}</span></span>
+              </div>
+            </sc-if>
+            <sc-if value="{{ run.failed }}" hint-placeholder-val="{{ false }}">
+              <div style="background:var(--negative-soft);color:var(--negative);border-radius:8px;padding:8px 12px;font:400 12px var(--font-sans)">{{ run.failText }}</div>
+            </sc-if>
+          </div>
+        </sc-for>
+
+        <!-- blind compare -->
+        <sc-if value="{{ blindOpen }}" hint-placeholder-val="{{ false }}">
+          <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:18px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px">
+              <span style="font:600 13px var(--font-sans)">Compare blind — two Runs of “{{ selRecLabel }}”</span>
+              <span style="font:400 11.5px var(--font-sans);color:var(--text-muted)">{{ blindHint }}</span>
+            </div>
+            <div style="font:400 11.5px/1.5 var(--font-sans);color:var(--text-muted);margin-bottom:14px">Playback only — transcripts are hidden until you submit, so a wrong-language pronunciation can't pass by reading. Assignment drawn at random per comparison and persisted to the ledger.</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+              <sc-for list="{{ blindSamples }}" as="s" hint-placeholder-count="2">
+                <div style="border:1px solid var(--border-default);border-radius:10px;padding:14px">
+                  <div style="font:600 12.5px var(--font-sans);margin-bottom:4px">{{ s.title }}</div>
+                  <sc-if value="{{ s.revealed }}" hint-placeholder-val="{{ false }}">
+                    <div style="font:400 11px var(--font-sans);color:var(--accent);margin-bottom:8px">{{ s.identity }}</div>
+                  </sc-if>
+                  <button style="display:flex;align-items:center;gap:7px;border:1px solid var(--border-default);border-radius:8px;padding:7px 12px;background:var(--surface-card);font:500 12px var(--font-sans);cursor:pointer;width:100%;margin-bottom:10px;color:var(--text-body)" style-hover="background:var(--surface-hover)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M7 5.5v13a1 1 0 0 0 1.54.84l10-6.5a1 1 0 0 0 0-1.68l-10-6.5A1 1 0 0 0 7 5.5z"></path></svg>
+                    play
+                  </button>
+                  <div style="display:flex;flex-direction:column;gap:8px">
+                    <sc-for list="{{ s.dims }}" as="dim" hint-placeholder-count="2">
+                      <div style="display:flex;align-items:center;gap:8px">
+                        <span style="font:400 11px var(--font-sans);color:var(--text-secondary);width:56px">{{ dim.label }}</span>
+                        <div style="display:flex;gap:5px;flex:1">
+                          <sc-for list="{{ dim.scores }}" as="sc" hint-placeholder-count="5">
+                            <button onClick="{{ sc.pick }}" style="{{ sc.style }}" style-hover="border-color:var(--accent)">{{ sc.n }}</button>
+                          </sc-for>
+                        </div>
+                      </div>
+                    </sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px;margin-top:14px">
+              <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" onClick="{{ submitBlind }}" hint-size="auto,32px">{{ blindSubmitLabel }}</x-import>
+              <span style="font:400 11.5px var(--font-sans);color:var(--text-muted)">adequacy &amp; fluency 1–5 · scores, drawn assignment, and evaluator language append to the ledger</span>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ======================= RESULTS ======================= -->
+  <sc-if value="{{ onResults }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1;padding:24px 32px 48px;max-width:1060px;width:100%;margin:0 auto;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div>
+        <div style="font:600 22px var(--font-sans);letter-spacing:-0.01em">Results</div>
+        <div style="font:400 13px var(--font-sans);color:var(--text-secondary);margin-top:3px">Every screen reads one append-only run ledger. Experiments aggregate only sweep-origin runs whose configuration matches a named arm.</div>
+      </div>
+      <label style="margin-left:auto;display:inline-flex;align-items:center;gap:8px;font:400 12px var(--font-sans);color:var(--text-secondary);cursor:pointer">
+        <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Switch" checked="{{ hasRuns }}" onChange="{{ setHasRuns }}" hint-size="36px,20px"></x-import>
+        show recorded runs (mock)
+      </label>
+    </div>
+
+    <div style="display:flex;border-bottom:1px solid var(--border-default);gap:2px">
+      <button onClick="{{ pickPrimary }}" style="{{ rtabPrimary }}" style-hover="color:var(--text-body)">Experiments</button>
+      <button onClick="{{ pickSecondary }}" style="{{ rtabSecondary }}" style-hover="color:var(--text-body)">By Recording &amp; category</button>
+    </div>
+
+    <sc-if value="{{ noRuns }}" hint-placeholder-val="{{ false }}">
+      <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:56px 24px;text-align:center;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--gray-400)" stroke-width="1.5" stroke-linecap="round"><path d="M3 3v18h18"></path><circle cx="9" cy="13" r="1.2"></circle><circle cx="13" cy="9" r="1.2"></circle><circle cx="17" cy="12" r="1.2"></circle></svg>
+        <div style="font:600 14px var(--font-sans);margin-top:12px">No runs recorded</div>
+        <div style="font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:4px;margin-bottom:18px">Run a batch sweep in Replay to populate the experiments. Result cards never show sample data as evidence.</div>
+        <x-import component-from-global-scope="InterpreterWorkbenchDesignSystem_971789.Button" size="sm" onClick="{{ setHasRunsTrue }}" hint-size="auto,32px">Run sweep</x-import>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ showPrimary }}" hint-placeholder-val="{{ true }}">
+    <!-- exp 1 -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Experiment 1 · vendor held constant</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">Does the architecture itself cost latency?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">EN→ES · 12 utterances × 5 reps = 60 samples/arm · 5 of 5 reps completed · armTag matched + origin sweep · endpointing pinned 500 ms · corpus v1</div>
+      <div style="display:grid;grid-template-columns:1.3fr 1fr 1fr .9fr;gap:0;margin-top:14px;font:400 13px var(--font-sans)">
+        <sc-for list="{{ exp1Rows }}" as="r" hint-placeholder-count="8">
+          <span style="{{ r.c0 }}">{{ r.metric }}</span>
+          <span style="{{ r.c1 }}">{{ r.a }}</span>
+          <span style="{{ r.c1 }}">{{ r.b }}</span>
+          <span style="{{ r.cd }}">{{ r.delta }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:14px">Latency is a wash. Cost is not.</div>
+    </div>
+
+    <!-- exp 2 -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Experiment 2 · architecture held constant · one stage varies</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">What does swapping providers buy?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">only TTS differs between arms — gpt-4o-mini-tts vs ElevenLabs Flash v2.5 (streaming text input) · 4 of 5 reps completed on rec-es-03 · not pooled with experiment 1</div>
+      <div style="display:grid;grid-template-columns:1.3fr 1fr 1fr .9fr;gap:0;margin-top:14px;font:400 13px var(--font-sans)">
+        <sc-for list="{{ exp2Rows }}" as="r" hint-placeholder-count="6">
+          <span style="{{ r.c0 }}">{{ r.metric }}</span>
+          <span style="{{ r.c1 }}">{{ r.a }}</span>
+          <span style="{{ r.c1 }}">{{ r.b }}</span>
+          <span style="{{ r.cd }}">{{ r.delta }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:14px">One swapped stage, cleanly attributable: streaming text input is the single largest cascade latency lever.</div>
+    </div>
+
+    <!-- stability / live sessions -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Sourced from LiveSessions, not Replay runs</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">What changes as the conversation continues?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">5-minute live sessions, free-form speech · absolute values not comparable across sessions — the shape of the curve is · context policy is the variable</div>
+      <div style="display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr;gap:0;margin-top:14px;font:400 12.5px var(--font-sans)">
+        <sc-for list="{{ stabRows }}" as="r" hint-placeholder-count="7">
+          <span style="{{ r.c0 }}">{{ r.metric }}</span>
+          <span style="{{ r.c1 }}">{{ r.a }}</span>
+          <span style="{{ r.c1 }}">{{ r.b }}</span>
+          <span style="{{ r.c1 }}">{{ r.c }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px/1.6 var(--font-sans);color:var(--text-secondary);margin-top:14px">The slope belongs to token billing with conversation replay, not to voice-to-voice. Trimming context removes most of it; cascade never had it. gpt-realtime-translate is duration-billed and flat at $0.034/min.</div>
+    </div>
+
+    <!-- coverage -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">Exploratory case study · never pooled with experiments</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:600 17px var(--font-sans);letter-spacing:-0.01em;margin-top:6px">What does provider choice let us reach?</div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">support is per direction, not per pair · coverage verified by running each direction · qualitative, single native evaluator</div>
+      <div style="display:grid;grid-template-columns:1.35fr 1fr .85fr .85fr .85fr;gap:0;margin-top:14px;font:400 12.5px var(--font-sans)">
+        <sc-for list="{{ coverageRows }}" as="r" hint-placeholder-count="5">
+          <span style="{{ r.c0 }}">{{ r.pair }}</span>
+          <span style="{{ r.rt }}">{{ r.realtime }}</span>
+          <span style="{{ r.s1 }}">{{ r.stt }}</span>
+          <span style="{{ r.s2 }}">{{ r.mt }}</span>
+          <span style="{{ r.s3 }}">{{ r.tts }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:12px 14px;margin-top:14px">
+        <div style="font:600 12px var(--font-sans);margin-bottom:5px">Observation · English → Cantonese on Realtime</div>
+        <div style="font:400 12.5px/1.6 var(--font-sans);color:var(--text-secondary)">Produced fluent, confident audio. The transcript read correctly. A native speaker identified the pronunciation as Mandarin, not Cantonese. No automated metric detected this — playback-first blind scoring exists for exactly this class of error.</div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px">
+        <div style="background:var(--surface-sunken);border-radius:8px;padding:14px 16px"><div style="font:400 11px var(--font-sans);color:var(--text-secondary)">Add a pair providers cover</div><div style="font:600 21px var(--font-sans);letter-spacing:-0.01em;margin-top:3px">6 min</div><div style="font:400 11px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:10.5px">commit a4f21c · +11 lines, config only</div></div>
+        <div style="background:var(--surface-sunken);border-radius:8px;padding:14px 16px"><div style="font:400 11px var(--font-sans);color:var(--text-secondary)">Add a new provider</div><div style="font:600 21px var(--font-sans);letter-spacing:-0.01em;margin-top:3px">1h 48m</div><div style="font:400 11px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:10.5px">commit 9d0e77 · contract suite passed unchanged</div></div>
+        <div style="background:var(--surface-sunken);border-radius:8px;padding:14px 16px"><div style="font:400 11px var(--font-sans);color:var(--text-secondary)">Add a pair to Realtime</div><div style="font:600 21px var(--font-sans);letter-spacing:-0.01em;margin-top:3px">n/a</div><div style="font:400 11px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:10.5px">no mechanism exists at any price</div></div>
+      </div>
+    </div>
+    </sc-if>
+
+    <sc-if value="{{ showSecondary }}" hint-placeholder-val="{{ false }}">
+    <!-- by category -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">By utterance category — where the heterogeneity lives</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="font:400 12px var(--font-sans);color:var(--text-muted);margin-top:4px;font-family:var(--font-mono);font-size:11px">p50 by category tag · EN→ES · sweep runs only · this grouping produces findings; per-recording differences are noise</div>
+      <div style="display:grid;grid-template-columns:1.4fr 1fr 1fr .9fr;gap:0;margin-top:14px;font:400 12.5px var(--font-sans)">
+        <sc-for list="{{ catRows }}" as="r" hint-placeholder-count="7">
+          <span style="{{ r.c0 }}">{{ r.metric }}</span>
+          <span style="{{ r.c1 }}">{{ r.a }}</span>
+          <span style="{{ r.c1 }}">{{ r.b }}</span>
+          <span style="{{ r.cd }}">{{ r.delta }}</span>
+        </sc-for>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px var(--font-sans);color:var(--text-secondary);margin-top:14px">Cascade's p50 is comparable overall but loses ~400 ms on numbers and dates.</div>
+    </div>
+    <!-- by recording -->
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+        <span style="font:500 10.5px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">By Recording — includes ad-hoc runs, excluded from experiments</span>
+        <span style="margin-left:auto;background:var(--warning-soft);color:oklch(45% 0.12 75);border-radius:99px;padding:2px 9px;font:400 10px var(--font-sans);letter-spacing:.04em">illustrative</span>
+      </div>
+      <div style="display:grid;grid-template-columns:1.1fr .8fr .9fr .7fr .7fr .8fr;gap:0;margin-top:14px;font:400 12px var(--font-sans)">
+        <sc-for list="{{ recRows }}" as="r" hint-placeholder-count="7">
+          <span style="{{ r.cs }}">{{ r.rec }}</span>
+          <span style="{{ r.c }}">{{ r.tag }}</span>
+          <span style="{{ r.c }}">{{ r.origin }}</span>
+          <span style="{{ r.c }}">{{ r.n }}</span>
+          <span style="{{ r.c }}">{{ r.p50 }}</span>
+          <span style="{{ r.c }}">{{ r.status }}</span>
+        </sc-for>
+      </div>
+    </div>
+    </sc-if>
+  </div>
+  </sc-if>
+
+  <!-- ======================= HELP ======================= -->
+  <sc-if value="{{ onHelp }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1;padding:24px 32px 48px;max-width:760px;width:100%;margin:0 auto;box-sizing:border-box;display:flex;flex-direction:column;gap:16px">
+    <div>
+      <div style="font:600 22px var(--font-sans);letter-spacing:-0.01em">How this workbench works</div>
+      <div style="font:400 13px/1.6 var(--font-sans);color:var(--text-secondary);margin-top:3px">A plain-language guide to what we're testing, how to run it, and how to read the numbers.</div>
+    </div>
+
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="font:600 15px var(--font-sans)">What we're researching</div>
+      <div style="font:400 13px/1.7 var(--font-sans);color:var(--text-secondary);margin-top:8px">There are two ways to build a live speech interpreter. One is a single AI model that listens in one language and speaks in another — one sealed box. The other is an assembly line: one service turns speech into text, another translates it, a third speaks the translation. The sealed box is simpler; the assembly line lets you swap any part. This workbench runs both on identical recorded input and measures which is faster, cheaper, better sounding, and easier to control — so the choice rests on data instead of vendor marketing.</div>
+    </div>
+
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="font:600 15px var(--font-sans)">Live vs Replay — the two modes</div>
+      <div style="display:flex;flex-direction:column;gap:12px;margin-top:10px;font:400 13px/1.7 var(--font-sans);color:var(--text-secondary)">
+        <div><b style="color:var(--text-body)">Live</b> is a real interpreter: speak, hear the translation, up to five minutes, one architecture at a time. It's how you experience the product — and how conversation-length effects (creeping delay, rising cost) are measured. Its metrics are saved; its audio is discarded.</div>
+        <div><b style="color:var(--text-body)">Replay</b> is the laboratory. Record a clip once (or use the built-in corpus), then run that exact same audio through any configuration you like. Because the input is identical every time, two runs are directly comparable — that's what makes the measurements trustworthy. Nothing in Replay ever autoplays; you listen on demand.</div>
+        <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font-size:12.5px">Three things to keep straight: a <b style="color:var(--text-body)">Recording</b> is an input (what was said), a <b style="color:var(--text-body)">Run</b> is one execution of a Recording through one configuration, and a <b style="color:var(--text-body)">LiveSession</b> is a real conversation's metrics. Live sessions and Runs are never compared — different inputs, no shared basis.</div>
+      </div>
+    </div>
+
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="font:600 15px var(--font-sans)">The three arms</div>
+      <div style="font:400 13px/1.7 var(--font-sans);color:var(--text-secondary);margin-top:8px">An "arm" is a named, frozen recipe. You never label a run yourself — the app derives the tag from what you actually configured. Assemble Arm B's exact recipe and your run <i>is</i> an Arm B run; deviate anywhere and it's tagged "ad-hoc" (explorable, but never counted as experimental evidence).</div>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+        <div style="display:flex;gap:12px;align-items:flex-start"><span style="flex-shrink:0;font:600 12px var(--font-sans);background:var(--accent-soft);color:var(--accent);border-radius:99px;padding:3px 10px">Arm A</span><span style="font:400 13px/1.6 var(--font-sans);color:var(--text-secondary)"><b style="color:var(--text-body)">Realtime</b> — the sealed box. OpenAI's voice-to-voice model does everything internally. We can't see inside; we can only time the whole thing.</span></div>
+        <div style="display:flex;gap:12px;align-items:flex-start"><span style="flex-shrink:0;font:600 12px var(--font-sans);background:var(--accent-soft);color:var(--accent);border-radius:99px;padding:3px 10px">Arm B</span><span style="font:400 13px/1.6 var(--font-sans);color:var(--text-secondary)"><b style="color:var(--text-body)">Cascade, all-OpenAI</b> — the assembly line built entirely from OpenAI parts. A and B share a vendor, so any difference between them is caused by the design, not the company.</span></div>
+        <div style="display:flex;gap:12px;align-items:flex-start"><span style="flex-shrink:0;font:600 12px var(--font-sans);background:var(--accent-soft);color:var(--accent);border-radius:99px;padding:3px 10px">Arm C</span><span style="font:400 13px/1.6 var(--font-sans);color:var(--text-secondary)"><b style="color:var(--text-body)">Cascade, one part swapped</b> — identical to B except the voice stage, which uses ElevenLabs. Exactly one difference, so whatever changes between B and C is caused by that one swap.</span></div>
+      </div>
+    </div>
+
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="font:600 15px var(--font-sans)">The experiments</div>
+      <div style="display:flex;flex-direction:column;gap:12px;margin-top:10px;font:400 13px/1.7 var(--font-sans);color:var(--text-secondary)">
+        <div><b style="color:var(--text-body)">1 · Does the design itself cost speed?</b> Arm A vs Arm B on the same recordings, same vendor. This is the headline result.</div>
+        <div><b style="color:var(--text-body)">2 · What does swapping one part buy?</b> Arm B vs Arm C — only the voice stage differs, so the delta is cleanly attributable.</div>
+        <div><b style="color:var(--text-body)">3 · What happens over a long conversation?</b> Measured in Live, not Replay. The sealed box re-reads the whole conversation on every turn, so its cost per minute climbs; the assembly line stays flat. A "trimmed" setting deletes history each turn to prove the slope comes from billing, not from voice-to-voice itself.</div>
+        <div><b style="color:var(--text-body)">4 · What about a less common language?</b> Cantonese, as a case study against the same vendors. Realtime doesn't list it; we run it anyway to see <i>how</i> it fails — the transcript can look right while the audio is actually Mandarin. Only a native speaker's ear catches that, which is why blind scoring is playback-only.</div>
+      </div>
+      <div style="background:var(--surface-sunken);border-radius:8px;padding:10px 13px;font:400 12.5px/1.6 var(--font-sans);color:var(--text-secondary);margin-top:12px">These tracks are never mixed: a Cantonese finding is never evidence about Spanish speed. Each result screen names its own question and its own data.</div>
+    </div>
+
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="font:600 15px var(--font-sans)">How to use it</div>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;font:400 13px/1.7 var(--font-sans);color:var(--text-secondary)">
+        <div><b style="color:var(--text-body)">1.</b> In <b style="color:var(--text-body)">Live</b>, press Start microphone and speak — the translation plays back automatically. Switch architecture or language mid-conversation; switches wait for your sentence to finish.</div>
+        <div><b style="color:var(--text-body)">2.</b> In <b style="color:var(--text-body)">Replay</b>, pick a Recording (or record a clip, up to a minute), choose an architecture — and for the cascade, a model for each of the three stages. The panel tells you live whether your recipe matches a named arm.</div>
+        <div><b style="color:var(--text-body)">3.</b> Press <b style="color:var(--text-body)">Run</b> to execute once, or <b style="color:var(--text-body)">Batch sweep</b> to run a whole matrix unattended (~$4, ~68 minutes) — it shows progress and can be cancelled without losing completed runs.</div>
+        <div><b style="color:var(--text-body)">4.</b> With two or more runs of the same Recording, use <b style="color:var(--text-body)">Compare blind</b>: listen to both without knowing which is which, rate adequacy and fluency, then see the reveal. Scores go into the ledger.</div>
+      </div>
+    </div>
+
+    <div style="background:var(--surface-card);border:1px solid var(--border-default);border-radius:12px;padding:20px 22px;box-shadow:0 1px 2px rgba(0,0,0,.05)">
+      <div style="font:600 15px var(--font-sans)">How to read it</div>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;font:400 13px/1.7 var(--font-sans);color:var(--text-secondary)">
+        <div><b style="color:var(--text-body)">The stage timings</b> show where the time goes, in labelled milliseconds. The cascade shows all five steps; Realtime shows three, with its big middle one marked <i>opaque</i> — the sealed box. When something breaks, the cascade names the failed stage; Realtime can't. That difference is itself a finding.</div>
+        <div><b style="color:var(--text-body)">p50 / p95</b> — the typical delay and the bad-day delay. Half of responses are faster than p50; 95% are faster than p95.</div>
+        <div><b style="color:var(--text-body)">Cost per minute</b> — what a minute costs in provider fees. In Replay it's a snapshot; the conversation-length screen shows whether it climbs.</div>
+        <div><b style="color:var(--text-body)">Provenance lines</b> — the small mono text under each title says exactly which recordings, how many repeats actually completed ("4 of 5"), and which settings produced the number. A number without that line is just a claim.</div>
+        <div><b style="color:var(--text-body)">"Illustrative" badges</b> — every figure in this mock is a realistic placeholder, not a measurement. The real app shows "No runs recorded" until a sweep has actually run.</div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;defaultView&quot;: {&quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;live&quot;, &quot;replay&quot;, &quot;results&quot;, &quot;help&quot;], &quot;default&quot;: &quot;live&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Behavior&quot;}}">
+class Component extends DCLogic {
+  state = {
+    view: this.props.defaultView ?? 'live',
+    arch: 'realtime', sttIdx: 0, mtIdx: 0, ttsIdx: 0, ctx: 'default',
+    langIdx: 0, reversed: false,
+    liveState: 'idle', pending: null, playingRun: null,
+    selRec: 0, batchOpen: false,
+    blindOpen: false, blindRevealed: false, blindScores: {}, blindOrder: false,
+    hasRuns: true, resultsTab: 'primary',
+  };
+  renderVals() {
+    const S = this.state, set = p => this.setState(p);
+    const tab = on => `border:none;cursor:pointer;padding:7px 16px;font:inherit;color:${on ? 'var(--text-body)' : 'var(--text-secondary)'};background:${on ? 'var(--surface-selected)' : 'var(--surface-card)'}`;
+    const chipStyle = on => `font:400 11.5px var(--font-sans);border:1px solid ${on ? 'var(--accent)' : 'var(--border-default)'};color:${on ? 'var(--accent)' : 'var(--text-secondary)'};background:${on ? 'var(--accent-soft)' : 'var(--surface-card)'};border-radius:99px;padding:4px 11px;cursor:pointer`;
+    // language
+    const pairs = [
+      {src: 'English', tgt: 'Spanish', support: 'both modes', canto: false},
+      {src: 'English', tgt: 'Cantonese', support: 'cascade only', canto: true},
+    ];
+    const p = pairs[S.langIdx];
+    const src = S.reversed ? p.tgt : p.src, tgt = S.reversed ? p.src : p.tgt;
+    // lifecycle
+    const idle = S.liveState === 'idle', permDenied = S.liveState === 'permission-denied';
+    const stopped = S.liveState === 'stopped', disconnected = S.liveState === 'disconnected';
+    const reconnecting = S.liveState === 'reconnecting', inFlight = S.liveState === 'processing';
+    const failedState = S.liveState === 'failed';
+    const active = !idle && !permDenied && !stopped && !disconnected;
+    const live = active && !reconnecting;
+    const queue = (label, patch) => {
+      if (S.view !== 'live' || !active) { set(patch); return; }
+      clearTimeout(this._qt);
+      this.setState({pending: label});
+      this._qt = setTimeout(() => this.setState({...patch, pending: null}), 2600);
+    };
+    // stage model menus (PRD §6)
+    const menus = {
+      stt: ['gpt-4o-transcribe', 'gpt-4o-mini-transcribe', 'EL Scribe v2 Realtime'],
+      mt: ['gpt-4o-mini', 'Claude Haiku 4.5'],
+      tts: ['gpt-4o-mini-tts', 'EL Flash v2.5', 'EL Multilingual v2'],
+    };
+    const isCascade = S.arch === 'cascade';
+    // derived armTag (§6 quarantine)
+    const armTag = S.arch === 'realtime' ? 'Arm A' :
+      (S.sttIdx === 0 && S.mtIdx === 0 && S.ttsIdx === 0) ? 'Arm B' :
+      (S.sttIdx === 0 && S.mtIdx === 0 && S.ttsIdx === 1) ? 'Arm C' : 'ad-hoc';
+    const isNamed = armTag !== 'ad-hoc';
+    const armTagStyle = `font:600 11px var(--font-sans);border-radius:99px;padding:3px 10px;background:${isNamed ? 'var(--accent-soft)' : 'var(--surface-selected)'};color:${isNamed ? 'var(--accent)' : 'var(--text-secondary)'}`;
+    const armTagTip = isNamed
+      ? `This configuration exactly matches ${armTag}'s frozen recipe, so runs it produces are tagged ${armTag} automatically. Tags are derived from configuration — never declared — so mislabelling is impossible.`
+      : 'This configuration matches no named arm. Runs are tagged ad-hoc: fully explorable and saved to the ledger, but never aggregated into experimental evidence.';
+    const selStyle = `display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border-default);border-radius:8px;padding:6px 11px;background:var(--surface-card);font:400 12px var(--font-sans);color:var(--text-body);cursor:pointer;font-family:var(--font-mono);font-size:11.5px`;
+    const stageSelectors = [
+      {stage: 'stt', key: 'sttIdx'}, {stage: 'mt', key: 'mtIdx'}, {stage: 'tts', key: 'ttsIdx'},
+    ].map(({stage, key}) => ({
+      stage, model: menus[stage][S[key]],
+      cycle: () => set({[key]: (S[key] + 1) % menus[stage].length}),
+      style: selStyle, disabledNote: '',
+    }));
+    // live card data
+    const rtStages = [['endpointing', 500], ['model', 471], ['queue', 9]];
+    const casStages = [['endpointing', 500], ['stt', 42], ['mt', 298], ['tts', S.ttsIdx === 1 ? 74 : 201], ['queue', 12]];
+    const stages = S.arch === 'realtime' ? rtStages : casStages;
+    const totalMs = stages.reduce((s, x) => s + x[1], 0);
+    const srcTexts = {English: 'I need to schedule an appointment for next Tuesday to review the test results.', Spanish: 'Necesito programar una cita para el próximo martes para revisar los resultados.', Cantonese: '我想約下星期二睇報告結果。'};
+    const tgtTexts = {Spanish: 'Necesito programar una cita para el próximo martes para revisar los resultados.', English: 'I need to schedule an appointment for next Tuesday to review the test results.', Cantonese: '我想預約下星期二嘅時間，覆診睇檢查報告。'};
+    // recordings library (mock)
+    const recDefs = [
+      {label: 'rec-en-01 · corpus', origin: 'corpus', lang: 'EN', dur: '0:42', runCount: 12},
+      {label: 'rec-en-02 · corpus', origin: 'corpus', lang: 'EN', dur: '0:38', runCount: 10},
+      {label: 'rec-es-01 · corpus', origin: 'corpus', lang: 'ES', dur: '0:45', runCount: 12},
+      {label: 'rec-yue-01 · corpus', origin: 'corpus', lang: 'YUE', dur: '0:41', runCount: 6},
+      {label: 'pharmacy dosage test', origin: 'mic', lang: 'EN', dur: '0:31', runCount: 3},
+    ];
+    const recordings = recDefs.map((r, i) => ({
+      ...r,
+      select: () => set({selRec: i, blindOpen: false}),
+      style: `display:flex;flex-direction:column;gap:5px;align-items:stretch;width:100%;text-align:left;border:none;border-bottom:1px solid var(--border-default);padding:11px 16px;cursor:pointer;background:${S.selRec === i ? 'var(--surface-selected)' : 'var(--surface-card)'}`,
+      originStyle: `flex-shrink:0;font:500 9.5px var(--font-sans);text-transform:uppercase;letter-spacing:.05em;border-radius:99px;padding:2px 7px;background:${r.origin === 'corpus' ? 'var(--accent-soft)' : 'var(--surface-selected)'};color:${r.origin === 'corpus' ? 'var(--accent)' : 'var(--text-secondary)'}`,
+    }));
+    const selRecLabel = recDefs[S.selRec].label;
+    // runs of selected recording (mock)
+    const tagPill = t => `font:600 10.5px var(--font-sans);border-radius:99px;padding:2px 9px;background:${t === 'ad-hoc' ? 'var(--surface-selected)' : 'var(--accent-soft)'};color:${t === 'ad-hoc' ? 'var(--text-secondary)' : 'var(--accent)'}`;
+    const runDefs = [
+      {tag: 'Arm A', config: 'Realtime · gpt-realtime', meta: 'origin manual · snapshot gpt-realtime-2.1 · 09:41', status: 'complete', stages: [['endpointing', 500], ['model', 471], ['queue', 9]], total: '980 ms', cost: '$0.140/min'},
+      {tag: 'Arm B', config: 'Cascade · 4o-transcribe → 4o-mini → 4o-mini-tts', meta: 'origin sweep · rep 3/5 · 09:52', status: 'complete', stages: [['endpointing', 500], ['stt', 42], ['mt', 298], ['tts', 201], ['queue', 12]], total: '1053 ms', cost: '$0.021/min'},
+      {tag: 'Arm C', config: 'Cascade · 4o-transcribe → 4o-mini → EL Flash v2.5', meta: 'origin sweep · rep 3/5 · 10:04', status: 'complete', stages: [['endpointing', 500], ['stt', 42], ['mt', 298], ['tts', 74], ['queue', 11]], total: '925 ms', cost: '$0.038/min'},
+      {tag: 'ad-hoc', config: 'Cascade · Scribe v2 → Haiku 4.5 → EL Multilingual v2', meta: 'origin manual · excluded from aggregates · 10:12', status: 'failed', failText: 'tts stage timed out for this utterance — run saved as failed, excluded from every aggregate'},
+    ];
+    const runs = runDefs.map((r, i) => {
+      const playing = S.playingRun === i;
+      const ok = r.status === 'complete';
+      return {
+        tag: r.tag, tagStyle: tagPill(r.tag), config: r.config, meta: r.meta,
+        status: r.status, ok, failed: !ok, failText: r.failText || '',
+        statusStyle: `margin-left:auto;font:500 10.5px var(--font-sans);border-radius:99px;padding:2px 9px;background:${ok ? 'var(--positive-soft)' : 'var(--negative-soft)'};color:${ok ? 'var(--positive)' : 'var(--negative)'}`,
+        playing, notPlaying: !playing,
+        playLabel: playing ? 'pause' : 'play',
+        playStyle: `display:inline-flex;align-items:center;gap:6px;border:1px solid ${playing ? 'var(--accent)' : 'var(--border-default)'};border-radius:8px;padding:6px 12px;background:var(--surface-card);font:500 12px var(--font-sans);cursor:pointer;color:${playing ? 'var(--accent)' : 'var(--text-body)'}`,
+        togglePlay: () => set({playingRun: playing ? null : i}),
+        stages: (r.stages || []).map(([label, ms]) => ({label, ms: ms + ' ms'})),
+        total: r.total || '', cost: r.cost || '',
+      };
+    });
+    // blind compare
+    const mkScores = k => [1, 2, 3, 4, 5].map(n => ({
+      n, pick: () => set({blindScores: {...S.blindScores, [k]: n}}),
+      style: `flex:1;text-align:center;border:1px solid ${S.blindScores[k] === n ? 'var(--accent)' : 'var(--border-default)'};border-radius:8px;padding:6px 0;font:500 12px var(--font-sans);cursor:pointer;background:${S.blindScores[k] === n ? 'var(--accent-soft)' : 'var(--surface-card)'};color:${S.blindScores[k] === n ? 'var(--accent)' : 'var(--text-body)'}`,
+    }));
+    const mkDims = sample => [['adequacy', sample + '-adq'], ['fluency', sample + '-flu']].map(([label, k]) => ({label, scores: mkScores(k)}));
+    const pairIds = ['Arm B — Cascade all-OpenAI', 'Arm C — Cascade, EL Flash TTS'];
+    const drawn = S.blindOrder ? [pairIds[1], pairIds[0]] : pairIds;
+    // results tables
+    const c0 = 'color:var(--text-secondary);padding:9px 0;border-top:1px solid var(--border-default)';
+    const c1 = 'padding:9px 0;border-top:1px solid var(--border-default);font-family:var(--font-mono);font-size:12px';
+    const hd = 'font:500 10px var(--font-sans);color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;padding-bottom:6px';
+    const d = tone => `padding:9px 0;border-top:1px solid var(--border-default);text-align:right;font-family:var(--font-mono);font-size:12px;color:${tone === 'good' ? 'var(--positive)' : tone === 'bad' ? 'var(--negative)' : 'var(--text-muted)'}`;
+    const row = (metric, a, b, delta, tone) => ({metric, a, b, delta, c0, c1, cd: d(tone)});
+    const hrow = (metric, a, b, delta) => ({metric, a, b, delta, c0: hd, c1: hd, cd: hd + ';text-align:right'});
+    const exp1Rows = [
+      hrow('metric', 'Arm A · realtime', 'Arm B · cascade', 'delta'),
+      row('p50 latency', '1.02 s', '1.06 s', '+40 ms'),
+      row('p95 latency', '1.31 s', '1.28 s', '−30 ms', 'good'),
+      row('cost / min', '$0.140', '$0.021', '−85%', 'good'),
+      row('word error rate', '4.2% (sidecar)', '3.8%', 'n/a'),
+      row('adequacy 1–5', '4.6', '4.4', '−0.2'),
+      row('fluency 1–5', '4.7', '4.2', '−0.5'),
+      row('observable intervals', '3 · 1 opaque', '5 · 0 opaque', '+2', 'good'),
+    ];
+    const exp2Rows = [
+      hrow('metric', 'Arm B · 4o-mini-tts', 'Arm C · EL Flash v2.5', 'delta'),
+      row('p50 latency', '1.06 s', '0.93 s', '−130 ms', 'good'),
+      row('p95 latency', '1.28 s', '1.12 s', '−160 ms', 'good'),
+      row('cost / min', '$0.021', '$0.038', '+81%', 'bad'),
+      row('word error rate', '3.8%', '3.8%', '— (STT unchanged)'),
+      row('fluency 1–5', '4.2', '4.6', '+0.4', 'good'),
+    ];
+    const srow3 = (metric, a, b, c) => ({metric, a, b, c, c0, c1});
+    const stabRows = [
+      {metric: 'metric', a: 'realtime · default', b: 'realtime · trimmed', c: 'cascade', c0: hd, c1: hd},
+      srow3('utterances completed', '31 / 32', '32 / 32', '32 / 32'),
+      srow3('disconnects', '1', '0', '0'),
+      srow3('p50 · minute 1', '0.99 s', '0.98 s', '1.05 s'),
+      srow3('p50 · final minute', '1.14 s', '1.01 s', '1.06 s'),
+      srow3('$/min · minute 1', '$0.09', '$0.08', '$0.021'),
+      srow3('$/min · final minute', '$0.31', '$0.09', '$0.021'),
+      srow3('heap start → end', '48 → 61 MB', '49 → 52 MB', '52 → 55 MB'),
+    ];
+    const catRows = [
+      hrow('category (p50)', 'Arm A', 'Arm B', 'delta'),
+      row('short reply', '0.86 s', '0.84 s', '−20 ms'),
+      row('long compound', '1.21 s', '1.18 s', '−30 ms'),
+      row('numbers & dates', '1.04 s', '1.44 s', '+400 ms', 'bad'),
+      row('proper nouns', '1.02 s', '1.09 s', '+70 ms'),
+      row('disfluency', '1.11 s', '1.08 s', '−30 ms'),
+      row('interruption', '1.15 s', '1.22 s', '+70 ms'),
+    ];
+    const cell = tone => `padding:9px 0;border-top:1px solid var(--border-default);color:${tone === 'ok' ? 'var(--positive)' : tone === 'no' ? 'var(--negative)' : tone === 'warn' ? 'oklch(45% 0.12 75)' : 'var(--text-muted)'}`;
+    const cov = (pair, realtime, rt, stt, s1, mt, s2, tts, s3) => ({pair, realtime, stt, mt, tts, c0, rt: cell(rt), s1: cell(s1), s2: cell(s2), s3: cell(s3)});
+    const coverageRows = [
+      {pair: 'direction', realtime: 'realtime', stt: 'stt', mt: 'mt', tts: 'tts', c0: hd, rt: hd, s1: hd, s2: hd, s3: hd},
+      cov('English → Spanish', 'runs', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'),
+      cov('Spanish → English', 'runs', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok'),
+      cov('English → Cantonese', 'not listed', 'no', 'ok', 'ok', 'ok', 'ok', 'verify', 'warn'),
+      cov('Cantonese → English', 'recognition unverified', 'warn', 'verify', 'warn', 'ok', 'ok', 'ok', 'ok'),
+    ];
+    const lc = 'padding:8px 0;border-top:1px solid var(--border-default);color:var(--text-secondary)';
+    const lcs = lc + ';font-family:var(--font-mono);font-size:11px;color:var(--text-body)';
+    const rrow = (rec, tag, origin, n, p50, status) => ({rec, tag, origin, n, p50, status, c: lc, cs: lcs});
+    const recRows = [
+      {rec: 'recording', tag: 'armTag', origin: 'origin', n: 'samples', p50: 'p50', status: 'status', c: hd, cs: hd},
+      rrow('rec-en-01', 'Arm A', 'sweep', '20', '1.01 s', 'complete'),
+      rrow('rec-en-01', 'Arm B', 'sweep', '20', '1.05 s', 'complete'),
+      rrow('rec-en-01', 'Arm C', 'sweep', '20', '0.92 s', 'complete'),
+      rrow('rec-en-02', 'Arm B', 'sweep', '16', '1.07 s', '4 of 5 reps'),
+      rrow('pharmacy dosage test', 'ad-hoc', 'manual', '3', '1.19 s', 'complete'),
+      rrow('pharmacy dosage test', 'ad-hoc', 'manual', '—', '—', 'failed'),
+    ];
+    const meterHeights = [5, 9, 13, 7, 4];
+    const meterBars = meterHeights.map((h, i) => ({style: `width:3px;height:${h}px;border-radius:1px;background:${live && S.view === 'live' && i < 4 ? 'var(--accent)' : 'var(--gray-300)'};display:block`}));
+    const states = [['idle', 'idle'], ['permission-denied', 'permission denied'], ['live', 'live'], ['processing', 'processing'], ['failed', 'stage failed'], ['reconnecting', 'reconnecting'], ['disconnected', 'disconnected'], ['stopped', 'stopped']];
+    return {
+      onLive: S.view === 'live', onReplay: S.view === 'replay', onResults: S.view === 'results', onHelp: S.view === 'help',
+      goLive: () => set({view: 'live'}), goReplay: () => set({view: 'replay'}), goResults: () => set({view: 'results'}), goHelp: () => set({view: 'help'}),
+      tabLive: tab(S.view === 'live'), tabReplay: tab(S.view === 'replay'), tabResults: tab(S.view === 'results'), tabHelp: tab(S.view === 'help'),
+      isLive: S.view === 'live' && live,
+      stateChips: states.map(([key, label]) => ({label, select: () => set({liveState: key}), style: chipStyle(S.liveState === key)})),
+      // architecture + config
+      isRealtime: S.arch === 'realtime', isCascade,
+      pickRealtime: () => S.arch === 'realtime' || queue('Realtime', {arch: 'realtime'}),
+      pickCascade: () => S.arch === 'cascade' || queue('Cascade', {arch: 'cascade'}),
+      modeRealtime: tab(S.arch === 'realtime'), modeCascade: tab(isCascade),
+      stageSelectors, selectorNote: 'Set before the session starts. Voice is pinned per vendor. The active triple is recorded on every session and run.',
+      armTagStyle, armTagLabel: armTag === 'ad-hoc' ? 'ad-hoc' : 'this is ' + armTag, armTagTip,
+      replayArmTagStyle: armTagStyle, replayArmTagLabel: armTag === 'ad-hoc' ? 'derived tag: ad-hoc' : 'derived tag: ' + armTag,
+      ctxDefault: tab(S.ctx === 'default'), ctxTrimmed: tab(S.ctx === 'trimmed'),
+      pickCtxDefault: () => set({ctx: 'default'}), pickCtxTrimmed: () => set({ctx: 'trimmed'}),
+      ctxNote: S.ctx === 'default' ? 'full conversation replayed each turn — cost climbs with session length' : 'history deleted after each response — flat cost, measured against default',
+      // language
+      cycleLang: () => { const np = pairs[(S.langIdx + 1) % pairs.length]; queue(`${np.src} → ${np.tgt}`, {langIdx: (S.langIdx + 1) % pairs.length, reversed: false}); },
+      swapDirection: () => queue(`${tgt} → ${src}`, {reversed: !S.reversed}),
+      langLabel: `${src} → ${tgt}`,
+      idleModeLabel: S.arch === 'realtime' ? 'Realtime' : 'Cascade',
+      langSupportStyle: `font:400 10.5px var(--font-sans);border-radius:99px;padding:3px 9px;background:${p.canto ? 'var(--warning-soft)' : 'var(--surface-selected)'};color:${p.canto ? 'oklch(45% 0.12 75)' : 'var(--text-secondary)'}`,
+      langSupportLabel: p.support,
+      // lifecycle
+      startSession: () => set({liveState: 'live'}),
+      stopSession: () => set({liveState: 'stopped', pending: null}),
+      reconnect: () => set({liveState: 'live'}),
+      isIdle: idle, isPermDenied: permDenied, isStopped: stopped, notStopped: active,
+      isDisconnected: disconnected, sessionActive: active,
+      micStyle: `display:inline-flex;align-items:center;gap:6px;color:${permDenied ? 'var(--negative)' : idle ? 'var(--text-muted)' : 'var(--positive)'}`,
+      micLabel: permDenied ? 'mic blocked' : idle ? 'mic not requested' : 'mic granted',
+      connStyle: `display:inline-flex;align-items:center;gap:6px;color:${reconnecting ? 'oklch(45% 0.12 75)' : (idle || disconnected || stopped || permDenied) ? 'var(--text-muted)' : 'var(--positive)'}`,
+      connLabel: reconnecting ? 'reconnecting…' : disconnected ? 'disconnected' : (idle || stopped || permDenied) ? 'no connection' : 'connected',
+      meterBars,
+      stateLabel: failedState ? 'ready — utterance failed' : S.liveState,
+      elapsedLabel: (idle || permDenied) ? '0:00' : stopped ? '5:00' : '2:14',
+      showSwitchBanner: !!S.pending, switchBannerText: `switching to ${S.pending} after this sentence finishes`,
+      showReconnectBanner: reconnecting,
+      showCantoneseWarn: tgt === 'Cantonese' && S.arch === 'realtime' && active,
+      // live card
+      srcLang: src, srcText: srcTexts[src] || srcTexts.English, tgtText: tgtTexts[tgt] || '',
+      activeArchName: S.arch === 'realtime' ? 'Realtime · gpt-realtime' : `Cascade · ${menus.stt[S.sttIdx]} → ${menus.mt[S.mtIdx]} → ${menus.tts[S.ttsIdx]}`,
+      archTip: S.arch === 'realtime'
+        ? 'One vertically-integrated model, voice in → voice out over WebRTC. Three timed intervals; the model interval is opaque.'
+        : 'STT → MT → TTS assembly line over WebSocket. Five timed intervals, all observable; a failure names its stage.',
+      inFlight, liveCardFailed: failedState, liveCardReady: active && !inFlight && !failedState,
+      liveFailText: S.arch === 'cascade' ? 'mt stage timed out for this utterance — session still running' : 'opaque failure — no stage attribution · session still running',
+      liveCardStatusStyle: `font:400 11px var(--font-sans);color:${failedState ? 'var(--negative)' : inFlight ? 'var(--text-secondary)' : 'var(--positive)'}`,
+      liveCardStatus: failedState ? 'failed' : inFlight ? 'in flight' : 'playing',
+      liveStages: stages.map(([label, ms]) => ({label, ms: ms + ' ms', barStyle: `display:block;height:5px;border-radius:3px;background:${label === 'endpointing' ? 'var(--gray-400)' : 'var(--accent)'};width:${Math.max(1, Math.round(ms / totalMs * 100))}%`})),
+      liveTotal: totalMs + ' ms',
+      liveCost: S.arch === 'realtime' ? (S.ctx === 'trimmed' ? '$0.09/min · trimmed' : '$0.14/min · climbing') : '$0.021/min · flat',
+      liveIntervalsNote: S.arch === 'realtime' ? '3 intervals · 1 opaque' : '5 intervals · all visible',
+      opaqueNote: S.arch === 'realtime' && active && !inFlight && !failedState,
+      // replay
+      recordings, selRecLabel, runs,
+      triggerRun: () => {},
+      toggleBatch: () => set({batchOpen: !S.batchOpen}), batchOpen: S.batchOpen,
+      canBlind: true,
+      toggleBlind: () => set({blindOpen: !S.blindOpen, blindRevealed: false, blindScores: {}, blindOrder: Math.random() < 0.5}),
+      blindBtnLabel: S.blindOpen ? 'close blind compare' : 'compare blind (pick 2 runs)',
+      blindOpen: S.blindOpen,
+      blindHint: S.blindRevealed ? 'identity revealed — appended to ledger' : 'configuration identity hidden until you submit',
+      blindSamples: drawn.map((identity, i) => ({title: 'Sample ' + 'AB'[i], revealed: S.blindRevealed, identity, dims: mkDims('AB'[i])})),
+      submitBlind: () => set({blindRevealed: true}),
+      blindSubmitLabel: S.blindRevealed ? 'submitted' : 'submit ratings',
+      // results
+      hasRuns: S.hasRuns, noRuns: !S.hasRuns,
+      setHasRuns: v => set({hasRuns: v}), setHasRunsTrue: () => set({hasRuns: true}),
+      pickPrimary: () => set({resultsTab: 'primary'}), pickSecondary: () => set({resultsTab: 'secondary'}),
+      rtabPrimary: `border:none;background:none;cursor:pointer;padding:9px 14px;font:500 12.5px var(--font-sans);color:${S.resultsTab === 'primary' ? 'var(--text-body)' : 'var(--text-secondary)'};border-bottom:2px solid ${S.resultsTab === 'primary' ? 'var(--accent)' : 'transparent'};margin-bottom:-1px`,
+      rtabSecondary: `border:none;background:none;cursor:pointer;padding:9px 14px;font:500 12.5px var(--font-sans);color:${S.resultsTab === 'secondary' ? 'var(--text-body)' : 'var(--text-secondary)'};border-bottom:2px solid ${S.resultsTab === 'secondary' ? 'var(--accent)' : 'transparent'};margin-bottom:-1px`,
+      showPrimary: S.hasRuns && S.resultsTab === 'primary',
+      showSecondary: S.hasRuns && S.resultsTab === 'secondary',
+      exp1Rows, exp2Rows, stabRows, catRows, coverageRows, recRows,
+    };
+  }
+}
+</script>
+</body>
+</html>
