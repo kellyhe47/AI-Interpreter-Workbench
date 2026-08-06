@@ -1,12 +1,12 @@
 ---
 id: 025
 title: Provenance stamp asserts a corpus version on an empty Results screen
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/client/App.tsx, src/client/components/TopBar.tsx]
 iterations: 0
-test_files: []
+test_files: [src/server/routes/blindComparisons.test.ts, src/client/replay/blindComparisonsClient.test.ts, src/harness/exportResults.comparisons.test.ts, src/client/views/App.blindComparisons.test.tsx, src/client/views/App.provenance.test.tsx, src/client/views/App.test.tsx]
 branch: ""
 ---
 
@@ -36,3 +36,13 @@ empty state exists to prevent.
 
 Suppress the stamp when the ledger has nothing to attribute, or word it as a session/build stamp
 rather than a run provenance line.
+
+- iter 1: green (batched with 023). Mutation-checked: making the stamp unconditional fails 9 tests.
+- Required updating ONE locked assertion (`App.test.tsx:270`). Its intent is tab scoping — four of
+  its five assertions are about WHERE the stamp appears — and the empty ledger it rendered with was
+  incidental to `renderPinnedWorkbench()`, not a statement that provenance may attach to nothing.
+  `App.tsx:20-22` already documents the same judgement for Live: "a live session is not a run;
+  provenance over it would be a category error." Updated through the test-writer with all four
+  absence assertions verbatim; the empty-ledger counterpart now lives in `App.provenance.test.tsx`.
+- `resultsAreEmpty()` is exported from `ResultsView` and used by BOTH the view and App — duplicating
+  that predicate is precisely how the two would drift back apart.

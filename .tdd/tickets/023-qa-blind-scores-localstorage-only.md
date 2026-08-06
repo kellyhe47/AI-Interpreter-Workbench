@@ -1,12 +1,12 @@
 ---
 id: 023
 title: Blind scores persist only to browser localStorage, never to the server store
-status: pending
+status: green
 source: qa
 depends_on: []
 touches: [src/server/routes/, src/client/state/ledger.ts, src/client/App.tsx, src/harness/exportResults.ts]
 iterations: 0
-test_files: []
+test_files: [src/server/routes/blindComparisons.test.ts, src/client/replay/blindComparisonsClient.test.ts, src/harness/exportResults.comparisons.test.ts, src/client/views/App.blindComparisons.test.tsx, src/client/views/App.provenance.test.tsx, src/client/views/App.test.tsx]
 branch: ""
 ---
 
@@ -54,3 +54,15 @@ scenario §10 explicitly describes.
 A `POST /api/blind-comparisons` (+ `GET`) alongside the existing routes, written into the same
 append-only store, and included in the export bundle's summary provenance (§10 requires the number of
 comparisons scored to appear alongside N).
+
+- iter 1: green (batched with 025). Mutation-checked: writing comparisons into `ledger.jsonl`
+  instead of their own stream fails 11 tests.
+- Comparisons get `comparisons.jsonl`, NOT the run ledger: `readLedger()` is typed `Run[]` and
+  `exportResults` unions it into the run record set, so a shared file would count a comparison in
+  `totals.runs` and derive it into an arm — the exact contamination the project exists to prevent.
+- `summary.blindComparisons {total, scored, unattributable, byRecording}` sits OUTSIDE `totals`
+  (a locked test pins `totals` by `toEqual`). `scored` = both runIds present in the export — PRD
+  §10's disclosure requirement.
+- Dual-sink in App: a REJECTED post still records locally. The evaluator never loses their work.
+- `json({ strict: false })` on the POST so a scalar body reaches our own validator instead of
+  express answering with an HTML error page and no `{code, message}` envelope.
