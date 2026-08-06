@@ -92,7 +92,7 @@
  *   Cantonese (langIdx 1, reversed) and the mode is realtime.
  */
 
-import type { ProviderTriple } from '../../core/arms';
+import { DEFAULT_CASCADE_TRIPLE, type ProviderTriple } from '../../core/arms';
 import type { Mode } from '../../core/timing';
 
 export type SessionStatus =
@@ -214,8 +214,9 @@ export function createInitialState(overrides?: Partial<SessionState>): SessionSt
     mode: 'realtime',
     langIdx: 0,
     reversed: false,
-    // STUB (ticket 012 red phase): the default must be DEFAULT_CASCADE_TRIPLE.
-    providers: { stt: '', mt: '', tts: '' },
+    // Arm B's frozen recipe: a default that derived to 'ad-hoc' would quietly
+    // turn every unconfigured cascade session into an orphan (PRD §17 23d).
+    providers: { ...DEFAULT_CASCADE_TRIPLE },
     contextPolicy: 'default',
     autoplay: true,
     pending: null,
@@ -310,13 +311,13 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
     }
 
     case 'SET_PROVIDER': {
-      // STUB (ticket 012 red phase).
-      return state;
+      // Per-stage selection applies IMMEDIATELY — only mode / language /
+      // direction are boundary-queued, and `pending` is left untouched.
+      return { ...state, providers: { ...state.providers, [event.stage]: event.model } };
     }
 
     case 'SET_CONTEXT_POLICY': {
-      // STUB (ticket 012 red phase).
-      return state;
+      return { ...state, contextPolicy: event.value };
     }
 
     case 'CONNECTION_LOST': {
@@ -397,8 +398,7 @@ export function supportPill(langIdx: number): 'both modes' | 'cascade only' {
  * the status union.
  */
 export function stateLabel(state: SessionState): string {
-  // STUB (ticket 012 red phase).
-  return state.status;
+  return state.pending ? 'switch-queued' : state.status;
 }
 
 export interface LanguageWarnings {

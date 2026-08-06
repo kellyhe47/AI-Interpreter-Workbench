@@ -53,24 +53,69 @@ export interface RouterHandlers {
 }
 
 export class TransportRouter {
-  /** STUB (ticket 012 red phase). */
+  private current: InterpreterTransport | null = null;
+  private handlers: RouterHandlers = {};
+
   get active(): InterpreterTransport | null {
-    return null;
+    return this.current;
   }
 
-  setTransport(_transport: InterpreterTransport): void {
-    // STUB (ticket 012 red phase).
+  setTransport(transport: InterpreterTransport): void {
+    const previous = this.current;
+    // Point `current` at the newcomer FIRST: the guard below reads it, so a
+    // late event from `previous` — including anything its stop() flushes
+    // synchronously — is already detached by the time it fires.
+    this.current = transport;
+    if (previous && previous !== transport) previous.stop();
+    this.wire(transport);
   }
 
-  sendAudio(_chunk: Int16Array): void {
-    // STUB (ticket 012 red phase).
+  sendAudio(chunk: Int16Array): void {
+    // NO-OP when idle: mic frames legitimately arrive before the transport is
+    // up and after it is torn down, and neither is an error.
+    this.current?.sendAudio(chunk);
   }
 
-  setHandlers(_handlers: RouterHandlers): void {
-    // STUB (ticket 012 red phase).
+  setHandlers(handlers: RouterHandlers): void {
+    this.handlers = handlers;
   }
 
   stop(): void {
-    // STUB (ticket 012 red phase).
+    const transport = this.current;
+    this.current = null;
+    transport?.stop();
+  }
+
+  /**
+   * Wraps the router handlers so the transport calls a stable set that reads
+   * `this.handlers` at fire time (setHandlers may run before or after
+   * setTransport) and drops anything from a transport that is no longer the
+   * active one.
+   */
+  private wire(transport: InterpreterTransport): void {
+    const live = (): boolean => this.current === transport;
+    transport.setHandlers({
+      onSourceText: (e: SourceTextEvent) => {
+        if (live()) this.handlers.onSourceText?.(e);
+      },
+      onTargetText: (e: TargetTextEvent) => {
+        if (live()) this.handlers.onTargetText?.(e);
+      },
+      onAudio: (pcm: Int16Array, utt: number) => {
+        if (live()) this.handlers.onAudio?.({ pcm, utt });
+      },
+      onTiming: (mark: TimingMark) => {
+        if (live()) this.handlers.onTiming?.(mark);
+      },
+      onUtteranceComplete: (record: UtteranceCompletion) => {
+        if (live()) this.handlers.onUtteranceComplete?.({ record });
+      },
+      onError: (e: TransportError) => {
+        if (live()) this.handlers.onError?.(e);
+      },
+      onConnectionState: (state: ConnectionState, attempt?: number) => {
+        if (live()) this.handlers.onConnectionState?.({ state, attempt });
+      },
+    });
   }
 }
