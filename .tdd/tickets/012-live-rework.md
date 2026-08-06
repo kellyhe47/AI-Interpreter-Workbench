@@ -1,11 +1,11 @@
 ---
 id: 012
 title: Live rework — router switch, single architecture, LiveView
-status: pending
+status: green
 depends_on: [001, 010]
 touches: [src/client/transport/router.ts, src/client/transport/router.test.ts, src/client/transport/types.ts, src/client/state/sessionMachine.ts, src/client/state/sessionMachine.test.ts, src/client/views/useSessionController.ts, src/client/views/LiveView.tsx, src/client/views/SessionView.tsx, src/client/views/SessionView.test.tsx, src/client/views/SessionView.flow.test.tsx, src/client/views/sessionTestKit.ts, src/client/browserDeps.ts, src/client/fixtureDeps.ts, src/client/fixtureDeps.test.ts, src/client/App.tsx, src/client/views/App.test.tsx]
 iterations: 0
-test_files: []
+test_files: [src/client/views/LiveView.test.tsx, src/client/views/LiveView.flow.test.tsx, src/client/transport/router.test.ts, src/client/state/sessionMachine.test.ts, src/client/views/App.test.tsx, src/client/deletions.test.ts, src/client/views/sessionTestKit.ts, src/client/fixtureDeps.test.ts]
 branch: ""
 ---
 
@@ -155,3 +155,12 @@ multi-arm behaviour before writing** — a stale pin in a sibling file becomes a
 locked-vs-locked conflict.
 
 ## Attempt log
+
+- iter 1: green. 52 new RTL tests through the real <App />, plus the reworked router (11) and
+  machine (74). deletions.test.ts 11/11 — the manifest DELETE list is now enforced tree-wide.
+- ORCHESTRATOR ERROR, caught and fixed: the worktree `node_modules` symlink I created got
+  committed by `git add -A .` (`.gitignore` had `node_modules/` WITH a trailing slash, which does
+  not match a symlink). Merging replaced main's real node_modules with a self-referencing link and
+  vitest died with `too many levels of symbolic links`. Untracked the symlink, added a
+  slash-less `node_modules` rule to .gitignore, reinstalled. Audited every commit in the run: this
+  was the only occurrence, no other symlink is tracked, and no .env ever entered a commit.

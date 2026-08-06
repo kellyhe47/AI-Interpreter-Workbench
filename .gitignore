@@ -29,3 +29,4 @@ benchmark-results/*.json
 
 # qa artifacts
 .qa/screens/
+node_modules
