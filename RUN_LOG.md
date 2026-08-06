@@ -336,3 +336,103 @@ variants, reachable once the hardcoded `model_id` was parameterized.
 a real HTTP surface got a real server process, real filesystem, real requests: `POST
 /api/recordings` → 201 with a generated id, `GET /:id/audio` → 200 `audio/wav` byte-identical,
 `DELETE` on a corpus Recording → **409 `corpus-undeletable`**, `/api/health` → 200.
+
+### Waves 3–5 and the tail
+
+| Ticket | Result |
+|---|---|
+| 008 replay run execution | green, 1 iteration, 45 tests |
+| 011 results derivation | green, 1 iteration, 48 tests |
+| 017 export-results bundle | green, 1 iteration, 9 tests |
+| 009 batch runner | green after a test-writer correction, 18 tests |
+| 012 Live rework | green, 1 iteration, 52 new RTL tests + router + machine |
+| 015 Results view | green, 1 iteration, 83 tests |
+| 013 Replay view | green after a test-writer correction, 52 tests |
+| 014 blind compare → Replay | green, 1 iteration, 48 tests |
+| 016 Help + four-tab TopBar + App | green, 1 iteration, 24 tests |
+
+**Final: 908 tests / 49 files green. Both typechecks and the production build clean.**
+
+## Corrections during the build
+
+**`reps` means RETAINED reps — my ticket text was wrong (009).** The first draft said "the first run per
+configuration is discarded … with 5 reps, 4 are retained", and the tests faithfully encoded it. The
+PRD settles it in four places (§8's "60 samples per arm (12 utterances × 5 repetitions)", §17 22c's
+"5 repetitions **retained**", §7's 30-run matrix, and the mock's "first run per configuration
+discarded as warmup" — an *additional* run). The warmup is therefore an extra uncounted execution at
+`repIndex 0`, stamped `origin: 'manual'` so it cannot pass `isAggregatableRun` by construction.
+Fixed through the test-writer. Left alone, it would have cost 20% of N and degraded p95 — the exact
+statistic §17 22c chose 5 reps to resolve, and it would have been invisible in the data.
+
+**A locked test was genuinely wrong (013).** The implementer hit 23 failures, diagnosed a defect in
+the *tests*, and stopped rather than editing them. `makeFakes` shallow-copied the recordings array
+but shared the element objects, and the `remove` fake wrote `deletedAt` through to the module-level
+`MIC_REC` const — so the delete test poisoned every later mount. Verified independently, fixed
+through the test-writer (fixture isolation only, zero assertions touched), re-verified
+order-independent across five shuffled seeds. Had the implementer been free to edit its own tests,
+the cheapest green was relaxing the row-count guard — which would have silently dropped the
+assertion that a soft delete keeps its Runs listed.
+
+**A real bug in App, found while writing 016's tests.** `App.tsx` gated the live-session indicator on
+`view === 'session'`, so a session that was still running — and still burning its 5-minute budget —
+showed no indicator the moment you opened Replay. The test was written to navigate away mid-session
+so it fails against that gate; the weaker version passes against the bug.
+
+**Two gaps handed forward rather than papered over.** 015 found that PRD §8's `realtime-trimmed`
+column was structurally unfillable because `LiveSession` recorded no `contextPolicy` — added in 012,
+with cascade recording `'n/a'` positively rather than `'default'` (which would imply a knob cascade
+does not have, and would file cascade sessions into the Realtime-default column). 014 made three
+`ReplayDeps` fields optional so 013's locked tests kept type-checking, which meant a host supplying
+none of them got *no blind-compare trigger at all* — so 016 carries an explicit criterion that the
+trigger is reachable through the real `<App />`.
+
+## Orchestrator errors (mine)
+
+**Committed a worktree `node_modules` symlink (012).** `.gitignore` had `node_modules/` *with a
+trailing slash*, which matches a directory but not a symlink, so `git add -A` swept it in. Merging
+replaced main's real `node_modules` with a self-referencing link and vitest began exiting silently.
+Untracked it, added a slash-less rule, reinstalled. Audited every commit in the run: one occurrence,
+no other symlink tracked, no `.env` ever committed.
+
+**Destroyed uncommitted work with a premature mutation check (016).** I ran sabotage-then-
+`git checkout --` *before* checkpointing, and the revert took the implementer's `App.tsx` with it.
+Damage confined to that one file; the other five were committed immediately and the implementer
+redid it from context. The correct order — commit, mutate, revert — exists for exactly this.
+
+## Verification beyond a green suite
+
+Each load-bearing property was checked by **breaking it and watching tests fail**, not by trusting
+the suite:
+
+| Property | Sabotage | Result |
+|---|---|---|
+| 1× replay pacing (§13.7) | force frame delay to 0 | 3 pacing assertions red |
+| Runner uses the pacer | replace `pacer.start()` with one `sendAudio` | 2 red |
+| Aggregation gate (§8, §17 22d) | drop each of armTag / origin / status | red independently |
+| Gate delegation (011) | weaken to bare `isRealRun` | 5 red |
+| Counterbalancing (§13.9) | always use declared order | 2 red |
+| Warmup discard (§13.9) | promote warmup to a counted rep | 4 red |
+| Results empty state (§17 15g) | force the empty flag false | 6 red, incl. "not one digit" |
+| Blind identity hidden (§10) | bypass the reveal gate | 33 red |
+| Live indicator persistence | reintroduce the `view ===` gate | 1 red |
+
+**Interchangeability is demonstrated, not asserted.** `src/core/contracts/index.ts` is byte-identical
+to its v1 state while now carrying two new providers from two new vendors. The registry grew two
+lines; the shared assertions grew nothing. `gpt-4o-mini-transcribe` and EL Multilingual v2 needed no
+registry entries at all — config-only variants, reachable once the hardcoded `model_id` was
+parameterized.
+
+**Live browser verification of the derived-arm quarantine.** Driven by hand in a real browser, not
+jsdom: Realtime + `gpt-realtime` → **Arm A**; cascade default triple → **Arm B**; swap TTS to
+`eleven_flash_v2_5` → **Arm C**; swap to `eleven_multilingual_v2` → **ad-hoc**. That middle
+transition is PRD Exp 2's single-stage swap falling out of the UI with no arm-labelling control
+anywhere. No console errors.
+
+**Single-origin production boot.** Built SPA served at `/`, deep link `/replay` falls back to
+`index.html`, `/api/health` and `/api/recordings` answer JSON and are not swallowed by the catch-all.
+
+**Manifest fully applied.** All 15 ADD paths present; `SessionView.tsx` and
+`components/session/BlindCompare.tsx` gone; `ARM_CATALOG` / `CASCADE_PROVIDERS` / `ADD_ORDER` /
+`'deepgram'` appear nowhere in `src/client` except as the literal patterns inside
+`deletions.test.ts`, the guard that keeps them gone. Every KEEP file is byte-identical to its v2
+starting state.
