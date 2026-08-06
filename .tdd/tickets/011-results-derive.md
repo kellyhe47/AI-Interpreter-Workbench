@@ -1,11 +1,11 @@
 ---
 id: 011
 title: Results derivation — aggregation predicate, groupings, provenance
-status: pending
+status: green
 depends_on: [001, 010]
 touches: [src/client/components/results/derive.ts, src/client/components/results/derive.test.ts, src/client/components/results/testRecords.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/components/results/derive.test.ts, src/client/components/results/testRecords.ts]
 branch: ""
 ---
 
@@ -64,3 +64,10 @@ Rework `src/client/components/results/derive.test.ts` structurally (manifest Tes
 Drive the exclusion cases table-style off `testRecords.ts`.
 
 ## Attempt log
+
+- iter 1: green. 48 tests (26 new + 22 v1 guards). Additive: the v1 `deriveResultsModel` surface
+  and `ResultsView.test.tsx` stayed green throughout; ticket 015 deletes the v1 block.
+- Mutation-checked by the orchestrator: weakening the aggregate from `isAggregatableRun` to bare
+  `isRealRun` (i.e. dropping the armTag/origin/status conditions) turns 5 tests red.
+- Grouping keeps excluded runs with `n: 0` and NULL percentiles rather than a zero — a zero would
+  read as a measurement.

@@ -3,7 +3,7 @@ id: 015
 title: Results view — Experiments tab and By Recording & category tab
 status: pending
 depends_on: [011]
-touches: [src/client/views/ResultsView.tsx, src/client/views/ResultsView.test.tsx]
+touches: [src/client/views/ResultsView.tsx, src/client/views/ResultsView.test.tsx, src/client/components/results/derive.ts, src/client/components/results/derive.test.ts, src/client/components/results/testRecords.ts]
 iterations: 0
 test_files: []
 branch: ""
@@ -75,6 +75,16 @@ place ad-hoc runs are visible at all.
       aggregate rendered by this view
 - [ ] No hardcoded latency/cost/WER/quality literal exists in `ResultsView.tsx`
 - [ ] Styling uses tokens only
+
+## v1 cleanup this ticket owns
+
+Ticket 011 landed the v2 derivations **additively**, so `derive.ts` and `testRecords.ts` currently
+carry BOTH the v1 `deriveResultsModel` surface (`ResultsModel`, `ComparisonCardModel`,
+`StabilityModel`, `CoverageModel`, `LedgerRow`, and the v1 seeders) and the v2 one. That was
+deliberate — it kept the suite green between tickets. **This ticket deletes the v1 block** from
+`derive.ts`, `derive.test.ts` and `testRecords.ts` once `ResultsView.tsx` renders from the v2
+model, so exactly one derivation survives. Leaving both would be two sources of truth for the same
+screens, which is the drift §17 15g exists to prevent.
 
 ## Test plan
 
