@@ -6,7 +6,7 @@ source: qa-live
 depends_on: []
 touches: [src/client/transport/realtime.ts, src/client/views/useSessionController.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/transport/realtime.test.ts, src/client/replay/runner.test.ts, src/client/views/LiveView.flow.test.tsx]
 branch: ""
 ---
 

@@ -24,6 +24,7 @@ import {
   clickStartMicrophone,
   connLabel,
   elapsedLabel,
+  makeFakeRemoteAudioSink,
   realtimeUtteranceScript,
   renderApp,
   sessionFooter,
@@ -508,5 +509,59 @@ describe('the saved LiveSession records the context policy it ran under', () => 
     // would let a cascade session land in the realtime-default column.
     expect(session.contextPolicy).toBe('n/a');
     expect(session.contextPolicy).not.toBe('default');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 040 — Realtime audio arrives on the WebRTC MEDIA TRACK, never as PCM
+// through onAudio, so the session's ArmPlayback queue is empty and its
+// play()/pause() move nothing audible. The play/pause control must drive the
+// injected RemoteAudioSink — the real audio path — instead.
+// ---------------------------------------------------------------------------
+
+/** A realtime utterance carrying NO audio events: the media-track case. */
+function realtimeTrackOnlyScript(): FixtureScriptEvent[] {
+  return realtimeUtteranceScript().filter((e) => e.type !== 'audio');
+}
+
+describe('Live play/pause controls the REAL realtime audio path (ticket 040)', () => {
+  it('play then pause drive the remote audio sink, and the button label reflects it', async () => {
+    const audio = makeFakeRemoteAudioSink();
+    renderApp({
+      scripts: { realtime: realtimeTrackOnlyScript() },
+      remoteAudioSink: audio.sink,
+    });
+    await clickStartMicrophone();
+    await advance(1200); // the utterance completes → card is 'ready'
+
+    const card = targetCard();
+    expect(card).toHaveAttribute('data-target-status', 'ready');
+    // Nothing was ever enqueued into ArmPlayback — the audio is on the track.
+    expect(audio.calls).toEqual([]);
+
+    fireEvent.click(within(card).getByRole('button', { name: /^play/ }));
+    expect(audio.calls).toEqual(['play']);
+    expect(targetCard()).toHaveAttribute('data-target-status', 'playing');
+    expect(within(targetCard()).getByRole('button', { name: /^pause/ })).toBeInTheDocument();
+
+    fireEvent.click(within(targetCard()).getByRole('button', { name: /^pause/ }));
+    expect(audio.calls).toEqual(['play', 'pause']);
+    expect(targetCard()).toHaveAttribute('data-target-status', 'ready');
+    expect(within(targetCard()).getByRole('button', { name: /^play/ })).toBeInTheDocument();
+  });
+
+  it('REGRESSION GUARD: with no sink injected the control still works (cascade is untouched)', async () => {
+    renderApp({
+      initialState: CASCADE_SESSION,
+      scripts: { cascade: cascadeUtteranceScript() },
+    });
+    await clickStartMicrophone();
+    await advance(1200);
+
+    const card = targetCard();
+    expect(() =>
+      fireEvent.click(within(card).getByRole('button', { name: /^play/ })),
+    ).not.toThrow();
+    expect(targetCard()).toHaveAttribute('data-target-status', 'playing');
   });
 });

@@ -9,9 +9,12 @@ import {
   REALTIME_OPAQUE_ERROR_MESSAGE,
   RealtimeTransport,
   TOKEN_ENDPOINT,
+  type RemoteAudioSink,
   type RtcDataChannelLike,
+  type RtcMediaStreamLike,
   type RtcPeerConnectionLike,
   type RtcSessionDescriptionLike,
+  type RtcTrackEventLike,
 } from './realtime';
 import type {
   SourceTextEvent,
@@ -73,6 +76,49 @@ class FakePc implements RtcPeerConnectionLike {
   }
 }
 
+/**
+ * TICKET 040 — a peer-connection fake that DOES implement `ontrack`, used only
+ * by the media-track tests. `FakePc` above is deliberately left implementing
+ * neither `ontrack` nor any media API, because the ticket requires such fakes
+ * to keep working untouched (see the REGRESSION GUARD tests).
+ */
+class FakeTrackPc extends FakePc {
+  ontrack: ((ev: RtcTrackEventLike) => void) | null = null;
+  /** Was a handler installed by the time the answer landed? */
+  ontrackAtAnswer: boolean | null = null;
+  override async setRemoteDescription(desc: RtcSessionDescriptionLike): Promise<void> {
+    this.ontrackAtAnswer = typeof this.ontrack === 'function';
+    await super.setRemoteDescription(desc);
+  }
+  emitTrack(ev: RtcTrackEventLike): void {
+    this.ontrack?.(ev);
+  }
+}
+
+/** A minimal remote MediaStream, tagged so assertions can name which one. */
+function fakeStream(tag: string): RtcMediaStreamLike & { tag: string } {
+  return { tag, getAudioTracks: () => [{ kind: 'audio' }] };
+}
+
+function audioTrackEvent(stream: RtcMediaStreamLike): RtcTrackEventLike {
+  return { track: { kind: 'audio' }, streams: [stream] };
+}
+
+/** Records every call the transport makes on the output sink, in order. */
+function makeFakeSink() {
+  const calls: string[] = [];
+  const attached: RtcMediaStreamLike[] = [];
+  const sink: RemoteAudioSink = {
+    attach: (stream) => {
+      calls.push('attach');
+      attached.push(stream);
+    },
+    play: () => calls.push('play'),
+    pause: () => calls.push('pause'),
+  };
+  return { sink, calls, attached };
+}
+
 interface FetchCall {
   url: string;
   init: RequestInit;
@@ -96,7 +142,18 @@ function okText(body: string): Response {
   } as unknown as Response;
 }
 
-function makeHarness() {
+interface HarnessOptions {
+  /**
+   * TICKET 040 — use the `ontrack`-capable peer-connection fake. DEFAULT
+   * false, so every pre-040 test keeps running against a fake that implements
+   * neither `ontrack` nor any media API.
+   */
+  trackCapable?: boolean;
+  /** TICKET 040 — the injected output sink. Omitted by default. */
+  remoteAudioSink?: RemoteAudioSink;
+}
+
+function makeHarness(opts: HarnessOptions = {}) {
   const fetchCalls: FetchCall[] = [];
   const behavior = { tokenFails: false };
   const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -111,7 +168,7 @@ function makeHarness() {
 
   const pcs: FakePc[] = [];
   const rtcFactory = vi.fn(() => {
-    const pc = new FakePc();
+    const pc = opts.trackCapable === true ? new FakeTrackPc() : new FakePc();
     pcs.push(pc);
     return pc;
   });
@@ -120,7 +177,7 @@ function makeHarness() {
 
   const transport = new RealtimeTransport(
     { armId: 'arm-rt' },
-    { fetchImpl, rtcFactory, now: () => clock.t },
+    { fetchImpl, rtcFactory, now: () => clock.t, remoteAudioSink: opts.remoteAudioSink },
   );
 
   const source: SourceTextEvent[] = [];
@@ -362,6 +419,184 @@ describe('RealtimeTransport reconnect', () => {
     expect(attempts).toEqual([1]);
     expect(h.pcs.length).toBe(2); // a fresh peer connection per attempt
     expect(h.pcs[1]!.remoteDescription).toEqual({ type: 'answer', sdp: ANSWER_SDP });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 040 — over WebRTC the model's audio arrives on the MEDIA TRACK ONLY.
+// `response.output_audio.delta` never fires (settled empirically on a real
+// session), so nothing consumed the audio and `audio_queued` was never stamped.
+// ---------------------------------------------------------------------------
+
+/** The one `FakeTrackPc` the harness built, for track injection. */
+function trackPc(h: Harness, index = 0): FakeTrackPc {
+  const pc = h.pcs[index];
+  if (!(pc instanceof FakeTrackPc)) throw new Error('harness was not built trackCapable');
+  return pc;
+}
+
+describe('RealtimeTransport inbound media track (ticket 040)', () => {
+  it('routes an inbound AUDIO track to the remote audio sink', async () => {
+    const fake = makeFakeSink();
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: fake.sink });
+    await startConnected(h);
+
+    const stream = fakeStream('remote');
+    trackPc(h).emitTrack(audioTrackEvent(stream));
+
+    expect(fake.calls).toEqual(['attach']);
+    expect(fake.attached).toEqual([stream]);
+  });
+
+  it('installs ontrack BEFORE the SDP answer is applied, so an early track is never missed', async () => {
+    const fake = makeFakeSink();
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: fake.sink });
+    await h.transport.start(h.config);
+    // The handler must already be in place on the connection start() built.
+    expect(typeof trackPc(h).ontrack).toBe('function');
+    expect(trackPc(h).ontrackAtAnswer).toBe(true);
+  });
+
+  it('ignores a non-audio track and a streamless event', async () => {
+    const fake = makeFakeSink();
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: fake.sink });
+    await startConnected(h);
+
+    trackPc(h).emitTrack({ track: { kind: 'video' }, streams: [fakeStream('video')] });
+    trackPc(h).emitTrack({ track: { kind: 'audio' }, streams: [] });
+
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('a RECONNECTED session routes the NEW peer connection\'s track', async () => {
+    const fake = makeFakeSink();
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: fake.sink });
+    const ch = await startConnected(h);
+    ch.emitClose();
+    await vi.waitFor(() => {
+      expect(h.states.at(-1)?.state).toBe('connected');
+    });
+
+    const stream = fakeStream('after-reconnect');
+    trackPc(h, 1).emitTrack(audioTrackEvent(stream));
+    expect(fake.attached).toEqual([stream]);
+  });
+
+  it('after stop() an ontrack event routes nothing', async () => {
+    const fake = makeFakeSink();
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: fake.sink });
+    await startConnected(h);
+    const pc = trackPc(h);
+    h.transport.stop();
+
+    pc.emitTrack(audioTrackEvent(fakeStream('late')));
+    expect(fake.calls).toEqual([]);
+  });
+
+  it('with NO sink injected, an inbound track is harmless', async () => {
+    const h = makeHarness({ trackCapable: true });
+    await startConnected(h);
+    expect(() => trackPc(h).emitTrack(audioTrackEvent(fakeStream('x')))).not.toThrow();
+  });
+});
+
+describe('RealtimeTransport audio_queued from output_audio_buffer.started (ticket 040)', () => {
+  it('stamps audio_queued at now(), NOT from a PCM enqueue', async () => {
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: makeFakeSink().sink });
+    const ch = await startConnected(h);
+
+    h.clock.t = 8123;
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+
+    expect(h.timings).toContainEqual(
+      expect.objectContaining({ event: 'audio_queued', t: 8123, utt: 0 }),
+    );
+    // The stamp is a TIMING mark only: no PCM was decoded or delivered.
+    expect(h.audio).toHaveLength(0);
+  });
+
+  it('stamps it ONCE per utterance and re-arms at response.done', async () => {
+    const h = makeHarness({ trackCapable: true });
+    const ch = await startConnected(h);
+
+    h.clock.t = 100;
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    h.clock.t = 200;
+    ch.emitEvent({ type: 'output_audio_buffer.started' }); // duplicate — ignored
+    ch.emitEvent({ type: 'output_audio_buffer.stopped' }); // inert
+    ch.emitEvent({ type: 'response.done', response: { usage: {} } });
+    h.clock.t = 300;
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+
+    const queued = h.timings.filter((t) => t.event === 'audio_queued');
+    expect(queued).toEqual([
+      expect.objectContaining({ event: 'audio_queued', t: 100, utt: 0 }),
+      expect.objectContaining({ event: 'audio_queued', t: 300, utt: 1 }),
+    ]);
+  });
+
+  it('the media-track path emits NO onAudio — audio never reaches the data channel', async () => {
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: makeFakeSink().sink });
+    const ch = await startConnected(h);
+
+    // Exactly the empirically observed WebRTC event set: transcript deltas +
+    // buffer started/stopped, and no response.output_audio.delta at all.
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    ch.emitEvent({ type: 'response.output_audio_transcript.delta', delta: 'Hola' });
+    ch.emitEvent({ type: 'response.output_audio_transcript.done', transcript: 'Hola amigo' });
+    ch.emitEvent({ type: 'output_audio_buffer.stopped' });
+
+    expect(h.audio).toHaveLength(0);
+    expect(h.target.map((e) => e.text)).toEqual(['Hola', 'Hola amigo']);
+    expect(h.timings.filter((t) => t.event === 'audio_queued')).toHaveLength(1);
+  });
+
+  it('the failure copy stays OPAQUE — nothing about the media track names a stage', async () => {
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: makeFakeSink().sink });
+    const ch = await startConnected(h);
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    ch.emitEvent({ type: 'error', error: { type: 'server_error', message: 'boom' } });
+
+    expect(h.errors[0]!.message).toBe(REALTIME_OPAQUE_ERROR_MESSAGE);
+    expect(h.errors[0]!.opaque).toBe(true);
+    expect(h.errors[0]!.stage).toBeUndefined();
+    for (const word of ['track', 'webrtc', 'audio_queued', 'stt', 'mt', 'tts']) {
+      expect(h.errors[0]!.message.toLowerCase()).not.toContain(word);
+    }
+  });
+});
+
+describe('RealtimeTransport ticket 040 REGRESSION GUARDS', () => {
+  it('REGRESSION GUARD: a fake implementing NEITHER ontrack NOR any media API still connects and maps every event', async () => {
+    const h = makeHarness(); // default FakePc: no ontrack, no addTrack/addTransceiver
+    const ch = await startConnected(h);
+    expect(h.pcs[0]).not.toBeInstanceOf(FakeTrackPc);
+    expect(h.states.map((s) => s.state)).toContain('connected');
+
+    ch.emitEvent({ type: 'conversation.item.input_audio_transcription.delta', delta: 'Hi' });
+    ch.emitEvent({ type: 'response.output_audio_transcript.done', transcript: 'Hola' });
+    ch.emitEvent({ type: 'input_audio_buffer.speech_stopped' });
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    ch.emitEvent({ type: 'response.done', response: { usage: { total_tokens: 1 } } });
+
+    expect(h.source).toHaveLength(1);
+    expect(h.target).toHaveLength(1);
+    expect(h.completes).toHaveLength(1);
+    expect(h.errors).toHaveLength(0);
+  });
+
+  it('REGRESSION GUARD: the data-channel PCM path is untouched — a delta still decodes and marks first_audio_delta', async () => {
+    const h = makeHarness();
+    const ch = await startConnected(h);
+    const pcm = new Int16Array([5, -6, 7]);
+    h.clock.t = 4242;
+    ch.emitEvent({ type: 'response.output_audio.delta', delta: pcmToBase64(pcm) });
+
+    expect(h.audio).toHaveLength(1);
+    expect(Array.from(h.audio[0]!.pcm)).toEqual(Array.from(pcm));
+    expect(h.timings).toContainEqual(
+      expect.objectContaining({ event: 'first_audio_delta', t: 4242, utt: 0 }),
+    );
   });
 });
 

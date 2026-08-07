@@ -86,6 +86,7 @@ import {
   type SessionState,
   type SessionStatus,
 } from '../state/sessionMachine';
+import type { RemoteAudioSink } from '../transport/realtime';
 import { TransportRouter } from '../transport/router';
 import type {
   InterpreterTransport,
@@ -132,6 +133,13 @@ export interface SessionDeps {
   now: () => number;
   /** Test seed forwarded into createInitialState. */
   initialState?: Partial<SessionState>;
+  /**
+   * TICKET 040 (OPTIONAL) — the realtime WebRTC output sink. Realtime audio
+   * arrives on the media track, never as PCM through onAudio, so ArmPlayback
+   * holds nothing for a realtime session and `togglePlay` must drive THIS to
+   * control real sound. Cascade sessions leave it untouched.
+   */
+  remoteAudioSink?: RemoteAudioSink;
 }
 
 /** The single target card's view of the current (latest) utterance. */

@@ -19,6 +19,7 @@ import { writeWav } from '../../harness/wav';
 import {
   isRealRun,
   runArmTag,
+  runSamples,
   type Recording,
   type Run,
   type RunUtterance,
@@ -1208,5 +1209,156 @@ describe('runOnce — the idle deadline is MANIFEST-ONLY (ticket 031 REGRESSION 
     expect(run.status).toBe('failed');
     expect(run.errors).toContain('segmentation: expected 1 utterances, observed 0');
     expect(run.utterances).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 040 — Arm A's audio rides the WebRTC MEDIA TRACK, so a realtime run
+// delivers NO onAudio PCM at all and `audio_queued` arrives as a transport
+// TIMING MARK (the transport stamps it from `output_audio_buffer.started`).
+// The runner used to overwrite that mark with `firstAudioAt` — null for a
+// track-carried answer — so every Replay Arm A run counted toward n and cost
+// while contributing NO latency sample to Experiment 1.
+// ---------------------------------------------------------------------------
+
+/** speech_end for the default RECORDING is t0 + 60; the mark lands 70 ms later. */
+const TRACK_AUDIO_QUEUED_T = 130;
+const TRACK_LATENCY_MS = TRACK_AUDIO_QUEUED_T - RECORDING.speechEndMs;
+
+/** A realtime answer with transcripts and a timing mark, and NO audio events. */
+function trackAudioScript(): FixtureScriptEvent[] {
+  return [
+    { at: 10, type: 'sourceText', kind: 'final', text: 'hello', utt: 0 },
+    { at: 20, type: 'timing', event: 'server_speech_stopped', utt: 0, t: 20 },
+    { at: 30, type: 'targetText', kind: 'final', text: 'hola', utt: 0 },
+    { at: 70, type: 'timing', event: 'audio_queued', utt: 0, t: TRACK_AUDIO_QUEUED_T },
+    { at: 90, type: 'utteranceComplete', record: { utt: 0 } },
+  ];
+}
+
+describe('runOnce — Arm A audio_queued survives when audio rides the media track (ticket 040)', () => {
+  it('a realtime run with NO onAudio still reports a NON-NULL audio_queued from the transport mark', async () => {
+    const h = makeHarness({ kind: 'realtime', script: trackAudioScript() });
+    const done = start(h, REALTIME_CONFIG);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    expect(run.timings.audio_queued).toBe(TRACK_AUDIO_QUEUED_T);
+    expect(run.timings.audio_queued).not.toBeNull();
+    expect(run.status).toBe('complete');
+  });
+
+  it('and therefore yields a REAL latency sample for Arm A', async () => {
+    const h = makeHarness({ kind: 'realtime', script: trackAudioScript() });
+    const done = start(h, REALTIME_CONFIG);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    expect(run.armTag).toBe('A');
+    const samples = runSamples(run);
+    expect(samples).toHaveLength(1);
+    expect(samples[0]!.latencyMs).toBe(TRACK_LATENCY_MS);
+    expect(samples[0]!.arm).toBe('A');
+  });
+
+  it('the run still buffers no PCM — nothing on the data channel carried audio', async () => {
+    const h = makeHarness({ kind: 'realtime', script: trackAudioScript() });
+    const done = start(h, REALTIME_CONFIG);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(result.outputAudio.length).toBe(0);
+    expect(result.audioReady).toBe(false);
+  });
+
+  it('REGRESSION GUARD: a decoded PCM sample still WINS over a transport-sent mark', async () => {
+    // Cascade's audio path is untouched: audio_queued is the instant the first
+    // sample was decoded and queued (30 ms), never a mark a provider volunteers.
+    const script: FixtureScriptEvent[] = [
+      ...utteranceScript(),
+      { at: 32, type: 'timing', event: 'audio_queued', utt: 0, t: 999_999 },
+    ];
+    const h = makeHarness({ script });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run, t0 } = await done;
+
+    expect(run.timings.audio_queued).toBe(t0 + 30);
+  });
+
+  it('REGRESSION GUARD: a run with neither PCM nor a mark still reports audio_queued null', async () => {
+    const script = utteranceScript().filter((e) => e.type !== 'audio');
+    const h = makeHarness({ script });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    expect(run.timings.audio_queued).toBeNull();
+  });
+});
+
+describe('runOnce — per-utterance audio_queued from the media-track mark (ticket 040)', () => {
+  /** Manifest anchors are 200/400/600/800; each mark lands 50 ms after its own. */
+  const MARKS = [250, 450, 650, 850];
+
+  function trackCorpusHarness(opts: { silentUtts?: number[]; markUtts?: number[] } = {}) {
+    const markUtts = opts.markUtts ?? [0, 1, 2, 3];
+    const extra: FixtureScriptEvent[] = markUtts.map((utt) => ({
+      at: 100 + utt * 100 + 35,
+      type: 'timing' as const,
+      event: 'audio_queued',
+      utt,
+      t: MARKS[utt]!,
+    }));
+    return makeHarness({
+      recording: CORPUS_RECORDING,
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'realtime',
+          // silentUtts: no onAudio at all — exactly the WebRTC media-track case.
+          script: corpusScript({ silentUtts: opts.silentUtts ?? [0, 1, 2, 3], extra }),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+  }
+
+  it('each utterance reports its OWN mark, and none is failed for "no output audio"', async () => {
+    const h = trackCorpusHarness();
+    const { run } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances.map((u) => u.timings.audio_queued)).toEqual(MARKS);
+    expect(utterances.map((u) => u.status)).toEqual([
+      'complete',
+      'complete',
+      'complete',
+      'complete',
+    ]);
+    expect(utterances.flatMap((u) => u.errors)).toEqual([]);
+  });
+
+  it('REGRESSION GUARD: an utterance with NEITHER audio NOR a mark is still failed with a null audio_queued', async () => {
+    const h = trackCorpusHarness({ markUtts: [0, 1, 3] });
+    const { run } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances[2]!.timings.audio_queued).toBeNull();
+    expect(utterances[2]!.status).toBe('failed');
+    expect(utterances[2]!.errors).toEqual(['no output audio']);
+    expect(run.status).toBe('complete');
+  });
+
+  it('REGRESSION GUARD: decoded PCM still wins per utterance over a volunteered mark', async () => {
+    const h = trackCorpusHarness({ silentUtts: [], markUtts: [0, 1, 2, 3] });
+    const { run, t0 } = await runCorpus(h);
+
+    // Script audio for utt u lands at 100 + 100u + 30 ms.
+    expect(utterancesOf(run).map((u) => u.timings.audio_queued)).toEqual([
+      t0 + 130,
+      t0 + 230,
+      t0 + 330,
+      t0 + 430,
+    ]);
   });
 });

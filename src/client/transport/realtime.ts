@@ -29,6 +29,13 @@
  *  (never rejects — no unhandled rejections by construction); the failure
  *  surfaces as onError({opaque: true, ...}) + onConnectionState('disconnected').
  *
+ * INBOUND MEDIA TRACK (ticket 040): on every (re)connect the transport
+ * installs `pc.ontrack`. An event whose `track.kind === 'audio'` has its
+ * `streams[0]` handed to `deps.remoteAudioSink.attach(stream)`. Non-audio
+ * tracks, streamless events, a missing sink and post-stop() events all route
+ * nothing. Fakes that implement neither `ontrack` nor media APIs are
+ * unaffected.
+ *
  * sendAudio(): NO-OP. Realtime mic audio rides the WebRTC media track (wired
  * from getUserMedia outside this class); the router still fans chunks here
  * harmlessly so both transport kinds share one call site.
@@ -50,6 +57,13 @@
  * - response.done { response: { usage } } ->
  *     onUtteranceComplete({ utt, usage }) and THEN increments the
  *     client-side utt counter (starts at 0).
+ * - output_audio_buffer.started ->
+ *     onTiming { event: 'audio_queued', t: now(), utt } — ONCE per utterance,
+ *     re-armed at response.done. TICKET 040: over WebRTC the model's audio
+ *     arrives on the MEDIA TRACK, so `audio_queued` cannot come from a PCM
+ *     enqueue; this event is the instant the model's audio begins on the
+ *     track, which is the same quantity cascade calls "first audio queued".
+ * - output_audio_buffer.stopped -> inert.
  * - error -> onError with opaque: true and the EXACT message
  *     REALTIME_OPAQUE_ERROR_MESSAGE (the model gives us no stage attribution
  *     and the session keeps running).
@@ -100,6 +114,30 @@ export interface RtcMediaStreamLike {
   getAudioTracks(): unknown[];
 }
 
+/**
+ * TICKET 040 — the minimal `RTCTrackEvent` surface the transport reads when
+ * the model's audio track arrives. Over WebRTC, OpenAI sends the response
+ * audio on the MEDIA TRACK only (there is no `response.output_audio.delta`),
+ * so this event is the whole audio path.
+ */
+export interface RtcTrackEventLike {
+  track: { kind: string };
+  streams: readonly RtcMediaStreamLike[];
+}
+
+/**
+ * TICKET 040 — where the inbound remote audio goes. Production wires this to
+ * an `<audio>` element (`srcObject`); tests inject a recorder. `play()` /
+ * `pause()` exist so Live's play/pause control drives the REAL audio path
+ * rather than an ArmPlayback queue that never receives a PCM sample.
+ */
+export interface RemoteAudioSink {
+  /** Route the model's inbound media stream to the output device. */
+  attach(stream: RtcMediaStreamLike): void;
+  play(): void;
+  pause(): void;
+}
+
 export interface RtcPeerConnectionLike {
   createDataChannel(label: string): RtcDataChannelLike;
   createOffer(): Promise<RtcSessionDescriptionLike>;
@@ -113,6 +151,12 @@ export interface RtcPeerConnectionLike {
    */
   addTrack?(track: unknown, stream: unknown): unknown;
   addTransceiver?(kind: string, init?: { direction: string }): unknown;
+  /**
+   * TICKET 040 — inbound remote track callback. OPTIONAL: fakes that do not
+   * declare it keep working (assigning the handler is harmless and nothing
+   * ever calls it).
+   */
+  ontrack?: ((ev: RtcTrackEventLike) => void) | null;
 }
 
 export interface RealtimeDeps {
@@ -128,6 +172,12 @@ export interface RealtimeDeps {
    * not unit tests.
    */
   getMediaStream?: () => RtcMediaStreamLike | null;
+  /**
+   * TICKET 040 (OPTIONAL) — where an inbound audio track is routed. Omitted
+   * by fakes that do not care; when omitted the transport still behaves
+   * exactly as before.
+   */
+  remoteAudioSink?: RemoteAudioSink;
 }
 
 export interface RealtimeTransportOptions {

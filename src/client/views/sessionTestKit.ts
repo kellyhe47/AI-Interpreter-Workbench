@@ -33,6 +33,7 @@ import type { PlaybackAudioContextLike, PlaybackSourceLike } from '../audio/play
 import { RunLedger } from '../state/ledger';
 import type { SessionState } from '../state/sessionMachine';
 import { FixtureTransport, type FixtureScriptEvent } from '../transport/fixture';
+import type { RemoteAudioSink } from '../transport/realtime';
 import type { CaptureCallbacks, LiveRunConfig, SessionDeps } from './useSessionController';
 
 // ---------------------------------------------------------------------------
@@ -255,6 +256,25 @@ export function makeFakePlaybackContext(): PlaybackAudioContextLike {
   };
 }
 
+/**
+ * TICKET 040 — a recording RemoteAudioSink. Realtime audio rides the WebRTC
+ * media track, so this (not the ArmPlayback queue) is the real audio path a
+ * Live play/pause press has to move.
+ */
+export function makeFakeRemoteAudioSink() {
+  const calls: string[] = [];
+  const attached: unknown[] = [];
+  const sink: RemoteAudioSink = {
+    attach: (stream) => {
+      calls.push('attach');
+      attached.push(stream);
+    },
+    play: () => calls.push('play'),
+    pause: () => calls.push('pause'),
+  };
+  return { sink, calls, attached };
+}
+
 export interface TestDepsOptions {
   /** FixtureTransport script per ARCHITECTURE ('realtime' | 'cascade'). */
   scripts?: Partial<Record<Mode, FixtureScriptEvent[]>>;
@@ -262,6 +282,8 @@ export interface TestDepsOptions {
   initialState?: Partial<SessionState>;
   now?: () => number;
   ledger?: RunLedger;
+  /** TICKET 040 — the realtime WebRTC output sink seam. */
+  remoteAudioSink?: RemoteAudioSink;
 }
 
 export interface TestDeps {
@@ -296,6 +318,7 @@ export function makeDeps(opts: TestDepsOptions = {}): TestDeps {
     ledger,
     now: opts.now ?? (() => 0),
     initialState: opts.initialState,
+    remoteAudioSink: opts.remoteAudioSink,
   };
   return { deps, ledger, transports, configs, capture };
 }
