@@ -86,8 +86,16 @@ class FakeTrackPc extends FakePc {
   ontrack: ((ev: RtcTrackEventLike) => void) | null = null;
   /** Was a handler installed by the time the answer landed? */
   ontrackAtAnswer: boolean | null = null;
+  /**
+   * When set, this event is fired from INSIDE setRemoteDescription — i.e.
+   * while connect() is still in flight and has not yet assigned its `pc`
+   * field. That is when a real RTCPeerConnection raises `ontrack`: applying
+   * the answer is what creates the receiver.
+   */
+  trackDuringAnswer: RtcTrackEventLike | null = null;
   override async setRemoteDescription(desc: RtcSessionDescriptionLike): Promise<void> {
     this.ontrackAtAnswer = typeof this.ontrack === 'function';
+    if (this.trackDuringAnswer !== null) this.emitTrack(this.trackDuringAnswer);
     await super.setRemoteDescription(desc);
   }
   emitTrack(ev: RtcTrackEventLike): void {
@@ -151,6 +159,11 @@ interface HarnessOptions {
   trackCapable?: boolean;
   /** TICKET 040 — the injected output sink. Omitted by default. */
   remoteAudioSink?: RemoteAudioSink;
+  /**
+   * TICKET 040 — fire this track event from inside setRemoteDescription, so
+   * it lands while connect() is still running (see FakeTrackPc).
+   */
+  trackDuringAnswer?: RtcTrackEventLike;
 }
 
 function makeHarness(opts: HarnessOptions = {}) {
@@ -169,6 +182,9 @@ function makeHarness(opts: HarnessOptions = {}) {
   const pcs: FakePc[] = [];
   const rtcFactory = vi.fn(() => {
     const pc = opts.trackCapable === true ? new FakeTrackPc() : new FakePc();
+    if (pc instanceof FakeTrackPc && opts.trackDuringAnswer !== undefined) {
+      pc.trackDuringAnswer = opts.trackDuringAnswer;
+    }
     pcs.push(pc);
     return pc;
   });
@@ -455,6 +471,26 @@ describe('RealtimeTransport inbound media track (ticket 040)', () => {
     // The handler must already be in place on the connection start() built.
     expect(typeof trackPc(h).ontrack).toBe('function');
     expect(trackPc(h).ontrackAtAnswer).toBe(true);
+  });
+
+  it('a track that arrives DURING setRemoteDescription — before connect() has adopted the connection — is still routed', async () => {
+    // The real ordering: applying the answer is what creates the receiver, so
+    // `ontrack` fires inside setRemoteDescription, BEFORE connect() assigns
+    // its `pc` field. A handler that only accepts events once the field
+    // matches (`this.pc !== pc`) discards the model's only audio and the
+    // session is silent — intermittently, which is the worst kind.
+    const fake = makeFakeSink();
+    const stream = fakeStream('during-answer');
+    const h = makeHarness({
+      trackCapable: true,
+      remoteAudioSink: fake.sink,
+      trackDuringAnswer: audioTrackEvent(stream),
+    });
+    await h.transport.start(h.config);
+
+    expect(trackPc(h).ontrackAtAnswer).toBe(true); // it really did fire early
+    expect(fake.attached).toEqual([stream]);
+    expect(fake.calls).toEqual(['attach']);
   });
 
   it('ignores a non-audio track and a streamless event', async () => {
