@@ -45,6 +45,37 @@ Aggregations read `Run.utterances[]` when present and fall back to the Run-level
       test stays green untouched
 - [ ] No figure moves for any ledger that has no manifest-backed runs
 
+## The shape 031 actually fixed — aggregate against THIS
+
+```ts
+export interface RunUtterance {
+  utteranceId: string;   // manifest CorpusUtterance.id
+  index: number;         // 1-based, manifest order (transport utt === index - 1)
+  category: CorpusCategory;
+  timings: Record<string, number | null>;   // per-utterance; speech_end from the MANIFEST
+  transcripts: { source?: string; target?: string };
+  cost: number;          // Run cost split by manifest span; the splits sum back to run.cost EXACTLY
+  status: 'complete' | 'failed';
+  errors: string[];
+}
+// Run gains: utterances?: RunUtterance[]
+```
+
+Decisions inherited from 031 that this ticket must respect:
+
+- **Run-level `timings`/`transcripts`/`cost` keep TODAY's semantics verbatim** (last-mark-wins,
+  first-audio-overall, whole-clip cost) and a 031 regression test pins that. 031 was purely
+  additive so no figure moved. **If 032 wants the Run-level fields to become aggregates, it must
+  change them CONSCIOUSLY and update that pin through the test-writer** — never drift into it.
+- The per-utterance latency sample is `timings.audio_queued - timings.speech_end`, same formula as
+  the Run-level one, so the two cannot disagree about what latency means.
+- An utterance with no output audio is `status: 'failed'` with `audio_queued: null`. It does NOT
+  fail its Run. That is 027's rule one level down: excluded from figures, still counted in attempts.
+- A Run whose segmentation disagreed with its manifest has `status: 'failed'` and **no**
+  `utterances` at all — so it can never contribute a partial, mis-attributed sample.
+- `RunUtterance.errors` is narrow in practice: `TransportError` carries no `utt`, so a stage failure
+  cannot be attributed to one utterance. Do not build a category finding on per-utterance errors.
+
 ## Notes for the implementer
 
 - This is the ticket where an error becomes a *published wrong number*. Mutation-check each of:
