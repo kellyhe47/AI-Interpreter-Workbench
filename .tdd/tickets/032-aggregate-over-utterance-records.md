@@ -1,7 +1,7 @@
 ---
 id: 032
 title: Aggregate over utterance records — the by-category table, real N, honest provenance
-status: pending
+status: green
 source: v3-corpus
 depends_on: [031]
 touches: [src/client/components/results/derive.ts, src/client/state/ledger.ts, src/client/views/ResultsView.tsx]
@@ -83,3 +83,38 @@ Decisions inherited from 031 that this ticket must respect:
   attempts; the gate not bypassed at record level.
 - `derive.ts`'s `RunAnnotations.category` and `utteranceId` become derivable from the record —
   reconcile the two representations rather than carrying both silently.
+
+## Attempt log
+
+- Green in one implementation pass, 49 red -> 0. Suite 1265/68; both tsconfigs clean; build clean.
+- **The double-counting trap is closed STRUCTURALLY, not by a check.** `runSamples(run)` is an
+  either/or, never a union: a Run carrying records returns ONLY its records, and the Run-level
+  fallback is emitted solely in the `records === undefined || records.length === 0` branch. Every
+  consumer — `runAggregates`, `groupByRecording`, `groupByCategory`, provenance — goes through that
+  one function, so there is no second path that could re-add the container's own sample. Hence 60,
+  never 75.
+- `runAggregates()` in the LEDGER became record-aware; `derive.ts` still delegates rather than
+  reimplementing the gate, which a locked test pins. `isAggregatableRun` is byte-identical.
+- `pairedLatencyMs(timings)` reads `audio_queued - speech_end` out of ONE timings map, so a Run's
+  stamp can never be crossed with a record's.
+- Orchestrator rulings taken during the ticket:
+  1. `Provenance.attemptedSamples` APPROVED — `intendedReps` is about reps and a failed utterance
+     loses no rep, so without it a 20-attempt/18-measured arm is indistinguishable from a clean one.
+  2. `UtteranceCategory` now points at `src/core/corpus.ts` (canonical, compiled by both tsconfigs)
+     rather than `harness/corpus.ts` (the pre-22a synthetic placeholder). Live drift risk closed.
+  3. `RunAnnotations.category`/`utteranceId` KEPT as the record-less fallback; the record wins.
+  4. `groupByRecording` expanding ad-hoc/manual Runs into records is INTENDED — PRD §8 makes
+     By Recording the one place ad-hoc runs are visible, so `n = 4` for a 4-utterance ad-hoc Run is
+     right exactly as `n = 1` was right before.
+- Mutation-checked, four properties, each independently load-bearing:
+  | mutation | result |
+  |---|---|
+  | emit the Run-level sample ALONGSIDE its records (double count) | 36 red |
+  | parent gate ignored at record level | 21 red |
+  | category rows keyed on category alone, dropping the arm | 18 red |
+  | a failed utterance counted as a figure | 4 red |
+- Test-writer's reference check caught a real design error before it shipped: category rows are
+  **(category x arm)**, not category alone — a mixed ledger yields three rows, and a category-only
+  lookup silently picks the wrong arm's numbers.
+- `costPerMinuteUsd` deliberately keeps a Run-level denominator: the clip is played once per Run,
+  so treating each record's audio as a whole clip would quarter it.
