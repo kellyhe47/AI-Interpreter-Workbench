@@ -321,9 +321,16 @@ export function createLiveSessionsClient(deps: ApiClientDeps): LiveSessionsClien
  * 'http-error' carrying the server's own message.
  */
 export function createWerScoresClient(deps: ApiClientDeps): WerScoresClient {
-  // TICKET 034 stub.
-  void deps;
-  throw new Error('ticket 034: not implemented');
+  const http = createRequester(deps);
+
+  return {
+    create: (score) => http.json<WerScore>('/api/wer-scores', { method: 'POST', body: score }),
+
+    // No filter at all, and therefore a bare path: Results and the export both
+    // aggregate across every score, and the listing is deliberately UNCOLLAPSED
+    // so the superseded lines of a re-scored corpus stay visible.
+    list: () => http.json<WerScore[]>('/api/wer-scores', { method: 'GET' }),
+  };
 }
 
 export function createRunsClient(deps: ApiClientDeps): RunsClient {

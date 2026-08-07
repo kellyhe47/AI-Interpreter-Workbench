@@ -152,6 +152,7 @@
 
 import { deriveArmTag, type ArmTag, type ProviderTriple } from '../../core/arms';
 import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
+import { latestWerScores, werScoreKey } from '../../core/wer';
 import type { WerScore } from '../../core/wer';
 import type { RunOrigin } from '../../core/protocol';
 import type { Mode, UtteranceRecord } from '../../core/timing';
@@ -677,6 +678,7 @@ export class RunLedger {
   private runs: Run[] = [];
   private liveSessions: LiveSession[] = [];
   private blindComparisons: BlindComparison[] = [];
+  private werScores: WerScore[] = [];
   private readonly storage?: StorageAdapter;
 
   constructor(storage?: StorageAdapter) {
@@ -691,6 +693,9 @@ export class RunLedger {
         this.runs = state.runs ?? [];
         this.liveSessions = state.liveSessions ?? [];
         this.blindComparisons = state.blindComparisons ?? [];
+        // Ticket 034 — a pre-034 blob has no `werScores` key at all; that is
+        // "no scores yet", never a corrupt blob.
+        this.werScores = state.werScores ?? [];
       }
     }
   }
@@ -706,6 +711,7 @@ export class RunLedger {
           runs: this.runs,
           liveSessions: this.liveSessions,
           blindComparisons: this.blindComparisons,
+          werScores: this.werScores,
         }),
       );
     }
@@ -849,15 +855,17 @@ export class RunLedger {
    * locked export/import tests. */
 
   /** Appends one post-hoc WER score. Never replaces an earlier one. */
-  appendWerScore(_score: WerScore): void {
-    // TICKET 034 stub.
-    throw new Error('ticket 034: not implemented');
+  appendWerScore(score: WerScore): void {
+    // Deep-copied on the way in for the same reason every other store here is:
+    // a caller mutating what it handed in must not be able to rewrite a
+    // recorded measurement after the fact.
+    this.werScores.push(deepCopy(score));
+    this.persist();
   }
 
   /** Every persisted score, in append order, INCLUDING superseded ones. */
   getWerScores(): WerScore[] {
-    // TICKET 034 stub.
-    throw new Error('ticket 034: not implemented');
+    return deepCopy(this.werScores);
   }
 
   /**
@@ -867,9 +875,14 @@ export class RunLedger {
    * `wer: null` (`not applicable`), and both are different from a 0. A reader
    * that cannot tell the three apart cannot render Cantonese honestly.
    */
-  getWerScore(_runId: string, _utteranceId: string): WerScore | undefined {
-    // TICKET 034 stub.
-    throw new Error('ticket 034: not implemented');
+  getWerScore(runId: string, utteranceId: string): WerScore | undefined {
+    // Delegated to `latestWerScores` so the last-write-wins rule has ONE
+    // definition shared with the server-side readers and the export.
+    const key = werScoreKey(runId, utteranceId);
+    const latest = latestWerScores(this.werScores).find(
+      (score) => werScoreKey(score.runId, score.utteranceId) === key,
+    );
+    return latest === undefined ? undefined : deepCopy(latest);
   }
 
   exportRuns(): LedgerExport {

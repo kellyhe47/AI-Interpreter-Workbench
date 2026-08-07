@@ -51,6 +51,7 @@
 import { json, Router } from 'express';
 import type { Request, Response } from 'express';
 
+import { werTokens } from '../../core/wer';
 import type { Storage, WerScore } from '../storage';
 import { handleAsync, JSON_BODY_LIMIT, sendBadRequest } from './http';
 
@@ -62,21 +63,113 @@ export interface WerScoresRouterDeps {
 /** The rejection code, pinned: the client keys off it, so only wording is free. */
 export const INVALID_WER_SCORE = 'invalid-wer-score';
 
-export function createWerScoresRouter(deps: WerScoresRouterDeps): Router {
-  // TICKET 034 stub. The router is CONSTRUCTED (so mounting it shadows nothing
-  // and every other suite stays green) and its handlers are not implemented.
-  void deps;
-  const router = Router();
+/** The two named reasons a WER could not be computed. Anything else is not one. */
+const REASONS: readonly string[] = ['no-reference-text', 'no-hypothesis'];
 
-  router.post('/api/wer-scores', json({ limit: JSON_BODY_LIMIT, strict: false }), (_req: Request, res: Response) => {
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0;
+}
+
+/** A stored transcript: the text as captured, or an honest absence. */
+function isTextOrNull(value: unknown): boolean {
+  return value === null || typeof value === 'string';
+}
+
+/**
+ * The structural gate, plus the ONE semantic rule this ticket exists for.
+ * Returns WHY a body is not a WerScore, or `null` when it is one — a reason
+ * rather than a boolean, so the envelope's `message` can name the field.
+ */
+function rejectionReason(body: unknown): string | null {
+  if (!isObject(body)) return 'body must be a JSON object';
+  if (!isNonEmptyString(body.runId)) return 'runId must be a non-empty string';
+  if (!isNonEmptyString(body.utteranceId)) return 'utteranceId must be a non-empty string';
+  if (typeof body.scoredAt !== 'number' || !Number.isFinite(body.scoredAt)) {
+    return 'scoredAt must be a number';
+  }
+  if (!isNonEmptyString(body.normalizationVersion)) {
+    // Without it the number could never be recomputed, so it would be a figure
+    // with no method — a claim rather than a measurement (PRD §8).
+    return 'normalizationVersion must be a non-empty string, or the number could never be recomputed';
+  }
+  if (!isTextOrNull(body.referenceText)) return 'referenceText must be a string or null';
+  if (!isTextOrNull(body.hypothesisText)) return 'hypothesisText must be a string or null';
+
+  const { wer, notApplicableReason: reason } = body;
+
+  // ===================== THE LOAD-BEARING PAIR ============================
+  // `not applicable` and `0` must be impossible to confuse at the wire: a WER
+  // of 0 is a PERFECT score, so a body carrying both a number and a reason is
+  // REFUSED rather than stored for a reader to disambiguate later, and a null
+  // with no reason is refused because it is indistinguishable from "nobody has
+  // scored this yet".
+  if (wer === null) {
+    if (typeof reason !== 'string' || !REASONS.includes(reason)) {
+      return `a null wer must name its reason — one of ${REASONS.join(', ')} — ` +
+        'or it is indistinguishable from "not scored yet"';
+    }
+    if (
+      reason === 'no-reference-text' &&
+      !(body.referenceText === null || werTokens(body.referenceText as string).length === 0)
+    ) {
+      return 'no-reference-text is contradicted by a referenceText that is present';
+    }
+    if (reason === 'no-hypothesis' && body.hypothesisText !== null) {
+      return 'no-hypothesis is contradicted by a hypothesisText that is present';
+    }
+    return null;
+  }
+
+  if (typeof wer !== 'number' || !Number.isFinite(wer) || wer < 0) {
+    // Absent, a string, negative or NaN. Note what is NOT refused: a wer above
+    // 1.0 is legal and stored UNCLAMPED — clamping would make a babbling arm
+    // look like a silent one.
+    return 'wer must be a non-negative finite number, or null with a named reason';
+  }
+  if (reason !== undefined) {
+    return 'a numeric wer must not carry notApplicableReason — a wer of 0 is a PERFECT score, ' +
+      'not "not applicable"';
+  }
+  if (typeof body.referenceText !== 'string') {
+    return 'a numeric wer needs the referenceText it was measured against';
+  }
+  return null;
+}
+
+export function createWerScoresRouter(deps: WerScoresRouterDeps): Router {
+  const { storage } = deps;
+  const router = Router();
+  // `strict: false` so a JSON scalar (`"score-1"`, `null`) parses and reaches
+  // the gate below as a value. Under the default, body-parser rejects it before
+  // any handler runs and express answers its own HTML error page — a 400 with
+  // no `{ code, message }` envelope, which is precisely what PRD §12 forbids.
+  const parseJson = json({ limit: JSON_BODY_LIMIT, strict: false });
+
+  router.post('/api/wer-scores', parseJson, (req: Request, res: Response) => {
+    const reason = rejectionReason(req.body);
+    if (reason !== null) {
+      // Refused WHOLE: the store is not touched at all, because a half-record
+      // in an append-only stream cannot be repaired later.
+      sendBadRequest(res, INVALID_WER_SCORE, `not a wer score — ${reason}`);
+      return;
+    }
     handleAsync(res, async () => {
-      throw new Error('ticket 034: not implemented');
+      // Stored verbatim: the texts are kept pre-normalization so a reviewer can
+      // recompute the number rather than trust it.
+      res.status(201).json(await storage.appendWerScore(req.body as WerScore));
     });
   });
 
   router.get('/api/wer-scores', (_req: Request, res: Response) => {
     handleAsync(res, async () => {
-      throw new Error('ticket 034: not implemented');
+      // UNCOLLAPSED, in write order: last-write-wins is a read-side rule with
+      // exactly one home (`latestWerScores`), and collapsing here would both
+      // duplicate it and hide the history the append-only stream exists for.
+      res.status(200).json(await storage.listWerScores());
     });
   });
 

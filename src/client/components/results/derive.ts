@@ -125,6 +125,7 @@ import {
 // union in src/harness/corpus.ts is the pre-22a synthetic placeholder kept for
 // bench/soak — importing it here left two copies free to drift apart.
 import type { CorpusCategory } from '../../../core/corpus';
+import type { WerScore } from '../../../core/wer';
 import {
   isAggregatableLiveSession,
   isAggregatableRun,
@@ -235,8 +236,11 @@ export interface RunAnnotations {
   repIndex?: number;
   /** Corpus version behind the sample. */
   corpusVersion?: string;
-  /** Post-hoc word error rate as a fraction. */
-  wer?: number;
+  // TICKET 034 removed `wer`. Nothing ever wrote it, and a Run-level WER could
+  // not have been correct anyway: a Run spans ~4 utterances of deliberately
+  // different categories (PRD §9), so there is no single reference for it to
+  // have been scored against. WER now lives in its own append-only stream,
+  // keyed by the measured atom — see `deriveWerByArm` below.
 }
 
 export type AnnotatedRun = Run & { annotations?: RunAnnotations };
@@ -753,15 +757,118 @@ export function groupByCategory(ledger: RunLedger): CategoryGroupRow[] {
  * TICKET 034 — a WER as a percentage, or '—' for null. Percentages, like every
  * other formatter here, live in ONE place so no component formats by hand.
  */
-export function formatWer(_wer: number | null): string {
-  // TICKET 034 stub.
-  throw new Error('ticket 034: not implemented');
+export function formatWer(wer: number | null): string {
+  // NULL IS AN EM DASH, NEVER '0.0%'. A zero WER is a perfect score, so
+  // rendering an absent measurement as one would report the arm nobody can
+  // score as the best arm in the study.
+  if (wer === null) return '—';
+  return `${(wer * 100).toFixed(1)}%`;
+}
+
+/**
+ * A running tally of one WER population. The counters are kept apart because
+ * NOT SCORED, NOT APPLICABLE and a real number are three different facts, and a
+ * reader that cannot tell them apart cannot render Cantonese honestly.
+ */
+interface WerTally {
+  scoredValues: number[];
+  notApplicable: number;
+  unscored: number;
+}
+
+function emptyTally(): WerTally {
+  return { scoredValues: [], notApplicable: 0, unscored: 0 };
+}
+
+/**
+ * Fold ONE gate-passing sample's score into a tally. THE ONLY PLACE a WER value
+ * enters a mean: a null score increments `notApplicable` and contributes
+ * nothing, so there is no path on which `not applicable` can be averaged in as
+ * a 0.
+ */
+function tallyScore(tally: WerTally, score: WerScore | undefined): void {
+  if (score === undefined) {
+    tally.unscored += 1;
+    return;
+  }
+  if (score.wer === null) {
+    tally.notApplicable += 1;
+    return;
+  }
+  tally.scoredValues.push(score.wer);
+}
+
+/**
+ * The tally as a reported aggregate. The cell is decided HERE, in one place, so
+ * no view can invent a zero: a percentage when anything scored, else
+ * `not applicable` when anything was unscoreable, else `not yet measured`.
+ */
+function toWerAggregate(tally: WerTally): WerAggregate {
+  const meanWer = meanOf(tally.scoredValues);
+  return {
+    meanWer,
+    scored: tally.scoredValues.length,
+    notApplicable: tally.notApplicable,
+    unscored: tally.unscored,
+    cell:
+      meanWer !== null
+        ? formatWer(meanWer)
+        : tally.notApplicable > 0
+          ? WER_NOT_APPLICABLE_CELL
+          : WER_NOT_MEASURED_CELL,
+  };
+}
+
+/**
+ * Every WER-BEARING atom of the ledger: one entry per gate-passing sample that
+ * carries a `utteranceId`, paired with the score in force for it.
+ *
+ * THE GATE IS THE LATENCY GATE, unchanged — `runSamples` + the parent Run's
+ * `isAggregatableUtterance` — so a fixture-sourced, ad-hoc, manual or failed
+ * run contributes no WER for exactly the reason it contributes no latency.
+ *
+ * A sample with NO `utteranceId` (a record-less Run) is skipped: WER is keyed
+ * by (runId, utteranceId), so a Run with no records has no atom to key by.
+ *
+ * The walk is over RUNS, looking scores up — never over scores looking runs up.
+ * An orphan score naming a Run the ledger does not hold therefore cannot open a
+ * row or move a figure.
+ */
+function werAtoms(
+  ledger: RunLedger,
+): Array<{ sample: RunSample; utteranceId: string; score: WerScore | undefined }> {
+  const atoms: Array<{ sample: RunSample; utteranceId: string; score: WerScore | undefined }> = [];
+  for (const run of ledger.getRuns() as AnnotatedRun[]) {
+    for (const sample of runSamples(run)) {
+      if (!isAggregatableUtterance(run, sample.utterance)) continue;
+      const utteranceId = sample.utteranceId;
+      if (utteranceId === undefined) continue;
+      // LAST WRITE WINS, in the ledger: a re-scored corpus reports the newest
+      // number while the superseded lines stay in the store.
+      atoms.push({ sample, utteranceId, score: ledger.getWerScore(run.id, utteranceId) });
+    }
+  }
+  return atoms;
 }
 
 /** TICKET 034 — WER per DERIVED arm, keyed by arm tag. Named arms only. */
-export function deriveWerByArm(_ledger: RunLedger): { [arm: string]: WerAggregate } {
-  // TICKET 034 stub.
-  throw new Error('ticket 034: not implemented');
+export function deriveWerByArm(ledger: RunLedger): { [arm: string]: WerAggregate } {
+  const order: ArmTag[] = [];
+  const tallies = new Map<ArmTag, WerTally>();
+
+  for (const { sample, score } of werAtoms(ledger)) {
+    let tally = tallies.get(sample.arm);
+    if (!tally) {
+      tally = emptyTally();
+      tallies.set(sample.arm, tally);
+      order.push(sample.arm);
+    }
+    tallyScore(tally, score);
+  }
+
+  const perArm: { [arm: string]: WerAggregate } = {};
+  for (const arm of order) perArm[arm] = toWerAggregate(tallies.get(arm)!);
+  return perArm;
 }
 
 /**
@@ -770,9 +877,27 @@ export function deriveWerByArm(_ledger: RunLedger): { [arm: string]: WerAggregat
  * a mixed ledger yields several rows per category and a category-only lookup
  * silently picks whichever arm was appended first.
  */
-export function deriveWerByCategory(_ledger: RunLedger): WerCategoryRow[] {
-  // TICKET 034 stub.
-  throw new Error('ticket 034: not implemented');
+export function deriveWerByCategory(ledger: RunLedger): WerCategoryRow[] {
+  const order: string[] = [];
+  const rows = new Map<string, { category: UtteranceCategory; arm: ArmTag; tally: WerTally }>();
+
+  for (const { sample, score } of werAtoms(ledger)) {
+    const category = sampleCategory(sample);
+    if (category === undefined) continue;
+    const key = `${category}|${sample.arm}`;
+    let row = rows.get(key);
+    if (!row) {
+      row = { category, arm: sample.arm, tally: emptyTally() };
+      rows.set(key, row);
+      order.push(key);
+    }
+    tallyScore(row.tally, score);
+  }
+
+  return order.map((key) => {
+    const { category, arm, tally } = rows.get(key)!;
+    return { category, arm, ...toWerAggregate(tally) };
+  });
 }
 
 /** Head-to-head for two named arms; null when either arm has no samples. */
@@ -832,15 +957,14 @@ export function deriveComparison(
  */
 function deriveWerCell(ledger: RunLedger, armA: ArmTag, armB: ArmTag): string {
   if (sttUnchangedBetween(armA, armB)) return STT_UNCHANGED_CELL;
-  const werOf = (arm: ArmTag): number | null =>
-    meanOf(
-      (ledger.getRuns() as AnnotatedRun[])
-        .filter((run) => isAggregatableRun(run) && runArmTag(run) === arm)
-        .map((run) => run.annotations?.wer)
-        .filter((wer): wer is number => typeof wer === 'number'),
-    );
-  const a = werOf(armA);
-  const b = werOf(armB);
+  // TICKET 034 — RE-SOURCED FROM THE SCORES STREAM. This used to read
+  // `annotations.wer`, a Run-level field nothing ever wrote and which could not
+  // have been right anyway (a Run spans ~4 utterances of different categories),
+  // so the cell was permanently '—'. `deriveWerByArm` is the one place a mean
+  // is computed, which is also what keeps a `not applicable` out of it.
+  const perArm = deriveWerByArm(ledger);
+  const a = perArm[armA]?.meanWer ?? null;
+  const b = perArm[armB]?.meanWer ?? null;
   if (a === null || b === null) return '—';
   const delta = b - a;
   return `${sign(delta)}${(Math.abs(delta) * 100).toFixed(1)}%`;

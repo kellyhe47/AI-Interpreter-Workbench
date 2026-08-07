@@ -145,20 +145,66 @@ export interface WerHypothesisEntry {
 
 /** The stable string key of a score. (runId, utteranceId), nothing else. */
 export function werScoreKey(runId: string, utteranceId: string): string {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  // The separator is a unit separator rather than a printable character, so no
+  // id containing the delimiter can forge another pair's key.
+  return `${runId}\u001f${utteranceId}`;
 }
+
+/**
+ * Private-use placeholders. `ñ` and a decimal point BETWEEN DIGITS both have to
+ * survive a pass that would otherwise destroy them, so each is swapped for a
+ * character no transcript can contain and swapped back afterwards.
+ */
+const N_TILDE = '\uE000';
+const KEPT_DECIMAL = '\uE001';
+
+/** `-` and the unicode dashes, plus the other joiners, all become a space. */
+const WORD_JOINERS = /[-\u2010-\u2015\u2212/\\_]/g;
 
 /** The ONE normalizer. See the module header for the rules and the rulings. */
 export function normalizeForWer(text: string): string {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  // Composed first, so a decomposed `ñ` (n + U+0303) is protected by the same
+  // rule as a precomposed one.
+  let out = text.normalize('NFC').toLowerCase();
+
+  // 1. ñ IS PROTECTED, then every remaining combining mark is stripped — á é í
+  //    ó ú ü fold to their base letters. `ñ` is a SEPARATE LETTER, so folding it
+  //    would make `año` and `ano` one word: a semantic collapse, not a spelling
+  //    one.
+  out = out.split('ñ').join(N_TILDE);
+  out = out.normalize('NFD').replace(/\p{M}/gu, '').normalize('NFC');
+  out = out.split(N_TILDE).join('ñ');
+
+  // 2. THOUSANDS SEPARATORS — a `,` between two digits alone, so `1,250` and
+  //    `1250` are one token while a sentence comma is still punctuation.
+  out = out.replace(/(\d),(?=\d)/g, '$1');
+
+  // 3. WORD JOINERS become a SPACE, so `twenty-five` is two tokens on both
+  //    sides rather than one token on one side and two on the other.
+  out = out.replace(WORD_JOINERS, ' ');
+
+  // 4. EVERYTHING ELSE that is not a letter, a digit or WHITESPACE is deleted —
+  //    quotes, brackets, `$`, `%`, `¿`, `¡`. The ONE exception is a `.` between
+  //    two digits, kept so `2.5` does not become `25`.
+  //
+  //    WHITESPACE IS SPARED FROM THE CLASS ON PURPOSE. A class written with a
+  //    literal space instead of `\s` deletes tabs and newlines as punctuation
+  //    and welds `a\t\tb` into `ab`, so any transcript containing a line break
+  //    would silently lose a token boundary and report an inflated WER.
+  out = out.replace(/(\d)\.(?=\d)/g, `$1${KEPT_DECIMAL}`);
+  out = out.replace(/[^\p{L}\p{N}\s]/gu, '');
+  out = out.split(KEPT_DECIMAL).join('.');
+
+  // 5. WHITESPACE collapses to single spaces and trims.
+  return out.trim().replace(/\s+/g, ' ');
 }
 
 /** The normalized token sequence. Empty text is ZERO tokens, never one. */
 export function werTokens(text: string): string[] {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  const normalized = normalizeForWer(text);
+  // `''.split(' ')` is `['']` — one phantom token, which would give an empty
+  // reference a denominator of 1 and turn "no reference" into a real score.
+  return normalized.length === 0 ? [] : normalized.split(' ');
 }
 
 /** Levenshtein edit distance over TOKENS. Unit cost for S, D and I alike. */
@@ -166,8 +212,20 @@ export function tokenEditDistance(
   reference: readonly string[],
   hypothesis: readonly string[],
 ): number {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  // Two rolling rows rather than the full matrix: the distance is all that is
+  // wanted, never the alignment path.
+  let previous = Array.from({ length: hypothesis.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= reference.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= hypothesis.length; j += 1) {
+      const substitution = previous[j - 1]! + (reference[i - 1] === hypothesis[j - 1] ? 0 : 1);
+      const deletion = previous[j]! + 1;
+      const insertion = current[j - 1]! + 1;
+      current[j] = Math.min(substitution, deletion, insertion);
+    }
+    previous = current;
+  }
+  return previous[hypothesis.length]!;
 }
 
 /**
@@ -179,8 +237,16 @@ export function tokenEditDistance(
  * `not applicable`.
  */
 export function wordErrorRate(reference: string, hypothesis: string): number {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  const referenceTokens = werTokens(reference);
+  if (referenceTokens.length === 0) {
+    throw new Error(
+      'wordErrorRate: an empty reference has no denominator — 0 and 1 would both ' +
+        'be inventions, so an absent reference is `not applicable` instead',
+    );
+  }
+  // NEVER CLAMPED: a hypothesis longer than the reference exceeds 1.0 on
+  // purpose, so a babbling arm and a silent arm do not report the same number.
+  return tokenEditDistance(referenceTokens, werTokens(hypothesis)) / referenceTokens.length;
 }
 
 /**
@@ -191,8 +257,37 @@ export function wordErrorRate(reference: string, hypothesis: string): number {
  * An EMPTY-STRING hypothesis is a real total miss and scores 1.0.
  */
 export function scoreUtteranceWer(input: WerScoringInput): WerScore {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  const { runId, utteranceId, referenceText, hypothesisText, scoredAt } = input;
+
+  const base = {
+    runId,
+    utteranceId,
+    referenceText: referenceText ?? null,
+    hypothesisText: hypothesisText ?? null,
+    normalizationVersion: WER_NORMALIZATION_VERSION,
+    scoredAt,
+  };
+
+  // THE ONE PLACE A NULL WER IS PRODUCED, and it is unreachable without a
+  // reason: the two `not applicable` branches below are the only `return`s that
+  // set `wer: null`, and each sets `notApplicableReason` in the same literal.
+  // There is no code path on which a null score can be written bare, and none
+  // on which "unscoreable" can become a 0 — the numeric branch is the only one
+  // that calls `wordErrorRate` at all.
+  if (referenceText === undefined || werTokens(referenceText).length === 0) {
+    // Cantonese is improvised from English prompt cards (PRD §9). There is
+    // nothing to score against, which is NOT a perfect transcription.
+    return { ...base, wer: null, notApplicableReason: 'no-reference-text' };
+  }
+
+  if (hypothesisText === undefined) {
+    // No transcript was captured at all. An EMPTY-STRING hypothesis is a
+    // different fact and falls through to the 1.0 below: the arm produced
+    // output and the output was nothing, which is a real, total miss.
+    return { ...base, wer: null, notApplicableReason: 'no-hypothesis' };
+  }
+
+  return { ...base, wer: wordErrorRate(referenceText, hypothesisText) };
 }
 
 /**
@@ -211,8 +306,22 @@ export function scoreRunWer(
   manifest: readonly WerReferenceEntry[],
   scoredAt: number,
 ): WerScore[] {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  const referenceById = new Map(manifest.map((entry) => [entry.id, entry]));
+  // A record-less Run produces NOTHING: WER attaches to the measured atom, and
+  // a Run that carries no records has none to attach to.
+  return (run.utterances ?? []).map((record) =>
+    scoreUtteranceWer({
+      runId: run.id,
+      utteranceId: record.utteranceId,
+      // An utterance the manifest does not name has no script, so it is
+      // `not applicable` on exactly the terms Cantonese is — never a 0.
+      referenceText: referenceById.get(record.utteranceId)?.referenceText,
+      // THE SOURCE TRANSCRIPT, never the target: the manifest's script is in the
+      // SOURCE language, so it is the only thing the reference can score.
+      hypothesisText: record.transcripts.source,
+      scoredAt,
+    }),
+  );
 }
 
 /**
@@ -223,6 +332,12 @@ export function scoreRunWer(
  * reshuffle the table.
  */
 export function latestWerScores(scores: readonly WerScore[]): WerScore[] {
-  // TICKET 034 stub — the implementation is the implementer's.
-  throw new Error('ticket 034: not implemented');
+  // A Map keeps FIRST-APPEARANCE insertion order while `set` overwrites the
+  // value, which is exactly "last write wins, first appearance orders". The
+  // input is never touched: the collapse happens on READ and nowhere else.
+  const byKey = new Map<string, WerScore>();
+  for (const score of scores) {
+    byKey.set(werScoreKey(score.runId, score.utteranceId), score);
+  }
+  return [...byKey.values()];
 }

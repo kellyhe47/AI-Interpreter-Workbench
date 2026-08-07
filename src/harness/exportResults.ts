@@ -103,6 +103,7 @@ import path from 'node:path';
 
 import { deriveArmTag } from '../core/arms';
 import type { ArmTag } from '../core/arms';
+import { latestWerScores } from '../core/wer';
 import type { WerScore } from '../core/wer';
 import { createStorage } from '../server/storage/index';
 import type { BlindComparison, LiveSession, Run } from '../server/storage/index';
@@ -466,18 +467,74 @@ function summariseLiveSessions(sessions: readonly LiveSession[]): LiveSessionSum
  * NOT APPLICABLE IS NOT ZERO: a `wer: null` atom is counted by name and never
  * reaches a mean.
  */
-/**
- * TICKET 034 STUB. Deliberately TOTAL rather than throwing: `werScores` is a
- * required field of `ExportSummary`, so a throwing stub here would take the 28
- * pre-existing export tests down with it and hide which failures are 034's.
- * It reports an empty disclosure over an unread stream — every substantive
- * assertion in exportResults.wer.test.ts fails against it.
- */
 function summariseWerScores(
-  _scores: readonly WerScore[],
-  _runsById: ReadonlyMap<string, Run>,
+  scores: readonly WerScore[],
+  runsById: ReadonlyMap<string, Run>,
 ): WerScoreSummary {
-  return { total: 0, atoms: 0, aggregated: 0, notApplicable: 0, excluded: 0, meanByArm: {} };
+  // LAST WRITE WINS FIRST, through the one place that rule lives. `total`
+  // reports the LINES on disk; every figure below reports the ATOMS in force.
+  const atoms = latestWerScores(scores);
+
+  const sumByArm: Record<string, { total: number; n: number }> = {};
+  let aggregated = 0;
+  let notApplicable = 0;
+  let excluded = 0;
+
+  for (const atom of atoms) {
+    const run = runsById.get(atom.runId);
+    // A score naming a Run this bundle does not carry is EXCLUDED rather than
+    // attributed on the strength of an id nothing here defines — exactly how an
+    // unattributable blind comparison is handled.
+    if (run === undefined || !isGatePassingRun(run) || !isCompletedRecord(run, atom.utteranceId)) {
+      excluded += 1;
+      continue;
+    }
+    if (atom.wer === null) {
+      // NOT APPLICABLE IS NOT ZERO. Counted by name, and it reaches no mean:
+      // this branch returns before a value is ever added.
+      notApplicable += 1;
+      continue;
+    }
+    aggregated += 1;
+    const arm = armOf(run);
+    const bucket = (sumByArm[arm] ??= { total: 0, n: 0 });
+    bucket.total += atom.wer;
+    bucket.n += 1;
+  }
+
+  const meanByArm: Record<string, number> = {};
+  for (const [arm, { total, n }] of Object.entries(sumByArm)) meanByArm[arm] = total / n;
+
+  return {
+    total: scores.length,
+    atoms: atoms.length,
+    aggregated,
+    notApplicable,
+    excluded,
+    meanByArm,
+  };
+}
+
+/** The four gate clauses of the file header, as one predicate over a Run. */
+function isGatePassingRun(run: Run): boolean {
+  const arm = armOf(run);
+  if (arm === 'ad-hoc') return false;
+  return isSweptEvidence(run, arm) && run.status === 'complete';
+}
+
+/**
+ * The gate ONE LEVEL DOWN (the client's `isAggregatableUtterance`). A Run that
+ * carries records is judged on the record for THIS utterance: one that produced
+ * no output audio is not a measurement — of latency OR of transcription
+ * quality. A Run carrying no records at all is judged on the Run alone.
+ */
+function isCompletedRecord(run: Run, utteranceId: string): boolean {
+  const records = run.utterances;
+  if (records === undefined || records.length === 0) return true;
+  const record = records.find((r) => r.utteranceId === utteranceId);
+  // A score naming an utterance the Run never recorded cannot be verified
+  // against a measured atom, so it is excluded rather than credited.
+  return record !== undefined && record.status === 'complete';
 }
 
 function reason(err: unknown): string {
@@ -511,14 +568,16 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
     // sessions arrive the same way, from live-sessions.jsonl: they are NOT
     // unioned into `runs` below, so they cannot reach `totals.runs` or an
     // experiment aggregate.
-    [ledger, stored, comparisons, liveSessions] = await Promise.all([
+    // Ticket 034's scores arrive the same way again, from wer-scores.jsonl,
+    // and are likewise NOT unioned into `runs`: a post-hoc judgement about one
+    // utterance of a run is not another run.
+    [ledger, stored, comparisons, liveSessions, werScores] = await Promise.all([
       store.readLedger(),
       store.listRuns(),
       store.listBlindComparisons(),
       store.listLiveSessions(),
+      store.listWerScores(),
     ]);
-    // TICKET 034 stub: the wer-scores.jsonl read is not wired yet.
-    werScores = [];
   } catch (err) {
     throw new Error(`export-results: could not read the data store at ${dataDir} — ${reason(err)}`, {
       cause: err,
@@ -586,6 +645,16 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
     await fs.writeFile(
       path.join(stagingDir, 'live-sessions.json'),
       `${JSON.stringify(liveSessions, null, 2)}\n`,
+      'utf8',
+    );
+    // Ticket 034 — the scores themselves, VERBATIM and UNCOLLAPSED, so a
+    // reviewer can recompute the disclosed mean and read the superseded lines
+    // of a re-scored corpus. Written unconditionally (an empty array on an
+    // empty store), like the other two side streams, so the bundle's shape
+    // never depends on whether anyone scored anything.
+    await fs.writeFile(
+      path.join(stagingDir, 'wer-scores.json'),
+      `${JSON.stringify(werScores, null, 2)}\n`,
       'utf8',
     );
     await fs.writeFile(

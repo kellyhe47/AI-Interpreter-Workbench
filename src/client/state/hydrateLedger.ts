@@ -46,6 +46,8 @@
  * ==========================================================================
  */
 
+import { werScoreKey } from '../../core/wer';
+import type { WerScore } from '../../core/wer';
 import type {
   LiveSessionsClient,
   RecordingsClient,
@@ -104,10 +106,11 @@ export async function hydrateLedger(
   // A host with no live-session backend contributes an empty listing rather
   // than a second code path: "this host wires no seam" and "the server holds
   // no sessions" must both leave the LiveSession store exactly as it was.
-  const [recordings, runs, liveSessions] = await Promise.all([
+  const [recordings, runs, liveSessions, werScores] = await Promise.all([
     source.recordings.list(),
     source.runs.list(),
     source.liveSessions?.list() ?? Promise.resolve<LiveSession[]>([]),
+    source.werScores?.list() ?? Promise.resolve<WerScore[]>([]),
   ]);
 
   // Idempotent on entity id. The ledger is append-only and may already hold a
@@ -138,5 +141,19 @@ export async function hydrateLedger(
     ledger.appendLiveSession(session);
   }
 
-  // TICKET 034 stub: the score hydration itself is not implemented.
+  // TICKET 034 — the same append-and-dedupe rule, on a DIFFERENT key. A score
+  // has no id, and re-scoring the same (runId, utteranceId) is a LEGITIMATE
+  // second record, so identity cannot be the key: hydrating twice must add
+  // nothing while a genuine re-score must still land. (runId, utteranceId,
+  // scoredAt) is the narrowest key that tells those two apart. Collapsing to
+  // one figure stays a read-side concern (`RunLedger.getWerScore`).
+  const scoreKey = (score: WerScore): string =>
+    `${werScoreKey(score.runId, score.utteranceId)}\u001f${score.scoredAt}`;
+  const knownScores = new Set(ledger.getWerScores().map(scoreKey));
+  for (const score of werScores) {
+    const key = scoreKey(score);
+    if (knownScores.has(key)) continue;
+    knownScores.add(key);
+    ledger.appendWerScore(score);
+  }
 }

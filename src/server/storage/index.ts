@@ -252,6 +252,8 @@ export function createStorage(baseDir: string): Storage {
   const comparisonsFile = path.join(baseDir, 'comparisons.jsonl');
   // Ticket 041 — a SEPARATE stream again, for the same reason.
   const liveSessionsFile = path.join(baseDir, 'live-sessions.jsonl');
+  // Ticket 034 — and once more: a post-hoc score is not a Run.
+  const werScoresFile = path.join(baseDir, 'wer-scores.jsonl');
 
   const recordingJson = (id: string) => path.join(recordingsDir, `${id}.json`);
   const recordingWav = (id: string) => path.join(recordingsDir, `${id}.wav`);
@@ -446,16 +448,26 @@ export function createStorage(baseDir: string): Storage {
       return readJsonl<LiveSession>(liveSessionsFile);
     },
 
-    // eslint-disable-next-line @typescript-eslint/require-await
-    async appendWerScore(_score: WerScore): Promise<WerScore> {
-      // TICKET 034 stub.
-      throw new Error('ticket 034: not implemented');
+    async appendWerScore(score: WerScore): Promise<WerScore> {
+      // APPEND-ONLY, exactly like the ledger and the other two side streams:
+      // one line, 'a' flag, no read of the existing file. Re-scoring the same
+      // (runId, utteranceId) therefore writes a SECOND line and the earlier one
+      // survives on disk — the collapse is a READ-side rule (`latestWerScores`).
+      // The record is stored VERBATIM: `referenceText` and `hypothesisText` are
+      // kept pre-normalization so a reviewer can recompute the number instead
+      // of trusting it, and a `wer: null` is written as null rather than
+      // dropped, because `not applicable` is a FACT and emphatically not a 0.
+      // Nothing here touches runs/ or ledger.jsonl: Runs are never mutated.
+      await ensureDir(baseDir);
+      await fs.appendFile(werScoresFile, `${JSON.stringify(score)}\n`, 'utf8');
+      return score;
     },
 
-    // eslint-disable-next-line @typescript-eslint/require-await
     async listWerScores(): Promise<WerScore[]> {
-      // TICKET 034 stub.
-      throw new Error('ticket 034: not implemented');
+      // Tolerant, like the other streams: a torn line costs that line. The
+      // listing is UNCOLLAPSED — superseded re-scores come back too, because
+      // the history is the point of an append-only file.
+      return readJsonl<WerScore>(werScoresFile);
     },
 
     async readLedger(): Promise<Run[]> {
