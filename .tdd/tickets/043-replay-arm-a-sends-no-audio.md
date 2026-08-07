@@ -6,7 +6,7 @@ source: qa-live
 depends_on: [040]
 touches: [src/client/transport/realtime.ts, src/client/browserDeps.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/transport/realtime.test.ts, src/client/audio/outboundAudio.test.ts, src/client/replay/replayArmA.test.ts]
 branch: ""
 ---
 

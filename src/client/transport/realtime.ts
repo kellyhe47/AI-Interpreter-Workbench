@@ -138,6 +138,29 @@ export interface RemoteAudioSink {
   pause(): void;
 }
 
+/**
+ * TICKET 043 — where OUTBOUND paced PCM goes when there is no microphone.
+ *
+ * The exact mirror of `RemoteAudioSink`: an INJECTABLE seam, because jsdom has
+ * neither `AudioContext` nor `MediaStreamAudioDestinationNode`. Production
+ * builds one with `createOutboundAudioSink` (audio/outboundAudio.ts) from a
+ * 24 kHz context feeding a `MediaStreamAudioDestinationNode`; tests inject a
+ * recorder.
+ *
+ * `track` is what the transport adds to the peer connection BEFORE createOffer,
+ * so the offer negotiates a SENDABLE m-line instead of the `recvonly`
+ * transceiver Replay used to fall back to. `write` receives one paced frame at
+ * the instant the pacer hands it over — the sink never buffers ahead of 1×.
+ */
+export interface OutboundAudioSink {
+  /** The outbound MediaStreamTrack, added to the peer connection. */
+  readonly track: unknown;
+  /** Write ONE frame of 24 kHz mono PCM16, as it is handed over. */
+  write(pcm: Int16Array): void;
+  /** Release the sink (close the context). Idempotent. */
+  close(): void;
+}
+
 export interface RtcPeerConnectionLike {
   createDataChannel(label: string): RtcDataChannelLike;
   createOffer(): Promise<RtcSessionDescriptionLike>;
@@ -149,7 +172,7 @@ export interface RtcPeerConnectionLike {
    * test fakes may omit them and behave exactly as before). Exercised by
    * browser QA, not unit tests.
    */
-  addTrack?(track: unknown, stream: unknown): unknown;
+  addTrack?(track: unknown, stream?: unknown): unknown;
   addTransceiver?(kind: string, init?: { direction: string }): unknown;
   /**
    * TICKET 040 — inbound remote track callback. OPTIONAL: fakes that do not
@@ -178,6 +201,18 @@ export interface RealtimeDeps {
    * exactly as before.
    */
   remoteAudioSink?: RemoteAudioSink;
+  /**
+   * TICKET 043 (OPTIONAL) — builds the OUTBOUND sink for a microphone-less
+   * session. A FACTORY rather than an instance, for two reasons: the sink owns
+   * an AudioContext, so nothing may be constructed until a connect actually
+   * happens (a bag built in jsdom must stay harmless), and each (re)connect
+   * needs a track for ITS peer connection.
+   *
+   * Invoked on every connect that has NO mic MediaStream. When a mic stream IS
+   * in use it is never invoked at all — Live's mic track is the outbound audio
+   * and a second synthesized track would compete with it.
+   */
+  createOutboundAudioSink?: () => OutboundAudioSink;
 }
 
 export interface RealtimeTransportOptions {

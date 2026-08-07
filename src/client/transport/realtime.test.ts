@@ -4,11 +4,13 @@
  * clock. GA event sequences are pushed through the fake data channel.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { OUTBOUND_SAMPLE_RATE } from '../audio/outboundAudio';
 import {
   OPENAI_REALTIME_CALLS_URL,
   REALTIME_OPAQUE_ERROR_MESSAGE,
   RealtimeTransport,
   TOKEN_ENDPOINT,
+  type OutboundAudioSink,
   type RemoteAudioSink,
   type RtcDataChannelLike,
   type RtcMediaStreamLike,
@@ -103,6 +105,72 @@ class FakeTrackPc extends FakePc {
   }
 }
 
+/**
+ * TICKET 043 — a peer connection with the FULL production media surface
+ * (`addTrack` AND `addTransceiver`), which is what a real RTCPeerConnection
+ * has. `FakePc` and `FakeTrackPc` above are deliberately left without it.
+ */
+class FakeMediaPc extends FakeTrackPc {
+  added: { track: unknown; stream: unknown }[] = [];
+  transceivers: { kind: string; direction: string | undefined }[] = [];
+  /** How much had been negotiated by the time createOffer ran (must be >0). */
+  addedAtOffer: number | null = null;
+  addTrack(track: unknown, stream?: unknown): unknown {
+    this.added.push({ track, stream });
+    return { sender: true };
+  }
+  addTransceiver(kind: string, init?: { direction: string }): unknown {
+    this.transceivers.push({ kind, direction: init?.direction });
+    return { transceiver: true };
+  }
+  override async createOffer(): Promise<RtcSessionDescriptionLike> {
+    this.addedAtOffer = this.added.length;
+    return super.createOffer();
+  }
+}
+
+/** A peer connection that can only negotiate directions, never carry a track. */
+class FakeTransceiverPc extends FakePc {
+  transceivers: { kind: string; direction: string | undefined }[] = [];
+  addTransceiver(kind: string, init?: { direction: string }): unknown {
+    this.transceivers.push({ kind, direction: init?.direction });
+    return { transceiver: true };
+  }
+}
+
+/**
+ * TICKET 043 — records every paced frame the transport hands the outbound
+ * sink, plus the clock at which it arrived, so "the bytes really got there"
+ * and "delivery was not accelerated" are both falsifiable.
+ */
+function makeFakeOutboundSink(tag = 'outbound') {
+  const track = { kind: 'audio', tag };
+  const writes: Int16Array[] = [];
+  const writeTimes: number[] = [];
+  const state = { built: 0, closed: 0 };
+  const sink: OutboundAudioSink = {
+    track,
+    write: (pcm) => {
+      writes.push(pcm);
+      writeTimes.push(Date.now());
+    },
+    close: () => {
+      state.closed += 1;
+    },
+  };
+  return {
+    track,
+    sink,
+    writes,
+    writeTimes,
+    state,
+    factory: (): OutboundAudioSink => {
+      state.built += 1;
+      return sink;
+    },
+  };
+}
+
 /** A minimal remote MediaStream, tagged so assertions can name which one. */
 function fakeStream(tag: string): RtcMediaStreamLike & { tag: string } {
   return { tag, getAudioTracks: () => [{ kind: 'audio' }] };
@@ -164,6 +232,14 @@ interface HarnessOptions {
    * it lands while connect() is still running (see FakeTrackPc).
    */
   trackDuringAnswer?: RtcTrackEventLike;
+  /** TICKET 043 — a peer connection with addTrack AND addTransceiver. */
+  mediaCapable?: boolean;
+  /** TICKET 043 — a peer connection with addTransceiver ONLY. */
+  transceiverOnly?: boolean;
+  /** TICKET 043 — the Live mic stream seam. Omitted by default (no mic). */
+  getMediaStream?: () => RtcMediaStreamLike | null;
+  /** TICKET 043 — the outbound sink factory. Omitted by default. */
+  createOutboundAudioSink?: () => OutboundAudioSink;
 }
 
 function makeHarness(opts: HarnessOptions = {}) {
@@ -181,7 +257,14 @@ function makeHarness(opts: HarnessOptions = {}) {
 
   const pcs: FakePc[] = [];
   const rtcFactory = vi.fn(() => {
-    const pc = opts.trackCapable === true ? new FakeTrackPc() : new FakePc();
+    const pc =
+      opts.mediaCapable === true
+        ? new FakeMediaPc()
+        : opts.transceiverOnly === true
+          ? new FakeTransceiverPc()
+          : opts.trackCapable === true
+            ? new FakeTrackPc()
+            : new FakePc();
     if (pc instanceof FakeTrackPc && opts.trackDuringAnswer !== undefined) {
       pc.trackDuringAnswer = opts.trackDuringAnswer;
     }
@@ -193,7 +276,14 @@ function makeHarness(opts: HarnessOptions = {}) {
 
   const transport = new RealtimeTransport(
     { armId: 'arm-rt' },
-    { fetchImpl, rtcFactory, now: () => clock.t, remoteAudioSink: opts.remoteAudioSink },
+    {
+      fetchImpl,
+      rtcFactory,
+      now: () => clock.t,
+      remoteAudioSink: opts.remoteAudioSink,
+      getMediaStream: opts.getMediaStream,
+      createOutboundAudioSink: opts.createOutboundAudioSink,
+    },
   );
 
   const source: SourceTextEvent[] = [];
@@ -665,5 +755,258 @@ describe('RealtimeTransport stop() and sendAudio()', () => {
     const sentBefore = ch.sent.length;
     expect(() => h.transport.sendAudio(new Int16Array([1, 2, 3]))).not.toThrow();
     expect(ch.sent.length).toBe(sentBefore); // nothing goes over the data channel
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 043 — REPLAY HAS NO MICROPHONE.
+//
+// Live's mic rides the WebRTC media track, so `sendAudio` had nothing to do and
+// was a no-op. But the Replay runner paces the recorded clip and calls
+// `sendAudio(frame)` 50 times a second — every frame went into that no-op, the
+// model received silence, VAD never fired, and Arm A produced ZERO utterances
+// and a null `audio_queued`. The other half: with no mic the transport
+// negotiated a `recvonly` transceiver, which cannot send at all, so even a
+// working `sendAudio` had nowhere to put the samples.
+// ---------------------------------------------------------------------------
+
+/** The FakeMediaPc the harness built (addTrack + addTransceiver). */
+function mediaPc(h: Harness, index = 0): FakeMediaPc {
+  const pc = h.pcs[index];
+  if (!(pc instanceof FakeMediaPc)) throw new Error('harness was not built mediaCapable');
+  return pc;
+}
+
+/** The FakeTransceiverPc the harness built (addTransceiver only). */
+function transceiverPc(h: Harness, index = 0): FakeTransceiverPc {
+  const pc = h.pcs[index];
+  if (!(pc instanceof FakeTransceiverPc)) throw new Error('harness was not built transceiverOnly');
+  return pc;
+}
+
+/** A 480-sample paced frame whose contents identify it. */
+function pacedFrame(seed: number, n = 480): Int16Array {
+  return Int16Array.from({ length: n }, (_, i) => ((seed * 1013 + i * 7919) % 65536) - 32768);
+}
+
+/** A mic MediaStream carrying named tracks, so "which track" is falsifiable. */
+function micStream(...tags: string[]): RtcMediaStreamLike & { tracks: unknown[] } {
+  const tracks = tags.map((tag) => ({ kind: 'audio', tag }));
+  return { tracks, getAudioTracks: () => tracks };
+}
+
+describe('RealtimeTransport outbound audio negotiation (ticket 043)', () => {
+  it('no mic + an outbound sink: the SINK TRACK is added, and no recvonly transceiver is negotiated', async () => {
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({ mediaCapable: true, createOutboundAudioSink: out.factory });
+    await h.transport.start(h.config);
+
+    const pc = mediaPc(h);
+    expect(pc.added.map((a) => a.track)).toEqual([out.track]);
+    // `recvonly` CANNOT SEND. Its presence here is the bug, in either form:
+    // as the only m-line, or as a second one competing with the sink's.
+    expect(pc.transceivers.map((t) => t.direction)).not.toContain('recvonly');
+    // Attached BEFORE createOffer, or the offer describes no sendable audio.
+    expect(pc.addedAtOffer).toBe(1);
+    expect(out.state.built).toBe(1);
+  });
+
+  it('a transceiver-only peer connection negotiates SENDRECV when a sink is present', async () => {
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({ transceiverOnly: true, createOutboundAudioSink: out.factory });
+    await h.transport.start(h.config);
+
+    expect(transceiverPc(h).transceivers).toEqual([{ kind: 'audio', direction: 'sendrecv' }]);
+  });
+
+  it('TICKET 040 PIN: with NO sink and no mic, the recvonly fallback is unchanged', async () => {
+    // Nothing here may move: without an outbound sink there is nothing to send,
+    // and recvonly is still how the model's inbound track is asked for.
+    const h = makeHarness({ transceiverOnly: true });
+    await h.transport.start(h.config);
+
+    expect(transceiverPc(h).transceivers).toEqual([{ kind: 'audio', direction: 'recvonly' }]);
+  });
+
+  it('the sink is rebuilt per connect: a reconnect closes the old one and attaches a fresh track', async () => {
+    const built: { track: unknown; closed: number }[] = [];
+    const factory = (): OutboundAudioSink => {
+      const entry = { track: { kind: 'audio', tag: `outbound-${built.length}` }, closed: 0 };
+      built.push(entry);
+      return {
+        track: entry.track,
+        write: () => {},
+        close: () => {
+          entry.closed += 1;
+        },
+      };
+    };
+    const h = makeHarness({ mediaCapable: true, createOutboundAudioSink: factory });
+    const ch = await startConnected(h);
+    ch.emitClose();
+    await vi.waitFor(() => {
+      expect(h.states.at(-1)?.state).toBe('connected');
+    });
+
+    expect(built).toHaveLength(2);
+    expect(built[0]!.closed).toBe(1); // the abandoned context is released
+    expect(mediaPc(h, 1).added.map((a) => a.track)).toEqual([built[1]!.track]);
+  });
+});
+
+describe('RealtimeTransport sendAudio delivers paced PCM (ticket 043)', () => {
+  it('delivers the EXACT samples to the outbound sink, frame for frame, in order', async () => {
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({ mediaCapable: true, createOutboundAudioSink: out.factory });
+    const ch = await startConnected(h);
+    const sentBefore = ch.sent.length;
+
+    const frames = [pacedFrame(1), pacedFrame(2), pacedFrame(3)];
+    for (const f of frames) h.transport.sendAudio(f);
+
+    expect(out.writes).toHaveLength(3);
+    // THE BYTES, not "a function was called".
+    for (let i = 0; i < frames.length; i++) {
+      expect(Array.from(out.writes[i]!)).toEqual(Array.from(frames[i]!));
+    }
+    // ...and still nothing on the data channel: this is a MEDIA path.
+    expect(ch.sent.length).toBe(sentBefore);
+  });
+
+  it('24 kHz END TO END: frames pass through unresampled, and the rate is never 16 kHz', async () => {
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({ mediaCapable: true, createOutboundAudioSink: out.factory });
+    await startConnected(h);
+
+    // 480 samples IS one 20 ms frame at 24 kHz (protocol SAMPLE_RATE). A
+    // resample to 16 kHz would arrive as 320 and quietly corrupt every latency
+    // figure derived downstream — AGENTS.md: OpenAI rejects 16 kHz outright.
+    expect(OUTBOUND_SAMPLE_RATE).toBe(24_000);
+    expect(OUTBOUND_SAMPLE_RATE).not.toBe(16_000);
+
+    h.transport.sendAudio(pacedFrame(9, 480));
+    expect(out.writes[0]!.length).toBe(480);
+  });
+
+  it('PACING STAYS 1x: one write per frame, at the instant it was handed over — never batched or flushed ahead', async () => {
+    // A transport that accumulated frames and released them in a burst would
+    // still deliver every sample and would still LOOK like it worked, while
+    // invalidating VAD and every latency number the run reports.
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const out = makeFakeOutboundSink();
+      const h = makeHarness({ mediaCapable: true, createOutboundAudioSink: out.factory });
+      await h.transport.start(h.config);
+
+      const expectedTimes: number[] = [];
+      for (let k = 0; k < 5; k++) {
+        if (k > 0) await vi.advanceTimersByTimeAsync(20);
+        h.transport.sendAudio(pacedFrame(k));
+        expectedTimes.push(k * 20);
+        // The count after EVERY frame: no frame may be withheld for later.
+        expect(out.writes).toHaveLength(k + 1);
+      }
+      // Let any hidden drain timer fire; nothing extra may appear.
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(out.writes).toHaveLength(5);
+      expect(out.writeTimes).toEqual(expectedTimes);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('frames sent before start() and after stop() reach no sink', async () => {
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({ mediaCapable: true, createOutboundAudioSink: out.factory });
+
+    h.transport.sendAudio(pacedFrame(0)); // no connection yet
+    expect(out.writes).toHaveLength(0);
+
+    await startConnected(h);
+    h.transport.sendAudio(pacedFrame(1));
+    h.transport.stop();
+    h.transport.sendAudio(pacedFrame(2));
+
+    expect(out.writes).toHaveLength(1);
+  });
+
+  it('stop() RELEASES the outbound sink, exactly once', async () => {
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({ mediaCapable: true, createOutboundAudioSink: out.factory });
+    await startConnected(h);
+
+    expect(out.state.closed).toBe(0);
+    h.transport.stop();
+    expect(out.state.closed).toBe(1);
+    h.transport.stop(); // idempotent
+    expect(out.state.closed).toBe(1);
+  });
+});
+
+describe('RealtimeTransport ticket 043 REGRESSION GUARDS', () => {
+  it('REGRESSION GUARD (LIVE): a real mic stream still supplies the tracks, and NO synthesized track competes', async () => {
+    // Live must be byte-for-byte what it was: the mic rides the media track.
+    // A second, silent, synthesized track on the same connection would be sent
+    // alongside it — and `sendAudio`, which the Live controller fans mic frames
+    // into, would double the microphone onto the wire.
+    const out = makeFakeOutboundSink();
+    const mic = micStream('mic-a', 'mic-b');
+    const h = makeHarness({
+      mediaCapable: true,
+      getMediaStream: () => mic,
+      createOutboundAudioSink: out.factory,
+    });
+    await startConnected(h);
+
+    const pc = mediaPc(h);
+    expect(pc.added.map((a) => a.track)).toEqual(mic.tracks);
+    expect(pc.added.map((a) => a.stream)).toEqual([mic, mic]);
+    expect(pc.added.map((a) => a.track)).not.toContain(out.track);
+    expect(pc.transceivers).toEqual([]);
+    // The sink is never even BUILT under a mic: no context, no track, no writes.
+    expect(out.state.built).toBe(0);
+
+    h.transport.sendAudio(pacedFrame(1));
+    expect(out.writes).toHaveLength(0);
+  });
+
+  it('REGRESSION GUARD: a fake implementing NEITHER addTrack NOR addTransceiver still connects and maps events', async () => {
+    // The default FakePc is untouched by this ticket, sink or no sink.
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({ createOutboundAudioSink: out.factory });
+    const ch = await startConnected(h);
+
+    expect(h.pcs[0]).not.toBeInstanceOf(FakeMediaPc);
+    expect(h.states.map((s) => s.state)).toContain('connected');
+    expect(() => h.transport.sendAudio(pacedFrame(1))).not.toThrow();
+
+    ch.emitEvent({ type: 'response.output_audio_transcript.done', transcript: 'Hola' });
+    ch.emitEvent({ type: 'response.done', response: { usage: {} } });
+    expect(h.target).toHaveLength(1);
+    expect(h.completes).toHaveLength(1);
+    expect(h.errors).toHaveLength(0);
+  });
+
+  it('REGRESSION GUARD (040): the inbound track path is untouched when an outbound sink is present', async () => {
+    const inbound = makeFakeSink();
+    const out = makeFakeOutboundSink();
+    const h = makeHarness({
+      mediaCapable: true,
+      remoteAudioSink: inbound.sink,
+      createOutboundAudioSink: out.factory,
+    });
+    const ch = await startConnected(h);
+
+    const stream = fakeStream('remote');
+    mediaPc(h).emitTrack(audioTrackEvent(stream));
+    h.clock.t = 9100;
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+
+    expect(inbound.attached).toEqual([stream]);
+    expect(h.timings).toContainEqual(
+      expect.objectContaining({ event: 'audio_queued', t: 9100, utt: 0 }),
+    );
   });
 });
