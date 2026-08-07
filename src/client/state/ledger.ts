@@ -441,6 +441,54 @@ export function isAggregatableRun(run: Run): boolean {
   return isRealRun(run);
 }
 
+/* -------------------------------------------------------------------------
+ * TICKET 032 — THE MEASURED ATOM IS THE UTTERANCE, NOT THE RUN.
+ *
+ * A Run is the CONTAINER that produced a set of utterance records; it is not
+ * itself a measurement. Every aggregate therefore expands each Run into its
+ * samples first, and applies the gate to each sample THROUGH ITS PARENT RUN —
+ * a record inherits its Run's origin, status and DERIVED arm, and can never
+ * out-vote them.
+ *
+ * `isAggregatableRun` is deliberately UNCHANGED; these sit beside it.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * One measured atom. `utterance` is absent for a Run that carries no records
+ * (a mic run, a pre-031 run, a segmentation-mismatch run) — such a Run yields
+ * exactly ONE sample, today's Run-level one, so no figure moves for a ledger
+ * with no manifest-backed runs.
+ */
+export interface RunSample {
+  run: Run;
+  /** The record this sample came from; absent for a Run-level fallback. */
+  utterance?: RunUtterance;
+  /** DERIVED from the parent Run. A record never names its own arm. */
+  arm: ArmTag;
+  utteranceId?: string;
+  category?: CorpusCategory;
+  /** The record's status, or the Run's when there is no record. */
+  status: RunStatus;
+  /** audio_queued − speech_end, both from the SAME level. Null when either is absent. */
+  latencyMs: number | null;
+  /** The record's split of the Run cost, or the whole Run cost. */
+  cost: number;
+}
+
+/** Every measured atom of one Run, in manifest order. Never empty. */
+export function runSamples(_run: Run): RunSample[] {
+  throw new Error('TICKET 032: runSamples is not implemented');
+}
+
+/**
+ * The gate, one level down. A record is aggregatable iff its PARENT RUN passes
+ * `isAggregatableRun` and the record itself completed. Called with no record it
+ * is exactly `isAggregatableRun`.
+ */
+export function isAggregatableUtterance(_run: Run, _utterance?: RunUtterance): boolean {
+  throw new Error('TICKET 032: isAggregatableUtterance is not implemented');
+}
+
 /**
  * True iff the record is "real" per the realness rule (no fixture provider,
  * corpusId not placeholder-prefixed, arm not 'fixture').

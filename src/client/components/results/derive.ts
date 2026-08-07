@@ -193,8 +193,23 @@ export type AnnotatedRun = Run & { annotations?: RunAnnotations };
 
 /** PRD §8: every figure carries its origin. A number without one is a claim. */
 export interface Provenance {
-  /** Distinct utterances behind the figure. */
+  /**
+   * Distinct utterances behind the figure — the count of distinct
+   * `RunUtterance.utteranceId` the arm ATTEMPTED over its gate-passing Runs
+   * (falling back to `annotations.utteranceId`, then `recordingId`, for a Run
+   * carrying no records). An utterance that failed is still one utterance.
+   *
+   * NEVER a rep count: 4 utterances × 5 reps is `utteranceCount` 4 and
+   * `completedReps` 5, never 20 of anything.
+   */
   utteranceCount: number;
+  /**
+   * TICKET 032 — samples the arm ATTEMPTED at record level: complete + failed.
+   * `ExperimentArmAggregate.n` counts only the complete ones, so the gap
+   * between the two is exactly the utterances that produced no output audio.
+   * For a ledger with no manifest-backed runs this equals `n`.
+   */
+  attemptedSamples: number;
   /** ACTUAL reps that completed. NEVER the intended count. */
   completedReps: number;
   /** Reps the sweep set out to run. */
@@ -401,6 +416,8 @@ function buildProvenance(
 
   return {
     utteranceCount,
+    // TICKET 032 STUB — implemented by the record-level aggregation.
+    attemptedSamples: 0,
     completedReps,
     intendedReps,
     endpointingMs: PINNED_ENDPOINTING_MS,

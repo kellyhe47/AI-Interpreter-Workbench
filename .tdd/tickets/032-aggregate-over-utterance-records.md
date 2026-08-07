@@ -6,7 +6,7 @@ source: v3-corpus
 depends_on: [031]
 touches: [src/client/components/results/derive.ts, src/client/state/ledger.ts, src/client/views/ResultsView.tsx]
 iterations: 0
-test_files: []
+test_files: [src/client/components/results/derive.utterances.test.ts, src/client/views/ResultsView.category.test.tsx]
 branch: ""
 ---
 

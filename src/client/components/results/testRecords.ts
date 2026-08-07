@@ -14,6 +14,17 @@
  *   seedCategorySweep     — categories DISTRIBUTED across two recordings
  *   seedComparisonSweep   — Arms A / B / C for exp1 and exp2
  *   seedLiveSessions      — LiveSessions only, never pooled with Runs
+ *
+ * Ticket 032 adds the MANIFEST-BACKED fixtures — Runs that carry
+ * `utterances: RunUtterance[]`, where the measured atom is the record and not
+ * the Run:
+ *   seedCorpusSweep           — PRD §8's headline: 3 recordings × 4 utterances
+ *                               × 5 reps = 60 samples for one arm, all six
+ *                               categories distributed across the recordings
+ *   seedFailedUtteranceSweep  — one utterance fails in 2 of its 5 reps while
+ *                               every Run stays 'complete'
+ *   seedCorpusExclusionCases  — one EXCLUDED Run per reason, each carrying fat
+ *                               utterance records that must never be counted
  */
 
 import {
@@ -21,7 +32,13 @@ import {
   REALTIME_MODEL,
   type ProviderTriple,
 } from '../../../core/arms';
-import type { LiveSession, Recording, RunLedger } from '../../state/ledger';
+import type { CorpusUtterance } from '../../../core/corpus';
+import type {
+  LiveSession,
+  Recording,
+  RunLedger,
+  RunUtterance,
+} from '../../state/ledger';
 import type { AnnotatedRun, UtteranceCategory } from './derive';
 
 /** 2026-01-05T12:00:00Z — makes every derived date assertion deterministic. */
@@ -385,6 +402,385 @@ export function seedComparisonSweep(ledger: RunLedger): void {
       );
     });
   }
+}
+
+/* ------------------------------------------- ticket 032: utterance records -- */
+
+/**
+ * PRD §8's headline packaging for ONE arm and one direction:
+ * 3 Recordings × 4 utterances × 5 reps = 60 samples. The Runs number 15; the
+ * SAMPLES number 60, and every fixture figure below is chosen so the two
+ * answers differ in every position.
+ */
+export const CORPUS_RECORDING_IDS = ['rec-corpus-1', 'rec-corpus-2', 'rec-corpus-3'] as const;
+export const CORPUS_UTTERANCES_PER_RECORDING = 4;
+export const CORPUS_REPS = 5;
+/** 3 × 4 × 5. The number PRD §8 reports for an arm. */
+export const CORPUS_SAMPLES_PER_ARM = 60;
+/** §8 "By Recording — 20 samples (4 utterances × 5 reps)". */
+export const CORPUS_SAMPLES_PER_RECORDING = 20;
+/** 2 utterances per category × 5 reps. */
+export const CORPUS_SAMPLES_PER_CATEGORY = 10;
+/** 3 × 4 — the honest `utteranceCount`, NEVER the recording count. */
+export const CORPUS_DISTINCT_UTTERANCES = 12;
+/** Runs, not samples. `runCount` is 5 per recording; `n` is 20. */
+export const CORPUS_RUNS_PER_RECORDING = CORPUS_REPS;
+export const CORPUS_RUN_COUNT = 15;
+
+export const CORPUS_RECORDING_DURATION_MS = 20_000;
+/** Whole-clip Run cost. The four record costs sum back to it EXACTLY. */
+export const CORPUS_RUN_COST_USD = 0.004;
+export const CORPUS_UTTERANCE_COST_USD = 0.001;
+/** 60 × $0.001 — identically 15 × $0.004. Splitting must not move money. */
+export const CORPUS_ARM_COST_USD = 0.06;
+export const CORPUS_RECORDING_COST_USD = 0.02;
+export const CORPUS_CATEGORY_COST_USD = 0.01;
+/** 15 Runs × 20 s = 5 audio minutes; $0.06 / 5. Unchanged by the split. */
+export const CORPUS_COST_PER_MINUTE_USD = 0.012;
+
+/**
+ * Latency of the `globalIndex`-th corpus utterance on rep `rep`.
+ *
+ * The 100 ms per-utterance step dwarfs the 2 ms per-rep step, so the 60 samples
+ * sort into 12 contiguous blocks of 5 and every percentile below is exact and
+ * hand-checkable.
+ */
+export function corpusLatencyMs(globalIndex: number, rep: number): number {
+  return 500 + 100 * globalIndex + 2 * (rep - 1);
+}
+
+/**
+ * The 12 utterances, in manifest order. PRD §9: categories are DISTRIBUTED
+ * across the recordings, never grouped — each of the six appears exactly twice,
+ * on two DIFFERENT recordings, so no per-category figure is reconstructible
+ * from any per-recording figure.
+ */
+export const CORPUS_LAYOUT: ReadonlyArray<{
+  /** 1..12, across the whole corpus. Drives the latency formula. */
+  globalIndex: number;
+  recordingId: string;
+  /** 1-based WITHIN the recording — this is `RunUtterance.index`. */
+  index: number;
+  utteranceId: string;
+  category: UtteranceCategory;
+}> = (
+  [
+    'short-reply',
+    'long-compound',
+    'numbers-dates',
+    'proper-nouns',
+    'disfluency',
+    'interruption',
+    'short-reply',
+    'long-compound',
+    'numbers-dates',
+    'proper-nouns',
+    'disfluency',
+    'interruption',
+  ] as UtteranceCategory[]
+).map((category, i) => ({
+  globalIndex: i + 1,
+  recordingId: CORPUS_RECORDING_IDS[Math.floor(i / CORPUS_UTTERANCES_PER_RECORDING)]!,
+  index: (i % CORPUS_UTTERANCES_PER_RECORDING) + 1,
+  utteranceId: `cu-${i + 1}`,
+  category,
+}));
+
+/** The six categories, in the order the layout first introduces them. */
+export const CORPUS_CATEGORY_EXPECTATIONS: ReadonlyArray<{
+  category: UtteranceCategory;
+  p50Ms: number;
+  p95Ms: number;
+}> = [
+  { category: 'short-reply', p50Ms: 608, p95Ms: 1208 },
+  { category: 'long-compound', p50Ms: 708, p95Ms: 1308 },
+  { category: 'numbers-dates', p50Ms: 808, p95Ms: 1408 },
+  { category: 'proper-nouns', p50Ms: 908, p95Ms: 1508 },
+  { category: 'disfluency', p50Ms: 1008, p95Ms: 1608 },
+  { category: 'interruption', p50Ms: 1108, p95Ms: 1708 },
+];
+
+/** §8's "20 samples" per recording, and the percentiles over exactly those. */
+export const CORPUS_RECORDING_EXPECTATIONS: ReadonlyArray<{
+  recordingId: string;
+  p50Ms: number;
+  p95Ms: number;
+}> = [
+  { recordingId: 'rec-corpus-1', p50Ms: 708, p95Ms: 906 },
+  { recordingId: 'rec-corpus-2', p50Ms: 1108, p95Ms: 1306 },
+  { recordingId: 'rec-corpus-3', p50Ms: 1508, p95Ms: 1706 },
+];
+
+/** Nearest rank over the 60 records: 30th and 57th. */
+export const CORPUS_ARM_P50_MS = 1108;
+export const CORPUS_ARM_P95_MS = 1702;
+
+/**
+ * WHAT AGGREGATING PER-RUN WOULD PRODUCE INSTEAD — the wrong answer, named so a
+ * test can assert it is absent. Each Run's own `timings` keeps TODAY's
+ * semantics (ticket 031: first output audio overall), so a per-Run aggregate
+ * sees 15 samples drawn from the FIRST utterance of each clip.
+ */
+export const CORPUS_RUN_LEVEL_N = 15;
+export const CORPUS_RUN_LEVEL_P50_MS = 1004;
+export const CORPUS_RUN_LEVEL_P95_MS = 1408;
+
+/** A complete utterance record. Every 032 fixture is this minus one thing. */
+export function makeUtteranceRecord(overrides: Partial<RunUtterance> = {}): RunUtterance {
+  return {
+    utteranceId: 'cu-1',
+    index: 1,
+    category: 'short-reply',
+    timings: { speech_end: T0, audio_queued: T0 + 800 },
+    transcripts: { source: 'hello', target: 'hola' },
+    cost: CORPUS_UTTERANCE_COST_USD,
+    status: 'complete',
+    errors: [],
+    ...overrides,
+  };
+}
+
+/** The manifest a corpus Recording carries (ticket 030). */
+function corpusManifest(recordingId: string): CorpusUtterance[] {
+  return CORPUS_LAYOUT.filter((u) => u.recordingId === recordingId).map((u) => ({
+    id: u.utteranceId,
+    index: u.index,
+    category: u.category,
+    trueSpeechEndMs: 4_000 * u.index,
+    referenceText: `reference ${u.utteranceId}`,
+  }));
+}
+
+/**
+ * PRD §8's 60 samples for Arm B: 3 Recordings × 4 utterances × 5 reps.
+ *
+ * Each record's `speech_end` is its OWN manifest anchor and its `audio_queued`
+ * is that anchor plus the record's latency, so an implementation that pairs the
+ * Run's `speech_end` with a record's `audio_queued` derives nonsense rather
+ * than a plausible number.
+ */
+export function seedCorpusSweep(ledger: RunLedger): void {
+  for (const recordingId of CORPUS_RECORDING_IDS) {
+    ledger.appendRecording(
+      makeRecordingEntity({
+        id: recordingId,
+        label: `${recordingId} take`,
+        durationMs: CORPUS_RECORDING_DURATION_MS,
+        speechEndMs: CORPUS_RECORDING_DURATION_MS - 1_000,
+        utterances: corpusManifest(recordingId),
+        corpusVersion: CORPUS_VERSION,
+      }),
+    );
+  }
+
+  for (const recordingId of CORPUS_RECORDING_IDS) {
+    const layout = CORPUS_LAYOUT.filter((u) => u.recordingId === recordingId);
+    const firstGlobalIndex = layout[0]!.globalIndex;
+    for (let rep = 1; rep <= CORPUS_REPS; rep += 1) {
+      ledger.appendRun(
+        makeRunEntity({
+          id: `run-corpus-${recordingId}-${rep}`,
+          recordingId,
+          cost: CORPUS_RUN_COST_USD,
+          // TODAY's Run-level semantics, pinned by ticket 031: first output
+          // audio OVERALL, i.e. the first utterance's.
+          timings: {
+            speech_end: T0,
+            audio_queued: T0 + corpusLatencyMs(firstGlobalIndex, rep),
+          },
+          // No utteranceId and no category here on purpose: both are now
+          // derivable from the records, and a derivation still reading the
+          // annotation envelope reports 3 utterances instead of 12.
+          annotations: { repIndex: rep, corpusVersion: CORPUS_VERSION },
+          utterances: layout.map((u) => {
+            const speechEnd = T0 + 4_000 * u.index;
+            return makeUtteranceRecord({
+              utteranceId: u.utteranceId,
+              index: u.index,
+              category: u.category,
+              timings: {
+                speech_end: speechEnd,
+                audio_queued: speechEnd + corpusLatencyMs(u.globalIndex, rep),
+              },
+              transcripts: { source: `src ${u.utteranceId}`, target: `tgt ${u.utteranceId}` },
+              cost: CORPUS_UTTERANCE_COST_USD,
+            });
+          }),
+        }),
+      );
+    }
+  }
+}
+
+/* ------------------------------------------- a failed utterance, live Run -- */
+
+export const FAILED_UTT_RECORDING_ID = 'rec-fail-utt';
+/** The 1-based index of the utterance that produced no output audio. */
+export const FAILED_UTT_INDEX = 2;
+export const FAILED_UTT_CATEGORY: UtteranceCategory = 'long-compound';
+/** It fails in these two reps and succeeds in the other three. */
+export const FAILED_UTT_REPS = [2, 4] as const;
+/** 4 utterances × 5 reps. Every one of them is an ATTEMPT. */
+export const FAILED_UTT_ATTEMPTED_SAMPLES = 20;
+/** 20 attempts minus the 2 that produced no audio. */
+export const FAILED_UTT_N = 18;
+export const FAILED_UTT_DISTINCT_UTTERANCES = 4;
+/** 18 × $0.001. The two failed records' cost is NOT in the figure. */
+export const FAILED_UTT_COST_USD = 0.018;
+/** …while the Runs still cost 5 × $0.004. */
+export const FAILED_UTT_RUN_COST_TOTAL_USD = 0.02;
+/** The surviving reps 1, 3, 5 of the failing utterance: 700 / 704 / 708. */
+export const FAILED_UTT_CATEGORY_N = 3;
+export const FAILED_UTT_CATEGORY_P50_MS = 704;
+export const FAILED_UTT_CATEGORY_P95_MS = 708;
+
+/**
+ * TICKET 027's RULE, ONE LEVEL DOWN. An utterance that produced no output audio
+ * is `status: 'failed'` with `audio_queued: null` — and it does NOT fail its
+ * Run. Every Run here is `complete` and gate-passing; only two of its twenty
+ * records are not measurements.
+ */
+export function seedFailedUtteranceSweep(ledger: RunLedger): void {
+  const layout = CORPUS_LAYOUT.slice(0, CORPUS_UTTERANCES_PER_RECORDING);
+  ledger.appendRecording(
+    makeRecordingEntity({
+      id: FAILED_UTT_RECORDING_ID,
+      label: 'clip with a silent utterance',
+      durationMs: CORPUS_RECORDING_DURATION_MS,
+      speechEndMs: CORPUS_RECORDING_DURATION_MS - 1_000,
+      utterances: corpusManifest(CORPUS_RECORDING_IDS[0]).map((u) => ({
+        ...u,
+        id: `fu-${u.index}`,
+      })),
+      corpusVersion: CORPUS_VERSION,
+    }),
+  );
+
+  for (let rep = 1; rep <= CORPUS_REPS; rep += 1) {
+    ledger.appendRun(
+      makeRunEntity({
+        id: `run-failutt-${rep}`,
+        recordingId: FAILED_UTT_RECORDING_ID,
+        cost: CORPUS_RUN_COST_USD,
+        status: 'complete',
+        timings: { speech_end: T0, audio_queued: T0 + corpusLatencyMs(1, rep) },
+        annotations: { repIndex: rep, corpusVersion: CORPUS_VERSION },
+        utterances: layout.map((u) => {
+          const failed =
+            u.index === FAILED_UTT_INDEX && (FAILED_UTT_REPS as readonly number[]).includes(rep);
+          const speechEnd = T0 + 4_000 * u.index;
+          return makeUtteranceRecord({
+            utteranceId: `fu-${u.index}`,
+            index: u.index,
+            category: u.category,
+            timings: {
+              speech_end: speechEnd,
+              audio_queued: failed ? null : speechEnd + corpusLatencyMs(u.globalIndex, rep),
+            },
+            transcripts: failed ? {} : { source: 'src', target: 'tgt' },
+            cost: CORPUS_UTTERANCE_COST_USD,
+            status: failed ? 'failed' : 'complete',
+            errors: failed ? ['no output audio'] : [],
+          });
+        }),
+      }),
+    );
+  }
+}
+
+/* ------------------------------ the gate, applied through the parent Run -- */
+
+export const CORPUS_EXCLUSION_RECORDING_IDS = {
+  'ad-hoc': 'rec-cx-adhoc',
+  manual: 'rec-cx-manual',
+  failed: 'rec-cx-failed',
+  fixture: 'rec-cx-fixture',
+} as const;
+
+/**
+ * One EXCLUDED Run per reason, each carrying four fat utterance records. A
+ * record inherits its parent Run's origin / status / derived arm, so none of
+ * these twelve-hundred-millisecond-nothing records may reach a figure — and
+ * every one of them is loud enough ($0.500, 5.00 s) that a leak is visible.
+ */
+export function seedCorpusExclusionCases(ledger: RunLedger): void {
+  const layout = CORPUS_LAYOUT.slice(0, CORPUS_UTTERANCES_PER_RECORDING);
+  const records = (): RunUtterance[] =>
+    layout.map((u) =>
+      makeUtteranceRecord({
+        utteranceId: `cx-${u.index}`,
+        index: u.index,
+        category: u.category,
+        timings: { speech_end: T0, audio_queued: T0 + EXCLUDED_LATENCY_MS },
+        cost: EXCLUDED_COST_USD,
+      }),
+    );
+
+  for (const [reason, id] of Object.entries(CORPUS_EXCLUSION_RECORDING_IDS)) {
+    ledger.appendRecording(
+      makeRecordingEntity({
+        id,
+        label: `${reason} corpus clip`,
+        durationMs: CORPUS_RECORDING_DURATION_MS,
+        utterances: corpusManifest(CORPUS_RECORDING_IDS[0]).map((u) => ({
+          ...u,
+          id: `cx-${u.index}`,
+        })),
+      }),
+    );
+  }
+
+  // (1) DERIVED tag 'ad-hoc' — a legal triple that is no frozen arm.
+  ledger.appendRun(
+    makeRunEntity({
+      id: 'run-cx-adhoc',
+      recordingId: CORPUS_EXCLUSION_RECORDING_IDS['ad-hoc'],
+      providerTriple: { ...OFF_ARM_TRIPLE },
+      modelSnapshots: { ...OFF_ARM_TRIPLE },
+      armTag: 'B',
+      cost: EXCLUDED_COST_USD,
+      timings: { speech_end: T0, audio_queued: T0 + EXCLUDED_LATENCY_MS },
+      annotations: { repIndex: 1, corpusVersion: CORPUS_VERSION },
+      utterances: records(),
+    }),
+  );
+  // (2) origin 'manual'.
+  ledger.appendRun(
+    makeRunEntity({
+      id: 'run-cx-manual',
+      recordingId: CORPUS_EXCLUSION_RECORDING_IDS.manual,
+      origin: 'manual',
+      cost: EXCLUDED_COST_USD,
+      timings: { speech_end: T0, audio_queued: T0 + EXCLUDED_LATENCY_MS },
+      annotations: { repIndex: 1, corpusVersion: CORPUS_VERSION },
+      utterances: records(),
+    }),
+  );
+  // (3) status 'failed' — its records are complete, which is the trap.
+  ledger.appendRun(
+    makeRunEntity({
+      id: 'run-cx-failed',
+      recordingId: CORPUS_EXCLUSION_RECORDING_IDS.failed,
+      status: 'failed',
+      errors: ['stt stage disconnected'],
+      cost: EXCLUDED_COST_USD,
+      timings: { speech_end: T0, audio_queued: T0 + EXCLUDED_LATENCY_MS },
+      annotations: { repIndex: 1, corpusVersion: CORPUS_VERSION },
+      utterances: records(),
+    }),
+  );
+  // (4) fixture-sourced.
+  ledger.appendRun(
+    makeRunEntity({
+      id: 'run-cx-fixture',
+      recordingId: CORPUS_EXCLUSION_RECORDING_IDS.fixture,
+      modelSnapshots: { ...ARM_B_TRIPLE, tts: 'fixture' },
+      cost: EXCLUDED_COST_USD,
+      timings: { speech_end: T0, audio_queued: T0 + EXCLUDED_LATENCY_MS },
+      annotations: { repIndex: 1, corpusVersion: CORPUS_VERSION },
+      utterances: records(),
+    }),
+  );
 }
 
 /* --------------------------------------------------------- live sessions -- */
