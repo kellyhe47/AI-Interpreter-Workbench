@@ -24,12 +24,41 @@
  *    experiment cards read sweep Runs and only sweep Runs. Either can be empty
  *    while the other has data, and each carries its own empty note.
  *
- * NOT-YET-DERIVABLE METRICS ARE SAID OUT LOUD. WER needs the real corpus and
- * adequacy / fluency need blind scoring; the observable-interval count has no
- * derivation yet and this component is not allowed to invent one. Those cells
- * read 'not yet measured' — never a zero, never a figure. Arm A's WER cell is
- * additionally marked a sidecar measurement, because a speech-to-speech arm
- * has no transcript of its own to score.
+ * NOT-YET-DERIVABLE METRICS ARE SAID OUT LOUD. Adequacy / fluency need blind
+ * scoring and the observable-interval count has no derivation yet, and this
+ * component is not allowed to invent one. Those cells read 'not yet measured' —
+ * never a zero, never a figure. Arm A's WER cell is additionally marked a
+ * sidecar measurement, because a speech-to-speech arm has no transcript of its
+ * own to score.
+ *
+ * TICKET 042 — WER REACHES THE SCREEN, AND IT IS STILL NOT COMPUTED HERE.
+ *
+ * Ticket 034 derived WER per arm and per (category × arm) and this view dropped
+ * both on the floor, hardcoding 'not yet measured' into the exp 1 WER cells.
+ * They now render `deriveWerByArm[arm].cell` and the by-category table gains a
+ * `[data-category-wer]` column from `deriveWerByCategory`, joined to its row on
+ * (category × arm) — never on the category alone, which would silently pick
+ * whichever arm was appended first.
+ *
+ * THE CELL STRING IS THE DERIVATION'S, VERBATIM. `WerAggregate.cell` already
+ * applies the precedence "a percentage when anything scored, else
+ * `not applicable`, else `not yet measured`", so this view never inspects
+ * `meanWer`, never formats a percentage, and cannot invent a zero. That is what
+ * keeps the three distinct claims apart at the only layer an operator reads:
+ *
+ *   a zero percentage   the arm was PERFECT
+ *   `not applicable`    the measurement is IMPOSSIBLE (PRD §9: Cantonese is
+ *                       improvised from English prompt cards, so no reference)
+ *   `not yet measured`  the measurement HAS NOT BEEN TAKEN
+ *
+ * The only string this file adds is the SIDECAR SUFFIX on column a, which is
+ * provenance rather than a figure: a speech-to-speech arm has no transcript of
+ * its own whether or not a sidecar pass has produced a number yet, so
+ * `data-sidecar` and the suffix stay on that cell in every state.
+ *
+ * An arm (or a category × arm) with no aggregate at all falls back to the
+ * literals above — `deriveWerByArm` yields nothing for a Run carrying no
+ * per-utterance records, because WER is keyed by (runId, utteranceId).
  *
  * DOM contract (locked by ResultsView.test.tsx):
  *
@@ -53,6 +82,7 @@
  *   [data-observation]             coverage per-cell observation note
  *   [data-time-to-add]             one of the three time-to-add tiles
  *   [data-category-row][data-category="<category>"][data-n="<n>"]
+ *   [data-category-wer]            ticket 042 — that row's WER cell
  *   [data-recording-row][data-recording="<id>"][data-arm][data-excluded]
  *   [data-failed-count][data-run-count]  on a recording row, ONLY when the
  *                                        group absorbed a failed run
@@ -84,8 +114,11 @@
 import { useEffect, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { armLabel, type ArmTag } from '../../core/arms';
 import {
+  WER_NOT_MEASURED_CELL,
   deriveComparison,
   deriveLiveModel,
+  deriveWerByArm,
+  deriveWerByCategory,
   formatMs,
   formatUsd,
   groupByCategory,
@@ -96,6 +129,8 @@ import {
   type LiveModel,
   type RecordingGroupRow,
   type Tone,
+  type WerAggregate,
+  type WerCategoryRow,
 } from '../components/results/derive';
 import { hydrateLedger, type LedgerHydrationSource } from '../state/hydrateLedger';
 import type { RunLedger } from '../state/ledger';
@@ -154,8 +189,18 @@ const FAILED_SUBLINE =
  */
 const NOT_MEASURED = 'not yet measured';
 
-/** Arm A has no transcript of its own — its WER comes from a sidecar pass. */
-const NOT_MEASURED_SIDECAR = `${NOT_MEASURED} (sidecar transcript)`;
+/**
+ * Arm A has no transcript of its own, so whatever its WER cell says, it says it
+ * ABOUT A SIDECAR PASS. PROVENANCE, NOT A FIGURE: the suffix is appended in
+ * every state — including once a real number exists — because the fact it
+ * states is true in every state. It is the only string this file adds to a WER
+ * cell; the cell itself is always the derivation's.
+ */
+const SIDECAR_SUFFIX = ' (sidecar transcript)';
+
+function withSidecarProvenance(cell: string): string {
+  return `${cell}${SIDECAR_SUFFIX}`;
+}
 
 const EXP1_EYEBROW = 'Experiment 1 · vendor held constant';
 const EXP1_TITLE = 'Does the architecture itself cost latency?';
@@ -280,7 +325,8 @@ function gridStyle(columns: string, first: boolean): CSSProperties {
 /** Comparison and live grids share a shape: label column plus three values. */
 const METRIC_COLUMNS = '1.5fr 1fr 1fr 1fr';
 const COVERAGE_COLUMNS = '1.5fr 1fr 1fr 1fr 1fr';
-const CATEGORY_COLUMNS = '1.5fr .8fr .5fr 1fr 1fr 1fr';
+/** Ticket 042 added the seventh track: the by-category WER cell. */
+const CATEGORY_COLUMNS = '1.5fr .8fr .5fr 1fr 1fr 1fr 1fr';
 const RECORDING_COLUMNS = '1.3fr 1.6fr .6fr .8fr .5fr .8fr .8fr .8fr 1.4fr';
 
 /* -------------------------------------------------------------- fragments -- */
@@ -343,8 +389,20 @@ function ComparisonCard(props: {
   model: ComparisonModel | null;
   /** True when column A is a speech-to-speech arm, whose WER is a sidecar. */
   sidecarWer: boolean;
+  /**
+   * TICKET 042 — `deriveWerByArm`'s output, passed in rather than derived here
+   * so this component stays a renderer of one model. An arm with no
+   * WER-bearing atom is simply absent from it.
+   */
+  werByArm: { [arm: string]: WerAggregate };
 }): ReactElement {
   const { model } = props;
+
+  // The DERIVATION'S cell, verbatim, or the absence literal when the arm has no
+  // aggregate at all. Never `meanWer`, never a percentage formatted here — the
+  // precedence between a figure, `not applicable` and `not yet measured` is
+  // decided in derive.ts and nowhere else.
+  const werCell = (arm: ArmTag): string => props.werByArm[arm]?.cell ?? WER_NOT_MEASURED_CELL;
 
   return (
     <Card card={props.card} eyebrow={props.eyebrow} title={props.title}>
@@ -387,17 +445,19 @@ function ComparisonCard(props: {
 
             <div data-metric="wer" style={gridStyle(METRIC_COLUMNS, false)}>
               <div style={labelCellStyle}>word error rate</div>
+              {/* `data-sidecar` and the suffix are PROVENANCE and stay on this
+                  cell whether or not a sidecar pass has produced a number. */}
               {props.sidecarWer ? (
                 <div data-col="a" data-sidecar="" style={cellStyle}>
-                  {NOT_MEASURED_SIDECAR}
+                  {withSidecarProvenance(werCell(props.armA))}
                 </div>
               ) : (
                 <div data-col="a" style={cellStyle}>
-                  {NOT_MEASURED}
+                  {werCell(props.armA)}
                 </div>
               )}
               <div data-col="b" style={cellStyle}>
-                {NOT_MEASURED}
+                {werCell(props.armB)}
               </div>
               <div data-col="delta" style={cellStyle}>
                 {model.werCell}
@@ -653,7 +713,19 @@ function CoverageCard(): ReactElement {
 
 /* ------------------------------------------------------------ secondary -- */
 
-function CategoryCard(props: { rows: CategoryGroupRow[] }): ReactElement {
+/**
+ * TICKET 042 — the by-category WER cell, joined to its row on the PAIR
+ * (category × arm). A category-only lookup would silently pick whichever arm
+ * was appended first, and report one arm's transcription quality under
+ * another's row.
+ */
+function CategoryCard(props: { rows: CategoryGroupRow[]; werRows: WerCategoryRow[] }): ReactElement {
+  const werByPair = new Map(props.werRows.map((row) => [`${row.category}|${row.arm}`, row]));
+  // The derivation's cell, verbatim, or the absence literal when this pair has
+  // no WER-bearing atom — never a zero, and never recomputed here.
+  const werCell = (row: CategoryGroupRow): string =>
+    werByPair.get(`${row.category}|${row.arm}`)?.cell ?? WER_NOT_MEASURED_CELL;
+
   return (
     <section data-card="category" style={cardStyle}>
       <div data-eyebrow="" style={eyebrowStyle}>
@@ -667,6 +739,7 @@ function CategoryCard(props: { rows: CategoryGroupRow[] }): ReactElement {
           <div style={headerCellStyle}>p50</div>
           <div style={headerCellStyle}>p95</div>
           <div style={headerCellStyle}>cost</div>
+          <div style={headerCellStyle}>WER</div>
         </div>
         {props.rows.map((row) => (
           <div
@@ -687,6 +760,9 @@ function CategoryCard(props: { rows: CategoryGroupRow[] }): ReactElement {
             </div>
             <div style={cellStyle}>{formatMs(row.p95Ms)}</div>
             <div style={cellStyle}>{formatUsd(row.costUsd)}</div>
+            <div data-category-wer="" style={cellStyle}>
+              {werCell(row)}
+            </div>
           </div>
         ))}
       </div>
@@ -990,6 +1066,9 @@ export default function ResultsView(props: ResultsViewProps): ReactElement {
   const recordingRows = groupByRecording(props.ledger);
   const categoryRows = groupByCategory(props.ledger);
   const live = deriveLiveModel(props.ledger);
+  // TICKET 042 — derived ONCE, here, and handed to whichever card renders it.
+  const werByArm = deriveWerByArm(props.ledger);
+  const werRows = deriveWerByCategory(props.ledger);
 
   // Emptiness is decided on real content and on the load, never on record
   // count — and by the shared predicate, so the TopBar's provenance stamp
@@ -1072,6 +1151,7 @@ export default function ResultsView(props: ResultsViewProps): ReactElement {
               armB="B"
               model={exp1}
               sidecarWer
+              werByArm={werByArm}
             />
             <ComparisonCard
               card="exp2"
@@ -1082,13 +1162,14 @@ export default function ResultsView(props: ResultsViewProps): ReactElement {
               armB="C"
               model={exp2}
               sidecarWer={false}
+              werByArm={werByArm}
             />
             <LiveCard model={live} />
             <CoverageCard />
           </>
         ) : (
           <>
-            <CategoryCard rows={categoryRows} />
+            <CategoryCard rows={categoryRows} werRows={werRows} />
             <RecordingCard rows={recordingRows} />
           </>
         )}

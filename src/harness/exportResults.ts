@@ -515,8 +515,14 @@ function summariseWerScores(
   };
 }
 
-/** The four gate clauses of the file header, as one predicate over a Run. */
-function isGatePassingRun(run: Run): boolean {
+/**
+ * The four gate clauses of the file header, as one predicate over a Run.
+ *
+ * EXPORTED (ticket 042) so the post-hoc WER scoring pass can refuse to score a
+ * run this module would refuse to report. Two copies of the gate could drift,
+ * and the drift would be a score written for evidence no figure may cite.
+ */
+export function isGatePassingRun(run: Run): boolean {
   const arm = armOf(run);
   if (arm === 'ad-hoc') return false;
   return isSweptEvidence(run, arm) && run.status === 'complete';
