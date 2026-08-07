@@ -31,7 +31,11 @@
  * ==========================================================================
  */
 
-import type { RecordingsClient, RunsClient } from '../replay/recordingsClient';
+import type {
+  LiveSessionsClient,
+  RecordingsClient,
+  RunsClient,
+} from '../replay/recordingsClient';
 import type { RunLedger } from './ledger';
 
 /**
@@ -41,6 +45,18 @@ import type { RunLedger } from './ledger';
 export interface LedgerHydrationSource {
   recordings: Pick<RecordingsClient, 'list'>;
   runs: Pick<RunsClient, 'list'>;
+  /**
+   * TICKET 041 — the third listing. OPTIONAL: a host that wires no
+   * live-session backend (and every pre-041 test bag) gets exactly today's
+   * behaviour, and the LiveSession store is left untouched.
+   *
+   * When present it is loaded with the other two and under the same rules —
+   * awaited BEFORE anything is appended (atomic on failure) and idempotent on
+   * session id — so Results shows the Live metrics after a reload or on
+   * another machine, which is what makes PRD §17 19i's stability artifact
+   * survive at all.
+   */
+  liveSessions?: Pick<LiveSessionsClient, 'list'>;
 }
 
 /**

@@ -462,6 +462,28 @@ export function isRealLiveSession(session: LiveSession): boolean {
 }
 
 /**
+ * TICKET 041 — the aggregation gate for a LiveSession: the third sibling of
+ * `isAggregatableRun` / `isAggregatableUtterance`.
+ *
+ * A session enters a REPORTED FIGURE only when BOTH hold:
+ *   1. it passes `isRealLiveSession` (ticket 018 — fixtures never report), and
+ *   2. it produced at least one utterance.
+ *
+ * Clause 2 is the "a zero reads as a measurement" rule: most of the operator's
+ * 12 sessions carry `utterances: []` and `totalUsd: 0` — cascade takes that
+ * could never start and Realtime takes stopped before the first turn. Pooling
+ * one into a column adds a session to `sessions`, zero to every latency sample
+ * and zero dollars to the cost, which reads as "we measured a free session"
+ * rather than "nothing happened". It is treated exactly like a failed Run:
+ * STORED, listed and exported — never aggregated.
+ *
+ * STUB (ticket 041): the rule is pinned by liveAggregationGate.test.ts.
+ */
+export function isAggregatableLiveSession(_session: LiveSession): boolean {
+  throw new Error('isAggregatableLiveSession: not implemented (ticket 041)');
+}
+
+/**
  * The aggregation gate (PRD §7, §8, §17 22d): derived armTag is a named arm
  * AND origin === 'sweep' AND status === 'complete' — then the realness rule
  * on top.

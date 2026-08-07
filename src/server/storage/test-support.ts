@@ -8,7 +8,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { BlindComparison, NewRecording, Run } from './types';
+import type { BlindComparison, LiveSession, NewRecording, Run } from './types';
 
 /** Relative paths of the normative layout (PRD §7). */
 export const LAYOUT = {
@@ -25,6 +25,13 @@ export const LAYOUT = {
    * exportResults, so a comparison sharing that file would be counted as a run.
    */
   comparisons: (base: string) => path.join(base, 'comparisons.jsonl'),
+  /**
+   * Ticket 041 — LiveSessions get their OWN append-only file for exactly the
+   * reason comparisons do: `ledger.jsonl` is typed `Run[]` and is unioned into
+   * the exported run set, so a session sharing it would be counted in
+   * `totals.runs` and derived into an arm.
+   */
+  liveSessions: (base: string) => path.join(base, 'live-sessions.jsonl'),
 };
 
 export async function makeTempBase(): Promise<string> {
@@ -80,6 +87,47 @@ export function makeBlindComparison(
     revealedAt: 1_700_000_000_500,
     ...overrides,
   };
+}
+
+/**
+ * Ticket 041 — a complete, REAL, non-empty LiveSession (PRD §7). Cascade on
+ * Arm B's frozen triple with two measured utterances, so the default record
+ * both passes the realness rule and is aggregatable; the zero-utterance and
+ * fixture cases are built by overriding.
+ */
+export function makeLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
+  const triple = { stt: 'gpt-4o-transcribe', mt: 'gpt-4o-mini', tts: 'gpt-4o-mini-tts' };
+  return {
+    id: 'live-1',
+    startedAt: 1_700_000_000_000,
+    endedAt: 1_700_000_300_000,
+    durationMs: 300_000,
+    architecture: 'cascade',
+    providerTriple: { ...triple },
+    contextPolicy: 'n/a',
+    modelSnapshots: { ...triple },
+    utterances: [
+      { id: 'lu-1', timings: { speech_end: 0, audio_queued: 700 }, costUsd: 0.01 },
+      { id: 'lu-2', timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.01 },
+    ],
+    latency: { p50: 700, p95: 900, driftMinute1ToEnd: 40 },
+    cost: { totalUsd: 0.02, perMinuteMinute1: 0.004, perMinuteFinalMinute: 0.005 },
+    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: 18, heapEnd: 21 },
+    quality: { wer: null },
+    ...overrides,
+  };
+}
+
+/** Ticket 041 — the operator's empty take: stored, never aggregated. */
+export function makeEmptyLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
+  return makeLiveSession({
+    id: 'live-empty',
+    utterances: [],
+    latency: { p50: null, p95: null, driftMinute1ToEnd: null },
+    cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
+    stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
+    ...overrides,
+  });
 }
 
 export function makeRun(overrides: Partial<Run> = {}): Run {

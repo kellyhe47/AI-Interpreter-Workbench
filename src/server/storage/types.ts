@@ -143,6 +143,53 @@ export interface BlindComparison {
   revealedAt: number;
 }
 
+/* -------------------------------------------------------------------------
+ * TICKET 041 — the LiveSession, server-side.
+ *
+ * Mirrors src/client/state/ledger.ts's LiveSession field-for-field, for the
+ * same reason the Recording/Run shapes are mirrored: tsconfig.json excludes
+ * src/server from the client program, so neither side may import the other.
+ *
+ * NO AUDIO-BEARING FIELD EXISTS ON THIS SHAPE, BY CONSTRUCTION (PRD §17 19h).
+ * A Live session persists metrics only; there is no `audioBase64`, no
+ * `outputAudioPath`, and no method anywhere that writes bytes for one.
+ * ---------------------------------------------------------------------- */
+
+export interface LiveSessionUtterance {
+  id: string;
+  timings: Record<string, number | null>;
+  costUsd: number;
+}
+
+/** Realtime-only conversation-context policy; 'n/a' for cascade (PRD §17 21a). */
+export type LiveContextPolicy = 'default' | 'trimmed' | 'n/a';
+
+/** PRD §7. `quality.wer` is ALWAYS null in Live — there is no reference text. */
+export interface LiveSession {
+  id: string;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  architecture: Mode;
+  providerTriple?: ProviderTriple;
+  contextPolicy?: LiveContextPolicy;
+  modelSnapshots: Record<string, string>;
+  utterances: LiveSessionUtterance[];
+  latency: { p50: number | null; p95: number | null; driftMinute1ToEnd: number | null };
+  cost: {
+    totalUsd: number;
+    perMinuteMinute1: number | null;
+    perMinuteFinalMinute: number | null;
+  };
+  stability: {
+    utterancesCompleted: number;
+    disconnects: number;
+    heapStart: number | null;
+    heapEnd: number | null;
+  };
+  quality: { wer: null; subjectiveNotes?: string };
+}
+
 /**
  * Every storage failure the route layer has to map surfaces as one of these,
  * distinguished by `code` — never as a raw ENOENT (PRD §12).

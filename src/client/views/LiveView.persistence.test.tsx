@@ -1,0 +1,180 @@
+/**
+ * TICKET 041 — a finished Live session is PERSISTED to the server.
+ *
+ * The operator asked "where are these takes being saved?" and the answer was:
+ * one browser's localStorage. `appendLiveSession` was the only write, so the
+ * stability artifact PRD §17 19i names could not reach `data/`, the exported
+ * bundle, or a second machine.
+ *
+ * THE SEAM (normative): `SessionDeps.liveSessions`, OPTIONAL and narrowed to
+ * `create` — the mirror of what App does for a blind comparison (ticket 023):
+ *
+ *   ledger.appendLiveSession(session)     FIRST and unconditionally
+ *   void deps.liveSessions?.create(session).catch(() => {})
+ *
+ * ORDER AND FAILURE HANDLING ARE LOAD-BEARING. The local write cannot be made
+ * conditional on a reachable server, and a rejected POST costs the server's
+ * copy and nothing else — the operator's take is not deleted because the
+ * backend was down.
+ *
+ * §17 19h IS UNCHANGED: no audio is persisted and no Run record is created.
+ *
+ * ADDITIVE to the locked LiveView.flow.test.tsx.
+ */
+
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { createElement } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import App from '../App';
+import type { LiveSession } from '../state/ledger';
+import {
+  advance,
+  cascadeUtteranceScript,
+  clickStartMicrophone,
+  makeDeps,
+} from './sessionTestKit';
+import type { TestDeps } from './sessionTestKit';
+
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+/** The stored LiveSession's complete key set — no audio-bearing field exists. */
+const SESSION_KEYS = [
+  'architecture',
+  'contextPolicy',
+  'cost',
+  'durationMs',
+  'endedAt',
+  'id',
+  'latency',
+  'modelSnapshots',
+  'providerTriple',
+  'quality',
+  'stability',
+  'startedAt',
+  'utterances',
+];
+
+interface Harness {
+  kit: TestDeps;
+  created: LiveSession[];
+  create: ReturnType<typeof vi.fn>;
+  clock: () => number;
+  setNow: (ms: number) => void;
+}
+
+/** A cascade Live session wired to a recording live-sessions client. */
+function renderLive(opts: { rejecting?: boolean; withClient?: boolean } = {}): Harness {
+  const withClient = opts.withClient ?? true;
+  let t = 0;
+  const created: LiveSession[] = [];
+  const create = vi.fn(async (session: LiveSession) => {
+    created.push(session);
+    if (opts.rejecting) throw new Error('offline');
+    return session;
+  });
+
+  const kit = makeDeps({
+    now: () => t,
+    initialState: { mode: 'cascade' },
+    scripts: { cascade: cascadeUtteranceScript() },
+  });
+  const deps = withClient ? { ...kit.deps, liveSessions: { create } } : kit.deps;
+  render(createElement(App, { deps }));
+
+  return { kit, created, create, clock: () => t, setNow: (ms: number) => (t = ms) };
+}
+
+async function stopAt(harness: Harness, ms: number): Promise<void> {
+  harness.setNow(ms);
+  fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
+  await advance(100);
+}
+
+describe('ticket 041 — stopping a Live session POSTs it to the server', () => {
+  it('AC1: the SAME record the ledger holds is created exactly once', async () => {
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 242_000);
+
+    const stored = h.kit.ledger.getLiveSessions();
+    expect(stored).toHaveLength(1);
+    expect(h.create).toHaveBeenCalledTimes(1);
+    // One session, two stores — not a second, derived copy.
+    expect(h.created).toEqual(stored);
+    expect(h.created[0]!.utterances).toHaveLength(1);
+    expect(h.created[0]!.durationMs).toBe(242_000);
+  });
+
+  it('AC6: the posted record carries NO audio-bearing field', async () => {
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 60_000);
+
+    expect(Object.keys(h.created[0]!).sort()).toEqual(SESSION_KEYS);
+    for (const utterance of h.created[0]!.utterances) {
+      expect(Object.keys(utterance).sort()).toEqual(['costUsd', 'id', 'timings']);
+    }
+  });
+
+  it('AC6: no Run record is created by Live — not locally, not on the server', async () => {
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 60_000);
+
+    expect(h.kit.ledger.getRuns()).toEqual([]);
+    expect(h.kit.ledger.runAggregates()).toEqual({ perArm: {} });
+  });
+
+  it('AC5: a session that produced NOTHING is still posted — stored, not aggregated', async () => {
+    // Stop before any utterance lands: the operator's empty take.
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(5);
+    await stopAt(h, 30_000);
+
+    expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.created[0]!.utterances).toEqual([]);
+    expect(h.created[0]!.cost.totalUsd).toBe(0);
+    expect(h.kit.ledger.getLiveSessions()).toHaveLength(1);
+  });
+
+  it('AC1: the ledger write happens even when the POST rejects', async () => {
+    const h = renderLive({ rejecting: true });
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 60_000);
+
+    // An unreachable server costs the server's copy and nothing else.
+    expect(h.kit.ledger.getLiveSessions()).toHaveLength(1);
+    expect(h.create).toHaveBeenCalledTimes(1);
+    // The rejection is swallowed: the view is still usable afterwards.
+    expect(screen.getByRole('button', { name: 'Start new session' })).toBeInTheDocument();
+  });
+
+  it('a host that supplies no client keeps exactly the old behaviour', async () => {
+    const h = renderLive({ withClient: false });
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 60_000);
+
+    expect(h.kit.ledger.getLiveSessions()).toHaveLength(1);
+    expect(h.create).not.toHaveBeenCalled();
+  });
+
+  it('nothing is posted while the session is still running', async () => {
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+
+    expect(h.create).not.toHaveBeenCalled();
+    expect(h.kit.ledger.getLiveSessions()).toEqual([]);
+  });
+});

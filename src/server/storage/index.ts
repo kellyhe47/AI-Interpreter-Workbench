@@ -59,11 +59,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { StorageError } from './types';
-import type { BlindComparison, NewRecording, Recording, Run } from './types';
+import type { BlindComparison, LiveSession, NewRecording, Recording, Run } from './types';
 
 export type {
   BlindComparison,
   BlindSampleScores,
+  LiveContextPolicy,
+  LiveSession,
+  LiveSessionUtterance,
   NewRecording,
   Recording,
   RecordingOrigin,
@@ -111,6 +114,21 @@ export interface Storage {
   appendBlindComparison(comparison: BlindComparison): Promise<BlindComparison>;
   /** Ticket 023 — every stored comparison, in write order. Filters by Recording. */
   listBlindComparisons(opts?: ListBlindComparisonsOptions): Promise<BlindComparison[]>;
+
+  /**
+   * TICKET 041 — append one LiveSession to its OWN append-only file,
+   * `live-sessions.jsonl`, beside the ledger and NEVER inside it: `readLedger()`
+   * is typed `Run[]` and `exportResults` unions it into the exported run set, so
+   * a session sharing that file would be counted in `totals.runs` and derived
+   * into an arm. A soak measurement is not a run.
+   *
+   * Same discipline as `appendBlindComparison`: one line, 'a' flag, no read of
+   * the existing file, record stored VERBATIM. NO AUDIO is written — there is
+   * no method here that could.
+   */
+  appendLiveSession(session: LiveSession): Promise<LiveSession>;
+  /** TICKET 041 — every stored LiveSession, in write order. Tolerant reader. */
+  listLiveSessions(): Promise<LiveSession[]>;
 }
 
 /**
@@ -355,6 +373,16 @@ export function createStorage(baseDir: string): Storage {
       return opts.recordingId === undefined
         ? comparisons
         : comparisons.filter((c) => c.recordingId === opts.recordingId);
+    },
+
+    // TICKET 041 — STUBS. Tests are red until the append-only live-session
+    // stream exists; the shape is pinned by liveSessions.test.ts.
+    async appendLiveSession(_session: LiveSession): Promise<LiveSession> {
+      throw new Error('appendLiveSession: not implemented (ticket 041)');
+    },
+
+    async listLiveSessions(): Promise<LiveSession[]> {
+      throw new Error('listLiveSessions: not implemented (ticket 041)');
     },
 
     async readLedger(): Promise<Run[]> {

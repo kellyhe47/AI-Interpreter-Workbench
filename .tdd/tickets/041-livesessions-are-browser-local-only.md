@@ -6,7 +6,7 @@ source: qa-live
 depends_on: []
 touches: [src/server/routes/, src/server/storage/, src/client/state/hydrateLedger.ts, src/harness/exportResults.ts]
 iterations: 0
-test_files: []
+test_files: [src/server/storage/liveSessions.test.ts, src/server/routes/liveSessions.test.ts, src/harness/exportResults.liveSessions.test.ts, src/client/state/hydrateLiveSessions.test.ts, src/client/components/results/deriveLive.empty.test.ts, src/client/views/LiveView.persistence.test.tsx, src/client/views/App.liveHydration.test.tsx]
 branch: ""
 ---
 

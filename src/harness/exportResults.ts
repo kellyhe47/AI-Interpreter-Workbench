@@ -132,12 +132,39 @@ export interface BlindComparisonSummary {
   byRecording: Record<string, number>;
 }
 
+/**
+ * TICKET 041 — the Live-session disclosure. A TOP-LEVEL summary field and
+ * deliberately NOT part of `totals`, for the same reason `blindComparisons` is
+ * not: `totals` counts RUNS, its exact shape is pinned by the empty-bundle
+ * test, and a five-minute soak over free conversation is not a Run over a fixed
+ * Recording.
+ */
+export interface LiveSessionSummary {
+  /** Every session in the bundle, including excluded ones. */
+  total: number;
+  /** Sessions that may enter a reported figure: real AND non-empty. */
+  aggregated: number;
+  /** `total - aggregated`. Stored, exported, never inside a figure. */
+  excluded: number;
+  /**
+   * Sessions with NO utterances — stored, never aggregated. Disclosed because
+   * a run that produced nothing is the finding, not a gap to smooth over.
+   */
+  zeroUtterance: number;
+  /** Fixture-sourced sessions (ticket 018's rule). May overlap zeroUtterance. */
+  fixtureSourced: number;
+  /** AGGREGATED sessions per DERIVED arm tag. Excluded ones appear nowhere. */
+  byArm: Record<string, number>;
+}
+
 export interface ExportSummary {
   /** Bundle date, YYYY-MM-DD. */
   exportedAt: string;
   intendedReps: number;
   /** Ticket 023 — the human-judgement disclosure. Never inside `totals`. */
   blindComparisons: BlindComparisonSummary;
+  /** Ticket 041 — the Live-session disclosure. Never inside `totals`. */
+  liveSessions: LiveSessionSummary;
   totals: {
     /** ALL exported run records, including every excluded one. */
     runs: number;
@@ -356,6 +383,16 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
     exportedAt: date,
     intendedReps,
     blindComparisons: summariseComparisons(comparisons, new Set(byId.keys())),
+    // TICKET 041 — STUB. The live-session stream is not read yet; pinned by
+    // exportResults.liveSessions.test.ts.
+    liveSessions: {
+      total: 0,
+      aggregated: 0,
+      excluded: 0,
+      zeroUtterance: 0,
+      fixtureSourced: 0,
+      byArm: {},
+    },
     totals: { runs: runs.length, aggregated, excluded: runs.length - aggregated },
     experiments,
     empty,

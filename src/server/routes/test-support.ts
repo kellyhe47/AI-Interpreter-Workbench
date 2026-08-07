@@ -12,8 +12,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStorage } from '../storage';
-import type { BlindComparison, Recording, Run, Storage } from '../storage';
+import type { BlindComparison, LiveSession, Recording, Run, Storage } from '../storage';
 import { createBlindComparisonsRouter } from './blindComparisons';
+import { createLiveSessionsRouter } from './liveSessions';
 import { createRecordingsRouter } from './recordings';
 import { createRunsRouter } from './runs';
 
@@ -42,6 +43,8 @@ export async function startApi(): Promise<ApiHarness> {
   // Ticket 023 — the third router joins the bare harness. Additive: it adds
   // routes, it shadows none, and the recordings/runs suites are untouched.
   app.use(createBlindComparisonsRouter({ storage }));
+  // Ticket 041 — the fourth router. Additive: it adds routes and shadows none.
+  app.use(createLiveSessionsRouter({ storage }));
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -145,6 +148,26 @@ export async function getBlindComparisons(
 ): Promise<{ status: number; body: BlindComparison[] }> {
   const res = await fetch(`${api.base}/api/blind-comparisons${query}`);
   return { status: res.status, body: (await res.json()) as BlindComparison[] };
+}
+
+/**
+ * Ticket 041 — POST /api/live-sessions. The body is passed through VERBATIM
+ * (typed `unknown`) so a malformed-body test can post anything at all.
+ */
+export async function postLiveSession(api: ApiHarness, body: unknown): Promise<Response> {
+  return fetch(`${api.base}/api/live-sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Ticket 041 — GET /api/live-sessions. */
+export async function getLiveSessions(
+  api: ApiHarness,
+): Promise<{ status: number; body: LiveSession[] }> {
+  const res = await fetch(`${api.base}/api/live-sessions`);
+  return { status: res.status, body: (await res.json()) as LiveSession[] };
 }
 
 export async function bodyBytes(res: Response): Promise<Uint8Array> {

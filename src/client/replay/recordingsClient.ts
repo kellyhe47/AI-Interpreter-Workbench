@@ -22,7 +22,7 @@
  */
 
 import type { CorpusUtterance } from '../../core/corpus';
-import type { BlindComparison, Recording, Run } from '../state/ledger';
+import type { BlindComparison, LiveSession, Recording, Run } from '../state/ledger';
 
 /** The closed server envelope vocabulary, plus a catch-all for anything else. */
 export type ApiErrorCode =
@@ -99,6 +99,17 @@ export interface RunsClient {
 export interface BlindComparisonsClient {
   create(comparison: BlindComparison): Promise<BlindComparison>;
   list(recordingId?: string): Promise<BlindComparison[]>;
+}
+
+/**
+ * TICKET 041 — the REST seam a finished Live session travels over. PRD §7: the
+ * server owns the store. PRD §17 19i makes every Live session the stability
+ * artifact, and an artifact that exists only in one browser's localStorage
+ * cannot reach `data/`, the exported bundle, or a second machine.
+ */
+export interface LiveSessionsClient {
+  create(session: LiveSession): Promise<LiveSession>;
+  list(): Promise<LiveSession[]>;
 }
 
 const KNOWN_CODES: readonly ApiErrorCode[] = [
@@ -260,6 +271,21 @@ export function createBlindComparisonsClient(deps: ApiClientDeps): BlindComparis
           : `/api/blind-comparisons?recordingId=${encodeURIComponent(recordingId)}`,
         { method: 'GET' },
       ),
+  };
+}
+
+/**
+ * TICKET 041 — the live-sessions client. STUB.
+ *
+ * Like the blind-comparisons client it declares NO per-endpoint fallback code:
+ * `invalid-live-session` is a request-shape complaint, not one of the four
+ * states a caller branches on, so it surfaces as a plain 'http-error' carrying
+ * the server's own message.
+ */
+export function createLiveSessionsClient(_deps: ApiClientDeps): LiveSessionsClient {
+  return {
+    create: () => Promise.reject(new Error('createLiveSessionsClient: not implemented (041)')),
+    list: () => Promise.reject(new Error('createLiveSessionsClient: not implemented (041)')),
   };
 }
 

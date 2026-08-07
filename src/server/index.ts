@@ -31,7 +31,12 @@ import express from 'express'
 import http from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createBlindComparisonsRouter, createRecordingsRouter, createRunsRouter } from './routes'
+import {
+  createBlindComparisonsRouter,
+  createLiveSessionsRouter,
+  createRecordingsRouter,
+  createRunsRouter,
+} from './routes'
 import { createStorage } from './storage'
 import { loadServerEnv } from './env'
 import type { Storage } from './storage'
@@ -68,6 +73,9 @@ export function createApp(deps: AppDeps = {}): express.Express {
   // score submitted on the deployed instance reaches data/ like every other
   // record instead of dying in one browser's localStorage.
   app.use(createBlindComparisonsRouter({ storage }))
+  // Ticket 041 — Live sessions over the SAME injected store: every Live take is
+  // the stability artifact (PRD §17 19i), and it cannot live in one browser.
+  app.use(createLiveSessionsRouter({ storage }))
 
   // Production: serve the built SPA (PRD §13 — single origin, no CORS).
   // Read at CALL time so the branch is reachable in tests.

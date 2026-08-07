@@ -90,6 +90,7 @@ import {
   type SessionState,
   type SessionStatus,
 } from '../state/sessionMachine';
+import type { LiveSessionsClient } from '../replay/recordingsClient';
 import type { RemoteAudioSink } from '../transport/realtime';
 import { TransportRouter } from '../transport/router';
 import type {
@@ -144,6 +145,16 @@ export interface SessionDeps {
    * control real sound. Cascade sessions leave it untouched.
    */
   remoteAudioSink?: RemoteAudioSink;
+  /**
+   * TICKET 041 (OPTIONAL) — where a finished LiveSession is PERSISTED. The
+   * ledger write happens first and unconditionally; this POSTs the very same
+   * record to /api/live-sessions, exactly as App's `recordBlindComparison`
+   * does for a judgement (ticket 023). A rejected POST is swallowed: an
+   * unreachable server costs the server's copy and nothing else.
+   *
+   * A host that supplies no client keeps exactly the old behaviour.
+   */
+  liveSessions?: Pick<LiveSessionsClient, 'create'>;
 }
 
 /** The single target card's view of the current (latest) utterance. */
