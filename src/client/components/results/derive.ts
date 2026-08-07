@@ -16,6 +16,16 @@
  *   the distinct rep indices the sweep attempted (any status). A sweep that
  *   intended 5 and lost one reads `4 of 5`, and the percentiles are computed
  *   over the surviving 4 — the number and the line agree.
+ * - TICKET 032: THE MEASURED ATOM IS THE UTTERANCE, NOT THE RUN. Every
+ *   derivation below expands a Run into `ledger.runSamples(run)` first — one
+ *   sample per `RunUtterance`, or exactly one Run-level sample for a Run that
+ *   carries none — and applies `isAggregatableUtterance` to each. So `n` is a
+ *   SAMPLE count everywhere: PRD §8's 60 per arm (3 recordings × 4 utterances
+ *   × 5 reps), 20 per recording, 10 per category. Runs with no `utterances[]`
+ *   expand to one sample and every pre-032 figure is untouched.
+ *   REPS AND UTTERANCES ARE NEVER CONFLATED: `runCount` and `completedReps`
+ *   stay Run-level and keep counting reps, `n` counts samples, and the two are
+ *   deliberately different numbers on the same row.
  * - TWO GROUPINGS, ONE LEDGER. groupByRecording and groupByCategory read the
  *   same Runs as the aggregates. No second store, no recomputed gate.
  * - LIVE IS SEPARATE. deriveLiveModel reads LiveSessions and nothing else;
@@ -32,9 +42,18 @@
  *   Recordings of the arm's gate-passing Runs / 60000); null when no
  *   contributing Recording declares a duration (never 0).
  * - PROVENANCE (per arm, PRD 8 register):
- *     utteranceCount  distinct annotations.utteranceId over gate-passing Runs
- *                     (falling back to the recordingId when a Run carries no
- *                     utterance id).
+ *     utteranceCount  distinct utterances behind the figure: the RECORD's
+ *                     utteranceId over the gate-passing Runs' samples, falling
+ *                     back to annotations.utteranceId and then the recordingId
+ *                     for a Run that carries no records. An utterance that
+ *                     failed is still one utterance.
+ *     attemptedSamples  samples the arm ATTEMPTED at record level, complete and
+ *                     failed alike. `n` counts only the complete ones, so the
+ *                     gap is exactly the utterances that produced no output
+ *                     audio — without it a 20-attempt / 18-measured arm is
+ *                     indistinguishable from a clean one, and a failed
+ *                     utterance loses no REP so intendedReps cannot say it.
+ *                     Equals `n` for a ledger with no manifest-backed run.
  *     completedReps   distinct annotations.repIndex over gate-passing Runs —
  *                     the ACTUAL count.
  *     intendedReps    distinct annotations.repIndex over the arm's
@@ -49,15 +68,21 @@
  *   read from the same fields the figures are.
  * - groupByRecording(ledger): one row per (recordingId x configuration), in
  *   first-appended Run order. EVERY Run is listed, gate-passing or not: ad-hoc
- *   runs appear nowhere else. runCount / failedCount / origins describe the
- *   whole group; n / p50Ms / p95Ms / costUsd describe only the complete, real
- *   Runs in it. excludedFromExperiments is true iff NO Run in the group passes
+ *   runs appear nowhere else — which is why an ad-hoc Run's RECORDS do carry
+ *   figures on its row (n = 4 for a 4-utterance clip, exactly as n = 1 was
+ *   right before) while the row stays marked excluded from experiments.
+ *   runCount / failedCount / origins describe the whole group in RUNS;
+ *   n / p50Ms / p95Ms / costUsd describe the complete SAMPLES of the complete,
+ *   real Runs in it. excludedFromExperiments is true iff NO Run in the group passes
  *   `isAggregatableRun`; exclusionReasons lists, deduped in first-appearance
  *   order, why each excluded Run was excluded, tested in the order
  *   fixture -> ad-hoc -> manual -> failed.
- * - groupByCategory(ledger): one row per (annotations.category x derived arm)
- *   over gate-passing Runs ONLY. Categories are distributed across recordings
- *   (PRD 9), so this is the grouping the findings actually live in.
+ * - groupByCategory(ledger): one row per (category x derived arm) over
+ *   gate-passing SAMPLES only, the record's category winning over the
+ *   annotation envelope. Categories are distributed across recordings (PRD 9),
+ *   so this is the grouping the findings actually live in — and it is keyed on
+ *   the pair, never the category alone, because a mixed ledger yields several
+ *   rows per category and a category-only lookup picks the wrong arm.
  * - deriveComparison(ledger, armA, armB): p50 / p95 / cost rows (cost is per
  *   audio minute; lower-is-better, delta = B - A). werCell is
  *   STT_UNCHANGED_CELL whenever the two arms share an STT stage; otherwise the
@@ -77,17 +102,24 @@ import {
   deriveArmTag,
   type ArmTag,
 } from '../../../core/arms';
-import type { CorpusCategory } from '../../../harness/corpus';
+// src/core/corpus.ts is the CANONICAL category union (ticket 030; compiled by
+// both tsconfigs, and what `RunUtterance.category` is typed as). The identical
+// union in src/harness/corpus.ts is the pre-22a synthetic placeholder kept for
+// bench/soak — importing it here left two copies free to drift apart.
+import type { CorpusCategory } from '../../../core/corpus';
 import {
   isAggregatableRun,
+  isAggregatableUtterance,
   isRealLiveSession,
   isRealRecord,
   isRealRun,
   runArmTag,
+  runSamples,
   type LiveSession,
   type Run,
   type RunLedger,
   type RunOrigin,
+  type RunSample,
 } from '../../state/ledger';
 
 export type Tone = 'good' | 'bad' | 'neutral';
@@ -331,13 +363,9 @@ function percentilesOf(samples: number[]): Percentiles {
   return { p50Ms: nearestRank(sorted, 0.5), p95Ms: nearestRank(sorted, 0.95) };
 }
 
-/** Perceived end-to-end latency of a Run, or null when either stamp is absent. */
-function runLatencyMs(run: Run): number | null {
-  const speechEnd = run.timings?.speech_end;
-  const audioQueued = run.timings?.audio_queued;
-  if (typeof speechEnd !== 'number' || typeof audioQueued !== 'number') return null;
-  return audioQueued - speechEnd;
-}
+// Perceived end-to-end latency now lives on the SAMPLE, not the Run: the
+// ledger's `runSamples` pairs `audio_queued` with the `speech_end` from the
+// same level, so a Run's stamp can never be crossed with a record's.
 
 /** The Run's recipe as a stable key: (recordingId, configuration) is unique. */
 function configurationKey(run: Run): string {
@@ -371,6 +399,29 @@ function exclusionReasonFor(run: Run): ExclusionReason | null {
   return 'failed';
 }
 
+/* ------------------------------- ticket 032: the record beats the envelope -- */
+
+/**
+ * The utterance a sample measured. THE RECORD WINS; `annotations.utteranceId`
+ * is the fallback for a record-less Run (the 028 write path still fills it),
+ * and `recordingId` the last resort. The two representations are reconciled
+ * here rather than carried silently side by side.
+ */
+function sampleUtteranceId(sample: RunSample): string {
+  const run = sample.run as AnnotatedRun;
+  return sample.utteranceId ?? run.annotations?.utteranceId ?? run.recordingId;
+}
+
+/**
+ * The category a sample belongs to, or undefined when nothing declares one.
+ * Same precedence: the record's tag, then the annotation envelope. A Run spans
+ * ~4 utterances of deliberately DIFFERENT categories (PRD §9), so the record is
+ * the only level at which the question has a single honest answer.
+ */
+function sampleCategory(sample: RunSample): UtteranceCategory | undefined {
+  return sample.category ?? (sample.run as AnnotatedRun).annotations?.category;
+}
+
 /** Distinct values of an annotation over a set of Runs. */
 function distinct<T>(values: Array<T | undefined>): Set<T> {
   const set = new Set<T>();
@@ -395,8 +446,19 @@ function buildProvenance(
   gatePassing: AnnotatedRun[],
   attempted: AnnotatedRun[],
 ): Provenance {
+  // TICKET 032 — the arm's ATTEMPTED atoms: every record of every gate-passing
+  // Run, failed ones included, or the single Run-level sample when a Run
+  // carries none. `n` counts only the ones that completed, so the gap between
+  // the two is exactly the utterances that produced no output audio.
+  const gateSamples = gatePassing.flatMap((run) => runSamples(run));
+  const attemptedSamples = gateSamples.length;
+
+  // The RECORD's id wins; `annotations.utteranceId` is the fallback for a Run
+  // that carries no records, and the recordingId the fallback for that. A
+  // derivation still reading the annotation envelope reports 3 utterances for
+  // PRD §8's corpus where 12 is the truth.
   const utteranceCount = distinct(
-    gatePassing.map((r) => r.annotations?.utteranceId ?? r.recordingId),
+    gateSamples.map((s) => sampleUtteranceId(s)),
   ).size;
 
   const completedRepIndices = distinct(gatePassing.map((r) => r.annotations?.repIndex));
@@ -416,8 +478,7 @@ function buildProvenance(
 
   return {
     utteranceCount,
-    // TICKET 032 STUB — implemented by the record-level aggregation.
-    attemptedSamples: 0,
+    attemptedSamples,
     completedReps,
     intendedReps,
     endpointingMs: PINNED_ENDPOINTING_MS,
@@ -505,9 +566,20 @@ export function groupByRecording(ledger: RunLedger): RecordingGroupRow[] {
 
     // Figures come from the complete, real runs only. A failed run is real
     // information and stays listed; it is simply not a latency sample.
-    const measured = group.filter((run) => run.status === 'complete' && isRealRun(run));
+    //
+    // TICKET 032 — and then each of those Runs is expanded into its RECORDS, so
+    // a row reports PRD §8's "20 samples (4 utterances × 5 reps)" while
+    // `runCount` still reports the five Runs. Reps and utterances are never
+    // conflated: a row reading runCount 20 has silently renamed one as the
+    // other. A record that produced no output audio is dropped here for the
+    // same reason its Run would be — it is not a measurement — while its Run
+    // stays `complete`, so `failedCount` is untouched by it.
+    const measuredRuns = group.filter((run) => run.status === 'complete' && isRealRun(run));
+    const measured = measuredRuns
+      .flatMap(runSamples)
+      .filter((sample) => sample.status === 'complete');
     const samples = measured
-      .map(runLatencyMs)
+      .map((sample) => sample.latencyMs)
       .filter((ms): ms is number => ms !== null);
 
     const origins: RunOrigin[] = [];
@@ -531,42 +603,60 @@ export function groupByRecording(ledger: RunLedger): RecordingGroupRow[] {
       failedCount: group.filter((run) => run.status === 'failed').length,
       n: measured.length,
       ...percentilesOf(samples),
-      costUsd: measured.reduce((sum, run) => sum + run.cost, 0),
+      costUsd: measured.reduce((sum, sample) => sum + sample.cost, 0),
       excludedFromExperiments: !group.some(isAggregatableRun),
       exclusionReasons,
     };
   });
 }
 
-/** "By utterance category": grouped on the category tag, never the recording. */
+/**
+ * "By utterance category": grouped on the category tag, never the recording.
+ *
+ * TICKET 032 — this table rendered ZERO ROWS from the day it was built. It
+ * grouped Runs on `annotations.category`, and a Run spans ~4 utterances of
+ * deliberately different categories (PRD §9), so nothing could ever honestly
+ * write that field. Grouping RECORDS gives every sample exactly one category
+ * and the table fills.
+ *
+ * Rows are keyed on (category × DERIVED arm), never on category alone: a mixed
+ * ledger yields several rows per category and a category-only lookup silently
+ * picks whichever arm was appended first.
+ */
 export function groupByCategory(ledger: RunLedger): CategoryGroupRow[] {
   const order: string[] = [];
-  const groups = new Map<string, AnnotatedRun[]>();
+  const groups = new Map<string, Array<{ category: UtteranceCategory; sample: RunSample }>>();
 
   for (const run of ledger.getRuns() as AnnotatedRun[]) {
-    if (!isAggregatableRun(run)) continue;
-    const category = run.annotations?.category;
-    if (category === undefined) continue;
-    const key = `${category}|${runArmTag(run)}`;
-    let group = groups.get(key);
-    if (!group) {
-      group = [];
-      groups.set(key, group);
-      order.push(key);
+    for (const sample of runSamples(run)) {
+      // The gate, through the parent Run. A record inside an ad-hoc, manual,
+      // failed or fixture-sourced Run reaches nothing here.
+      if (!isAggregatableUtterance(run, sample.utterance)) continue;
+      const category = sampleCategory(sample);
+      if (category === undefined) continue;
+      const key = `${category}|${sample.arm}`;
+      let group = groups.get(key);
+      if (!group) {
+        group = [];
+        groups.set(key, group);
+        order.push(key);
+      }
+      group.push({ category, sample });
     }
-    group.push(run);
   }
 
   return order.map((key) => {
     const group = groups.get(key)!;
     const first = group[0]!;
-    const samples = group.map(runLatencyMs).filter((ms): ms is number => ms !== null);
+    const samples = group
+      .map((entry) => entry.sample.latencyMs)
+      .filter((ms): ms is number => ms !== null);
     return {
-      category: first.annotations!.category!,
-      arm: runArmTag(first),
+      category: first.category,
+      arm: first.sample.arm,
       n: group.length,
       ...percentilesOf(samples),
-      costUsd: group.reduce((sum, run) => sum + run.cost, 0),
+      costUsd: group.reduce((sum, entry) => sum + entry.sample.cost, 0),
     };
   });
 }

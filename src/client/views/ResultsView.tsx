@@ -52,7 +52,7 @@
  *   [data-stage="realtime"|"stt"|"mt"|"tts"]  coverage per-stage cell
  *   [data-observation]             coverage per-cell observation note
  *   [data-time-to-add]             one of the three time-to-add tiles
- *   [data-category-row][data-category="<category>"]
+ *   [data-category-row][data-category="<category>"][data-n="<n>"]
  *   [data-recording-row][data-recording="<id>"][data-arm][data-excluded]
  *   [data-failed-count][data-run-count]  on a recording row, ONLY when the
  *                                        group absorbed a failed run
@@ -673,6 +673,10 @@ function CategoryCard(props: { rows: CategoryGroupRow[] }): ReactElement {
             key={`${row.category}|${row.arm}`}
             data-category-row=""
             data-category={row.category}
+            // TICKET 032: N is the number this row exists to correct — a SAMPLE
+            // count (utterances x reps), never a rep count. Exposed as its own
+            // attribute so it is assertable without parsing a text blob.
+            data-n={row.n}
             style={gridStyle(CATEGORY_COLUMNS, false)}
           >
             <div style={labelCellStyle}>{row.category}</div>

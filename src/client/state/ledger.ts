@@ -98,6 +98,38 @@
  *   export/import tests, so `exportRuns`/`importRuns` are untouched and
  *   `importRuns` leaves the comparison store alone rather than discarding
  *   judgements the export it was handed never carried.
+ *
+ * Ticket 032 — THE MEASURED ATOM IS THE UTTERANCE, NOT THE RUN (PRD §8; see
+ * .tdd/tickets/README-v3-corpus.md). A corpus Recording is a ≤45 s take holding
+ * ~4 utterances of deliberately different categories, so a Run is the CONTAINER
+ * that produced a set of records and not itself a measurement. Any aggregate
+ * computed per-Run is wrong by construction under a multi-utterance corpus — N
+ * comes out 4× too small. The decisions:
+ *
+ * - `runSamples(run)` expands a Run into its measured atoms: one `RunSample`
+ *   per `RunUtterance` when the Run carries records, or exactly ONE Run-level
+ *   sample when it carries none. Never both — a Run whose records are counted
+ *   ALONGSIDE its own sample reports 75 where 60 is right. Runs with no
+ *   `utterances[]` therefore aggregate exactly as they did before 032, and no
+ *   figure moves for a ledger with no manifest-backed run.
+ * - `isAggregatableUtterance(run, utterance?)` is the gate ONE LEVEL DOWN, and
+ *   it is applied to a record THROUGH ITS PARENT RUN: the record inherits the
+ *   Run's origin, status and DERIVED arm and can never out-vote them. On top of
+ *   that a record must have completed. Called with no record it is exactly
+ *   `isAggregatableRun`, which is UNCHANGED — 032 sits beside it rather than
+ *   editing it, so the Run-level gate keeps one definition.
+ * - A FAILED RECORD INSIDE A COMPLETE RUN is ticket 027's rule one level down:
+ *   it does not fail its Run, it is excluded from the figures (no latency, no
+ *   cost, not in `n`), and it is still an attempt — the Results layer reports
+ *   the gap as `Provenance.attemptedSamples`.
+ * - Run-level `timings` / `transcripts` / `cost` KEEP TODAY'S SEMANTICS
+ *   verbatim (ticket 031's regression pin). The per-record latency is the same
+ *   formula over the record's own stamps — `audio_queued − speech_end`, both
+ *   from the SAME level — so the two can never disagree about what latency
+ *   means, and a record's split cost sums back to `run.cost` exactly.
+ * - `runAggregates()` is where record-awareness LIVES. The Results derivation
+ *   layer delegates to it rather than reimplementing the gate, so there is one
+ *   aggregate and not two that can drift.
  */
 
 import { deriveArmTag, type ArmTag, type ProviderTriple } from '../../core/arms';
@@ -475,18 +507,76 @@ export interface RunSample {
   cost: number;
 }
 
-/** Every measured atom of one Run, in manifest order. Never empty. */
-export function runSamples(_run: Run): RunSample[] {
-  throw new Error('TICKET 032: runSamples is not implemented');
+/**
+ * Perceived end-to-end latency out of ONE timings map: audio_queued −
+ * speech_end. Both stamps must come from the SAME level — a Run's `speech_end`
+ * crossed with a record's `audio_queued` is not a measurement of anything — so
+ * this only ever sees one map at a time. Null, never 0, when either is absent:
+ * an utterance that produced no output audio has `audio_queued: null`.
+ */
+function pairedLatencyMs(timings: Record<string, number | null> | undefined): number | null {
+  const speechEnd = timings?.speech_end;
+  const audioQueued = timings?.audio_queued;
+  if (typeof speechEnd !== 'number' || typeof audioQueued !== 'number') return null;
+  return audioQueued - speechEnd;
+}
+
+/**
+ * Every measured atom of one Run, in manifest order. Never empty.
+ *
+ * A Run carrying records expands into exactly those records and the Run-level
+ * sample is NOT emitted alongside them — emitting both is the double-count that
+ * turns 60 samples into 75. A Run carrying none yields today's single Run-level
+ * sample, which is why no figure moves for a ledger with no manifest-backed run.
+ */
+export function runSamples(run: Run): RunSample[] {
+  const arm = runArmTag(run);
+  const records = run.utterances;
+
+  if (records === undefined || records.length === 0) {
+    return [
+      {
+        run,
+        arm,
+        status: run.status,
+        latencyMs: pairedLatencyMs(run.timings),
+        cost: run.cost,
+      },
+    ];
+  }
+
+  return records.map((utterance) => ({
+    run,
+    utterance,
+    // DERIVED from the parent Run on every record: a record never names its
+    // own arm, so a mislabelled container cannot re-home its contents.
+    arm,
+    utteranceId: utterance.utteranceId,
+    category: utterance.category,
+    status: utterance.status,
+    latencyMs: pairedLatencyMs(utterance.timings),
+    // The Run's whole-clip cost, split by the manifest span (ticket 031); the
+    // splits sum back to run.cost exactly, so expanding moves no money.
+    cost: utterance.cost,
+  }));
 }
 
 /**
  * The gate, one level down. A record is aggregatable iff its PARENT RUN passes
  * `isAggregatableRun` and the record itself completed. Called with no record it
  * is exactly `isAggregatableRun`.
+ *
+ * The parent's verdict is checked FIRST and cannot be out-voted: the four
+ * exclusion reasons (ad-hoc / manual / failed / fixture) are facts about the
+ * measurement conditions the container ran under, and a complete record inside
+ * a failed Run is still not evidence. A failed record inside a complete Run is
+ * ticket 027's rule one level down — excluded from the figures, still counted
+ * in `Provenance.attemptedSamples`.
  */
-export function isAggregatableUtterance(_run: Run, _utterance?: RunUtterance): boolean {
-  throw new Error('TICKET 032: isAggregatableUtterance is not implemented');
+export function isAggregatableUtterance(run: Run, utterance?: RunUtterance): boolean {
+  if (!isAggregatableRun(run)) return false;
+  if (utterance !== undefined && utterance.status !== 'complete') return false;
+  return true;
 }
 
 /**
@@ -598,25 +688,33 @@ export class RunLedger {
     return deepCopy(this.liveSessions);
   }
 
-  /** Experiment aggregates over gate-passing Runs. Never sees LiveSessions. */
+  /**
+   * Experiment aggregates over gate-passing SAMPLES. Never sees LiveSessions.
+   *
+   * TICKET 032 — each Run is expanded into its measured atoms first, so `n` is
+   * a sample count and not a Run count: 3 recordings × 4 utterances × 5 reps is
+   * 60, not the 15 Runs that produced them. A Run with no records expands into
+   * one sample and this loop is byte-for-byte what it was before.
+   */
   runAggregates(): RunAggregates {
     const perArm: { [arm: string]: RunArmAggregate } = {};
     const latenciesByArm: { [arm: string]: number[] } = {};
 
     for (const run of this.runs) {
-      if (!isAggregatableRun(run)) continue;
-      const arm = runArmTag(run);
-      let agg = perArm[arm];
-      if (!agg) {
-        agg = { n: 0, p50Ms: null, p95Ms: null, costUsd: 0 };
-        perArm[arm] = agg;
-        latenciesByArm[arm] = [];
-      }
-      agg.n += 1;
-      agg.costUsd += run.cost;
-      const { speech_end: speechEnd, audio_queued: audioQueued } = run.timings;
-      if (typeof speechEnd === 'number' && typeof audioQueued === 'number') {
-        latenciesByArm[arm]!.push(audioQueued - speechEnd);
+      for (const sample of runSamples(run)) {
+        if (!isAggregatableUtterance(run, sample.utterance)) continue;
+        const arm = sample.arm;
+        let agg = perArm[arm];
+        if (!agg) {
+          agg = { n: 0, p50Ms: null, p95Ms: null, costUsd: 0 };
+          perArm[arm] = agg;
+          latenciesByArm[arm] = [];
+        }
+        agg.n += 1;
+        // A failed record contributes no cost, by analogy with a failed Run:
+        // it is filtered out above before it reaches this line.
+        agg.costUsd += sample.cost;
+        if (sample.latencyMs !== null) latenciesByArm[arm]!.push(sample.latencyMs);
       }
     }
 
