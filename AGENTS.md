@@ -148,7 +148,16 @@ These exist because a violation would produce a number that looks fine and is wr
   `npm run export-results` writes the dated bundle. Note `.gitignore` needs `node_modules` **without**
   a trailing slash — a bare `node_modules/` rule does not match a symlink, and worktree symlinks
   have been committed by accident before.
-- `.env` holds `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`.
+- `.env` holds `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`. **`src/server/env.ts`
+  loads it at the process entrypoint** (ticket 037) — there is no `dotenv` dependency and no
+  `--env-file` flag. A real environment variable always WINS over the file, a missing file is not
+  an error, and loading is skipped under `NODE_ENV=test` so the suite stays hermetic. Before 037
+  nothing loaded `.env` at all, so every real provider call failed and Live was dead on arrival
+  under a fully green suite.
+- **A green suite says nothing about real credentials or real transports.** Every test runs on
+  fixtures by policy, so the entire real-provider path is unexercised by construction. Two defects
+  have now lived entirely in that gap (ticket 021's port, ticket 037's env). Probe the real runtime
+  — start the server clean and curl the endpoint — before believing a provider path works.
 - Commit in logical units with meaningful messages; never push without being asked.
 - **A lock commit stages ONLY the ticket's declared `test_files`** — never `git add -A`. A
   test-writer that runs a reference implementation first (a practice worth keeping: it has caught

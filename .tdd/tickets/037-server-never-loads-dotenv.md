@@ -1,12 +1,12 @@
 ---
 id: 037
 title: The server never loads .env — every real provider call fails, Live is dead on arrival
-status: pending
+status: green
 source: qa-live
 depends_on: []
 touches: [src/server/env.ts, src/server/env.test.ts, src/server/index.ts, AGENTS.md]
 iterations: 0
-test_files: []
+test_files: [src/server/env.test.ts]
 branch: ""
 ---
 
@@ -85,3 +85,38 @@ microphone, so no pass ever exercised a real provider call.
 configured and the first sign is an opaque in-session failure minutes later. Consider a startup
 log line naming which of the three keys are present — absent keys are a legitimate state (an
 ElevenLabs-less run is fine), so this is a warning, never a hard failure. File separately.
+
+## Attempt log
+
+- Green. Suite 1271/69 (+6); both tsconfigs clean.
+- `src/server/env.ts` — hand-rolled rather than Node's built-in `process.loadEnvFile`, because that
+  built-in throws on a missing file and gives no way to report which names were set.
+- Wired at the process entrypoint in `src/server/index.ts`, BEFORE any route reads `process.env`,
+  and inside the existing `NODE_ENV !== 'test'` guard so the suite stays hermetic and no test can
+  accidentally acquire a real key.
+- **Verified from a genuinely clean environment**, not just a passing test:
+  `env -u OPENAI_API_KEY -u ELEVENLABS_API_KEY -u ANTHROPIC_API_KEY npx tsx src/server/index.ts`
+  then `POST /api/realtime-token` -> **200** with a real ephemeral key. Before the fix, 500.
+- Confirmed in the operator's own Chrome: the Live Realtime card went from **`failed`**
+  ("opaque failure — no stage attribution") to **`ready`**.
+- Mutation-checked, three properties:
+  | mutation | result |
+  |---|---|
+  | the file clobbers the real environment | 2 red |
+  | a missing file throws | 1 red |
+  | values leak into the returned set | 1 red |
+
+### Diagnostic note — my first hypothesis was wrong, and checking is what caught it
+
+I reasoned from the code that the `AudioContext` is constructed AFTER `await getUserMedia(...)`,
+i.e. outside the user-gesture window, so Chrome would leave it `suspended` and `onaudioprocess`
+would never fire — which fits "records but hears nothing" perfectly, and `playback.ts` calls
+`resume()` while the capture path never does.
+
+Instrumenting the real page disproved it: context `running`, 412 frames captured, **407
+non-silent**. Capture was fine all along. Had I "fixed" the plausible bug I would have added a
+pointless `resume()`, shipped it, and left Live just as broken.
+
+The capture path still has no `resume()` and `CaptureAudioContextLike` still lacks it. That is a
+latent risk on a browser that suspends more aggressively, but it is NOT this defect and is not
+being fixed on spec.
