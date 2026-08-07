@@ -6,7 +6,7 @@ source: qa-live
 depends_on: []
 touches: [src/server/ws.ts, src/core/registry.ts, src/core/arms.ts]
 iterations: 0
-test_files: []
+test_files: [src/core/models.test.ts, src/server/ws.providers.test.ts]
 branch: ""
 ---
 
