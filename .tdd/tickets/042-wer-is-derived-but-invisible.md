@@ -6,7 +6,7 @@ source: v3-corpus
 depends_on: [034]
 touches: [src/client/views/ResultsView.tsx, scripts/, src/harness/]
 iterations: 0
-test_files: []
+test_files: [src/client/views/ResultsView.wer.test.tsx, src/harness/scoreWer.test.ts]
 branch: ""
 ---
 
