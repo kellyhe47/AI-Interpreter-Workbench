@@ -14,8 +14,10 @@
  *    (4-byte LE utt header + PCM16).
  *
  * SESSION LIFECYCLE per socket:
- *  - {type:'session.start'} builds providers from msg.providers via the
- *    registry (createStt/createMt/createTts). An UNKNOWN provider name sends
+ *  - {type:'session.start'} builds providers from msg.providers — MODEL ids —
+ *    by resolving them to (vendor, options) with core/models.resolveTriple and
+ *    passing both into the vendor-keyed registry (createStt/createMt/
+ *    createTts). An UNKNOWN model or provider sends
  *    {type:'error', message} (message contains the unknown name) and the
  *    socket STAYS OPEN — a later valid session.start on the same socket
  *    starts a session normally.
@@ -41,6 +43,7 @@ import { encodeTtsFrame } from '../core/protocol';
 import type { ClientToServerMessage, RunOrigin } from '../core/protocol';
 import type { UtteranceRecord } from '../core/timing';
 import { createMt, createStt, createTts } from '../core/registry';
+import { resolveTriple } from '../core/models';
 import { pushChannel, runCascade } from './cascade/orchestrator';
 import type {
   CascadeEvent,
@@ -153,13 +156,19 @@ export function attachCascadeWs(
       if (msg.type === 'session.start') {
         let providers: CascadeProviders;
         try {
+          // msg.providers carries MODEL ids (arms.ts MENUS); the registry is
+          // keyed by VENDOR. resolveTriple maps each stage to its vendor AND
+          // the options that carry the model onto that adapter — dropping the
+          // model here would make Arms B and C run one configuration under two
+          // labels (ticket 039).
+          const resolved = resolveTriple(msg.providers);
           providers = {
-            stt: createStt(msg.providers.stt),
-            mt: createMt(msg.providers.mt),
-            tts: createTts(msg.providers.tts),
+            stt: createStt(resolved.stt.vendor, resolved.stt.options),
+            mt: createMt(resolved.mt.vendor, resolved.mt.options),
+            tts: createTts(resolved.tts.vendor, resolved.tts.options),
           };
         } catch (err) {
-          // Unknown provider: report and keep the socket open for a retry.
+          // Unknown model or provider: report and keep the socket open for a retry.
           sendJson(ws, { type: 'error', message: (err as Error).message });
           return;
         }
