@@ -569,7 +569,16 @@ export function useSessionController(deps: SessionDeps): SessionController {
       },
       quality: { wer: null },
     };
+    // LOCAL FIRST, UNCONDITIONALLY. The operator's take is not made contingent
+    // on a reachable server (ticket 023's order exactly).
     depsRef.current.ledger.appendLiveSession(session);
+    // TICKET 041 — then the SAME record to the server, so the stability
+    // artifact reaches data/, the exported bundle and a second machine. A
+    // rejection is swallowed: it costs the server's copy and nothing else, and
+    // the view stays usable. A session that produced NOTHING is posted too —
+    // storing is not aggregating, and deleting the record of a take that failed
+    // to produce anything would delete the finding.
+    void depsRef.current.liveSessions?.create(session).catch(() => {});
   };
 
   const stopSession = (): void => {

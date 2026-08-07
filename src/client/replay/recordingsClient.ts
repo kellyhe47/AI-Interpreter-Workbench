@@ -275,17 +275,24 @@ export function createBlindComparisonsClient(deps: ApiClientDeps): BlindComparis
 }
 
 /**
- * TICKET 041 — the live-sessions client. STUB.
+ * TICKET 041 — the live-sessions client.
  *
  * Like the blind-comparisons client it declares NO per-endpoint fallback code:
  * `invalid-live-session` is a request-shape complaint, not one of the four
  * states a caller branches on, so it surfaces as a plain 'http-error' carrying
  * the server's own message.
  */
-export function createLiveSessionsClient(_deps: ApiClientDeps): LiveSessionsClient {
+export function createLiveSessionsClient(deps: ApiClientDeps): LiveSessionsClient {
+  const http = createRequester(deps);
+
   return {
-    create: () => Promise.reject(new Error('createLiveSessionsClient: not implemented (041)')),
-    list: () => Promise.reject(new Error('createLiveSessionsClient: not implemented (041)')),
+    create: (session) =>
+      http.json<LiveSession>('/api/live-sessions', { method: 'POST', body: session }),
+
+    // The listing takes no filter at all: Results and the export both aggregate
+    // across every session, and there is no per-Recording question to ask of a
+    // soak over free conversation.
+    list: () => http.json<LiveSession[]>('/api/live-sessions', { method: 'GET' }),
   };
 }
 

@@ -215,10 +215,22 @@ export default function App(props: AppProps): ReactElement {
       };
     };
 
-    return {
+    // TICKET 041 — the live-session listing is copied through with the other
+    // two, and only when the injected source actually carries one. A wrapper
+    // that forgot it would silently drop the seam: `hydrateLedger` would see a
+    // source with no `liveSessions` key, treat this host as having no Live
+    // backend, and Results would stay Live-empty after a reload no matter how
+    // correct hydration is. Conversely, synthesising the key here would turn
+    // every pre-041 bag into one that claims a backend it does not have.
+    const wrapped: LedgerHydrationSource = {
       recordings: { list: observe(() => source.recordings.list()) },
       runs: { list: observe(() => source.runs.list()) },
     };
+    const { liveSessions } = source;
+    if (liveSessions !== undefined) {
+      wrapped.liveSessions = { list: observe(() => liveSessions.list()) };
+    }
+    return wrapped;
   }, [deps]);
 
   /**

@@ -108,9 +108,9 @@ import {
 // bench/soak — importing it here left two copies free to drift apart.
 import type { CorpusCategory } from '../../../core/corpus';
 import {
+  isAggregatableLiveSession,
   isAggregatableRun,
   isAggregatableUtterance,
-  isRealLiveSession,
   isRealRecord,
   isRealRun,
   runArmTag,
@@ -733,12 +733,18 @@ function deriveWerCell(ledger: RunLedger, armA: ArmTag, armB: ArmTag): string {
 }
 
 /**
- * TICKET 018 — is this LiveSession a MEASUREMENT?
+ * TICKET 018 / TICKET 041 — is this LiveSession a MEASUREMENT?
  *
- * Two independent ways it is not, and both have to be asked:
+ * Three independent ways it is not, and all have to be asked:
  *
- * 1. ITS DECLARED RECIPE names a fixture stage — `isRealLiveSession`, the
- *    Run-shaped rule's sibling, exported beside it in the ledger.
+ * 0. IT PRODUCED NOTHING, or its recipe names a fixture stage —
+ *    `isAggregatableLiveSession`, the gate exported beside `isAggregatableRun`
+ *    in the ledger. Ticket 041's clause is the zero-utterance one: pooling a
+ *    take that produced no utterance adds a session to `sessions` behind zero
+ *    latency samples and zero dollars, so the card reports more sessions behind
+ *    the same figures — which reads as evidence. Stored, listed, never counted.
+ * 1. (folded into 0) ITS DECLARED RECIPE names a fixture stage —
+ *    `isRealLiveSession`, the Run-shaped rule's sibling.
  * 2. THE RECORDS IT ACTUALLY PRODUCED are fixture records. A LiveSession
  *    stores the recipe the operator SELECTED (`config.providers` /
  *    `config.realtimeModel`), which under `?fixture=1` still names the real
@@ -755,7 +761,7 @@ function deriveWerCell(ledger: RunLedger, armA: ArmTag, armB: ArmTag): string {
  * judged on clause 1 alone — absence of evidence is not fixture evidence.
  */
 function isMeasuredLiveSession(ledger: RunLedger, session: LiveSession): boolean {
-  if (!isRealLiveSession(session)) return false;
+  if (!isAggregatableLiveSession(session)) return false;
   return !ledger.getRecords(session.id).some((record) => !isRealRecord(record));
 }
 
@@ -772,6 +778,12 @@ function isMeasuredLiveSession(ledger: RunLedger, session: LiveSession): boolean
  * sessions derives `{ columns: [], empty: true }`, the same explicit empty
  * state an untouched ledger derives (PRD §17 15g). They remain stored; only
  * the derivation refuses them.
+ *
+ * TICKET 041 — a session that produced NO UTTERANCE is refused on exactly the
+ * same terms, and both clauses now live in one place
+ * (`isAggregatableLiveSession`). A ledger holding nothing but empty sessions
+ * therefore derives that same explicit empty state rather than a column of
+ * zeros: a zero is not a measurement.
  */
 export function deriveLiveModel(ledger: RunLedger): LiveModel {
   const order: ArmTag[] = [];

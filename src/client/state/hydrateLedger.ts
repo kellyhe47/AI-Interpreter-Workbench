@@ -22,8 +22,16 @@
  * - RUNS ARE FETCHED UNFILTERED. `runs.list()` with no recordingId: Results
  *   aggregates across every Recording, so a per-Recording listing would be a
  *   second, narrower gate.
- * - LIVESESSIONS ARE NOT HYDRATED. They have no server representation; they
- *   are a client-side soak record. Hydration must leave that store untouched.
+ * - LIVESESSIONS ARE HYDRATED TOO (ticket 041), through an OPTIONAL third
+ *   listing. They used to have no server representation and were a purely
+ *   browser-local soak record — which is the defect ticket 041 names: PRD §8
+ *   wants one ledger under every view, and half of it was per-browser, so the
+ *   stability artifact PRD §17 19i defines could not survive a reload, reach
+ *   the exported bundle, or be read on a second machine. When a host wires no
+ *   `liveSessions` listing, the LiveSession store is left untouched exactly as
+ *   before. A ZERO-UTTERANCE session hydrates like any other: it is stored and
+ *   listed, and kept out of figures by `isAggregatableLiveSession`, not by
+ *   being dropped here.
  * - FAILURE PROPAGATES. A rejected list() rejects the returned promise with
  *   the client's own `ApiError`, so the caller can tell "the backend is
  *   unreachable" from "the backend is empty" (PRD §12, and the F3 bug this
@@ -36,7 +44,7 @@ import type {
   RecordingsClient,
   RunsClient,
 } from '../replay/recordingsClient';
-import type { RunLedger } from './ledger';
+import type { LiveSession, RunLedger } from './ledger';
 
 /**
  * The seam ResultsView is handed. Narrowed to `list` on purpose: hydration
@@ -60,13 +68,15 @@ export interface LedgerHydrationSource {
 }
 
 /**
- * Loads the server's Recordings and Runs into `ledger`.
+ * Loads the server's Recordings, Runs and — when the host wires one —
+ * LiveSessions into `ledger`.
  *
- * BOTH listings are awaited BEFORE anything is appended. That is what makes a
+ * EVERY listing is awaited BEFORE anything is appended. That is what makes a
  * failure honest: a rejected `runs.list()` must not leave the ledger holding
  * Recordings it will then describe as having no Runs, which reads exactly like
- * a real empty sweep. Either the whole server view lands or none of it does,
- * and the caller sees the `ApiError`.
+ * a real empty sweep, and a rejected `liveSessions.list()` must not leave a
+ * ledger whose Live half reads as a real, empty Live history. Either the whole
+ * server view lands or none of it does, and the caller sees the `ApiError`.
  *
  * Nothing is filtered and nothing is re-gated here: the aggregation gate lives
  * in the ledger (`isAggregatableRun`), so hydration loads the store verbatim
@@ -77,7 +87,14 @@ export async function hydrateLedger(
   ledger: RunLedger,
   source: LedgerHydrationSource,
 ): Promise<void> {
-  const [recordings, runs] = await Promise.all([source.recordings.list(), source.runs.list()]);
+  // A host with no live-session backend contributes an empty listing rather
+  // than a second code path: "this host wires no seam" and "the server holds
+  // no sessions" must both leave the LiveSession store exactly as it was.
+  const [recordings, runs, liveSessions] = await Promise.all([
+    source.recordings.list(),
+    source.runs.list(),
+    source.liveSessions?.list() ?? Promise.resolve<LiveSession[]>([]),
+  ]);
 
   // Idempotent on entity id. The ledger is append-only and may already hold a
   // locally-appended Run (a Replay run this tab just executed) or the same
@@ -95,5 +112,15 @@ export async function hydrateLedger(
     if (knownRuns.has(run.id)) continue;
     knownRuns.add(run.id);
     ledger.appendRun(run);
+  }
+
+  // Ticket 041 — the same append-and-dedupe rule, on session id. The take this
+  // very tab just finished was appended locally at Stop and POSTed afterwards,
+  // so the server's copy and the local one are ONE record, not two.
+  const knownSessions = new Set(ledger.getLiveSessions().map((s) => s.id));
+  for (const session of liveSessions) {
+    if (knownSessions.has(session.id)) continue;
+    knownSessions.add(session.id);
+    ledger.appendLiveSession(session);
   }
 }

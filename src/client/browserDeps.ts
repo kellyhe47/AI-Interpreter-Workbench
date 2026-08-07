@@ -58,9 +58,11 @@ import {
 import { segmentTake } from './replay/segment';
 import {
   createBlindComparisonsClient,
+  createLiveSessionsClient,
   createRecordingsClient,
   createRunsClient,
   type BlindComparisonsClient,
+  type LiveSessionsClient,
   type RecordingsClient,
   type RunsClient,
 } from './replay/recordingsClient';
@@ -305,6 +307,15 @@ export function buildBrowserDeps(): BrowserDeps {
   // the play/pause control moves exactly the audio the operator is hearing.
   const remoteAudioSink = createRemoteAudioSink();
 
+  // TICKET 041 — ONE live-sessions client, handed to BOTH seams: the write
+  // seam the controller POSTs a finished session through, and the hydration
+  // listing Results reads them back from. Built here for the same reason
+  // `blindComparisons` is: it is a transport over the same injected fetch, and
+  // it is the controller and Results that decide to USE it. A seam nothing
+  // wires is a seam that does not exist — which is exactly how twelve real
+  // takes ended up reachable from one browser profile and nowhere else.
+  const liveSessions: LiveSessionsClient = createLiveSessionsClient({ fetchImpl: browserFetch });
+
   // Ticket 012 — ONE transport per session, built from the resolved recipe.
   // `config.realtimeModel` is already resolved by the controller (never left
   // to the transport's cheap dev default), so what runs is what the derived
@@ -355,6 +366,7 @@ export function buildBrowserDeps(): BrowserDeps {
     ledger: new RunLedger(window.localStorage),
     now: () => Date.now(),
     replay,
-    hydrate: { recordings: replay.recordings, runs: replay.runs },
+    liveSessions,
+    hydrate: { recordings: replay.recordings, runs: replay.runs, liveSessions },
   };
 }

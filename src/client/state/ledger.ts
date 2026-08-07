@@ -477,10 +477,14 @@ export function isRealLiveSession(session: LiveSession): boolean {
  * rather than "nothing happened". It is treated exactly like a failed Run:
  * STORED, listed and exported — never aggregated.
  *
- * STUB (ticket 041): the rule is pinned by liveAggregationGate.test.ts.
+ * The two clauses answer DIFFERENT questions and neither is folded into the
+ * other: `isRealLiveSession` still returns true for an empty session, because
+ * "not a fixture" is not the same claim as "produced a measurement", and moving
+ * clause 2 into it would silently change ticket 018's rule.
  */
-export function isAggregatableLiveSession(_session: LiveSession): boolean {
-  throw new Error('isAggregatableLiveSession: not implemented (ticket 041)');
+export function isAggregatableLiveSession(session: LiveSession): boolean {
+  if (!isRealLiveSession(session)) return false;
+  return session.utterances.length > 0;
 }
 
 /**

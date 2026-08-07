@@ -59,6 +59,19 @@
  * toward no Recording. Discarding them would destroy real evaluator work;
  * counting them would let an id nothing in the bundle defines inflate a claim.
  *
+ * LIVE SESSIONS ARE EXPORTED AND DISCLOSED TOO (ticket 041, PRD §17 19i). They
+ * are read from their own append-only stream (live-sessions.jsonl), written
+ * verbatim as `live-sessions.json`, and counted in `summary.liveSessions` — a
+ * TOP-LEVEL field, never inside `totals`, because a five-minute soak over free
+ * conversation is not a Run over a fixed Recording. They are deliberately NOT
+ * unioned into the run record set, so they can reach neither `totals.runs` nor
+ * an experiment aggregate. `aggregated` mirrors the client's
+ * `isAggregatableLiveSession` exactly — real AND non-empty — so the bundle and
+ * the Results screen cannot disagree about how much Live evidence exists.
+ * ZERO-UTTERANCE and FIXTURE-sourced sessions are exported in full and counted
+ * toward no arm, disclosed by name: a take that produced nothing is the
+ * finding, not a gap to smooth over.
+ *
  * FAILURE LEAVES THE SOURCE ALONE (PRD §12). The bundle is staged in a sibling
  * directory and renamed into place, so a failed export never leaves a
  * half-written `results/<date>/`. The error names the output path that could
@@ -71,7 +84,7 @@ import path from 'node:path';
 import { deriveArmTag } from '../core/arms';
 import type { ArmTag } from '../core/arms';
 import { createStorage } from '../server/storage/index';
-import type { BlindComparison, Run } from '../server/storage/index';
+import type { BlindComparison, LiveSession, Run } from '../server/storage/index';
 
 /** PRD §9: 5 repetitions per utterance per arm. */
 export const DEFAULT_INTENDED_REPS = 5;
@@ -322,6 +335,69 @@ function summariseComparisons(
   };
 }
 
+/**
+ * TICKET 041 — the arm a LiveSession belongs to, DERIVED from its recipe, on
+ * exactly the terms a Run's arm is derived. `deriveArmTag` is the one place
+ * that mapping lives, so a soak and a sweep can never disagree about what Arm B
+ * is.
+ */
+function liveArmOf(session: LiveSession): ArmTag {
+  return deriveArmTag({
+    architecture: session.architecture,
+    realtimeModel: session.modelSnapshots?.realtime,
+    providers: session.providerTriple,
+  });
+}
+
+/** Ticket 018's rule, on the LiveSession shape (it carries no recordingId). */
+function isFixtureSourcedSession(session: LiveSession): boolean {
+  const triple = session.providerTriple;
+  if (triple && (triple.stt === 'fixture' || triple.mt === 'fixture' || triple.tts === 'fixture')) {
+    return true;
+  }
+  return Object.values(session.modelSnapshots ?? {}).includes('fixture');
+}
+
+/**
+ * TICKET 041 — the Live-session disclosure.
+ *
+ * AGGREGATED mirrors the client's `isAggregatableLiveSession` exactly: real AND
+ * non-empty. The two must not drift, or the exported bundle and the Results
+ * screen would disagree about how much Live evidence exists.
+ *
+ * A ZERO-UTTERANCE session is counted in `total`, exported verbatim, and
+ * counted toward NO arm. Pooling one would add a session to a column behind
+ * zero latency samples and zero dollars, which reads as a measured free
+ * session rather than as "nothing happened" — the finding, smoothed over. It is
+ * disclosed by name for the same reason a failed Run is.
+ */
+function summariseLiveSessions(sessions: readonly LiveSession[]): LiveSessionSummary {
+  const byArm: Record<string, number> = {};
+  let aggregated = 0;
+  let zeroUtterance = 0;
+  let fixtureSourced = 0;
+
+  for (const session of sessions) {
+    const empty = (session.utterances ?? []).length === 0;
+    const fixture = isFixtureSourcedSession(session);
+    if (empty) zeroUtterance += 1;
+    if (fixture) fixtureSourced += 1;
+    if (empty || fixture) continue;
+    aggregated += 1;
+    const arm = liveArmOf(session);
+    byArm[arm] = (byArm[arm] ?? 0) + 1;
+  }
+
+  return {
+    total: sessions.length,
+    aggregated,
+    excluded: sessions.length - aggregated,
+    zeroUtterance,
+    fixtureSourced,
+    byArm,
+  };
+}
+
 function reason(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -344,14 +420,19 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
   let ledger: Run[];
   let stored: Run[];
   let comparisons: BlindComparison[];
+  let liveSessions: LiveSession[];
   try {
     // Comparisons come from their OWN append-only stream (comparisons.jsonl),
     // never from the ledger — see the storage header. Reading them here is what
-    // puts human judgement into the bundle the write-up cites.
-    [ledger, stored, comparisons] = await Promise.all([
+    // puts human judgement into the bundle the write-up cites. Ticket 041's
+    // sessions arrive the same way, from live-sessions.jsonl: they are NOT
+    // unioned into `runs` below, so they cannot reach `totals.runs` or an
+    // experiment aggregate.
+    [ledger, stored, comparisons, liveSessions] = await Promise.all([
       store.readLedger(),
       store.listRuns(),
       store.listBlindComparisons(),
+      store.listLiveSessions(),
     ]);
   } catch (err) {
     throw new Error(`export-results: could not read the data store at ${dataDir} — ${reason(err)}`, {
@@ -383,16 +464,7 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
     exportedAt: date,
     intendedReps,
     blindComparisons: summariseComparisons(comparisons, new Set(byId.keys())),
-    // TICKET 041 — STUB. The live-session stream is not read yet; pinned by
-    // exportResults.liveSessions.test.ts.
-    liveSessions: {
-      total: 0,
-      aggregated: 0,
-      excluded: 0,
-      zeroUtterance: 0,
-      fixtureSourced: 0,
-      byArm: {},
-    },
+    liveSessions: summariseLiveSessions(liveSessions),
     totals: { runs: runs.length, aggregated, excluded: runs.length - aggregated },
     experiments,
     empty,
@@ -417,6 +489,17 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
     await fs.writeFile(
       path.join(stagingDir, 'blind-comparisons.json'),
       `${JSON.stringify(comparisons, null, 2)}\n`,
+      'utf8',
+    );
+    // Ticket 041 — the sessions themselves, VERBATIM, so a reviewer can
+    // recompute the disclosed figures and read the excluded takes rather than
+    // taking the summary's word for either. Written unconditionally (an empty
+    // array on an empty store), like blind-comparisons.json, so the bundle's
+    // shape never depends on whether anyone ran a Live session. NO audio is
+    // written — the shape carries none (PRD §17 19h).
+    await fs.writeFile(
+      path.join(stagingDir, 'live-sessions.json'),
+      `${JSON.stringify(liveSessions, null, 2)}\n`,
       'utf8',
     );
     await fs.writeFile(

@@ -10,6 +10,7 @@
  *   runs/<id>.out.wav       synthesized output audio
  *   ledger.jsonl            append-only, ONE LINE PER RUN
  *   comparisons.jsonl       append-only, ONE LINE PER BLIND COMPARISON
+ *   live-sessions.jsonl     append-only, ONE LINE PER LIVE SESSION
  *
  * THE BASE DIRECTORY IS INJECTED, NEVER HARDCODED. `createStorage(baseDir)`
  * takes the root as an argument so tests run against a `mkdtemp` directory and
@@ -35,6 +36,16 @@
  * `exportResults` unions it into the exported RUN record set, so a comparison
  * sharing that file would be counted in `totals.runs` and derived into an arm.
  * A judgement about two runs is not a third run.
+ *
+ * LIVE SESSIONS GET THEIR OWN STREAM TOO, FOR EXACTLY THAT REASON (ticket 041).
+ * `appendLiveSession`/`listLiveSessions` obey the same append-only + tolerant-
+ * reader discipline, against live-sessions.jsonl. A five-minute soak over free
+ * conversation is not a Run over a fixed Recording, and a session sharing
+ * ledger.jsonl would be counted in `totals.runs` and derived into an arm. NO
+ * AUDIO is written for one — there is deliberately no method here that could
+ * (PRD §17 19h). A ZERO-UTTERANCE session is stored like any other: storing is
+ * not aggregating, and the exclusion belongs to the readers, exactly as it does
+ * for a failed Run.
  *
  * AUDIO IS IMMUTABLE. A Recording's WAV is written once, by `createRecording`,
  * and there is deliberately no method to replace it. Only the label is mutable
@@ -166,8 +177,8 @@ async function readJson<T>(file: string): Promise<T | undefined> {
  * TOLERANT READER for an append-only JSONL stream. A line that will not parse
  * is skipped, so a process killed part-way through a write costs THAT LINE and
  * not the whole file; a file that is not there yet is an empty stream, not an
- * error. Shared by the run ledger and the blind-comparison stream so the two
- * cannot drift in how much a torn write costs.
+ * error. Shared by the run ledger, the blind-comparison stream and the
+ * live-session stream so the three cannot drift in how much a torn write costs.
  */
 async function readJsonl<T>(file: string): Promise<T[]> {
   let text: string;
@@ -200,6 +211,8 @@ export function createStorage(baseDir: string): Storage {
   const ledgerFile = path.join(baseDir, 'ledger.jsonl');
   // Ticket 023 — a SEPARATE stream, beside the ledger and never inside it.
   const comparisonsFile = path.join(baseDir, 'comparisons.jsonl');
+  // Ticket 041 — a SEPARATE stream again, for the same reason.
+  const liveSessionsFile = path.join(baseDir, 'live-sessions.jsonl');
 
   const recordingJson = (id: string) => path.join(recordingsDir, `${id}.json`);
   const recordingWav = (id: string) => path.join(recordingsDir, `${id}.wav`);
@@ -375,14 +388,23 @@ export function createStorage(baseDir: string): Storage {
         : comparisons.filter((c) => c.recordingId === opts.recordingId);
     },
 
-    // TICKET 041 — STUBS. Tests are red until the append-only live-session
-    // stream exists; the shape is pinned by liveSessions.test.ts.
-    async appendLiveSession(_session: LiveSession): Promise<LiveSession> {
-      throw new Error('appendLiveSession: not implemented (ticket 041)');
+    async appendLiveSession(session: LiveSession): Promise<LiveSession> {
+      // APPEND-ONLY, exactly like the ledger and the comparison stream: one
+      // line, 'a' flag, no read of the existing file. The record is stored
+      // VERBATIM — it IS the stability artifact (PRD §17 19i), and rewriting
+      // any field here would change what was measured. Nothing touches runs/
+      // or ledger.jsonl, so a session is never half a Run, and no audio is
+      // written because there is no audio on the shape to write.
+      await ensureDir(baseDir);
+      await fs.appendFile(liveSessionsFile, `${JSON.stringify(session)}\n`, 'utf8');
+      return session;
     },
 
     async listLiveSessions(): Promise<LiveSession[]> {
-      throw new Error('listLiveSessions: not implemented (ticket 041)');
+      // Tolerant, like the other two streams: a torn line costs that line.
+      // Zero-utterance sessions are listed like any other — the aggregation
+      // gate lives in the readers, not here.
+      return readJsonl<LiveSession>(liveSessionsFile);
     },
 
     async readLedger(): Promise<Run[]> {
