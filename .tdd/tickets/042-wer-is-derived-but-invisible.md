@@ -1,7 +1,7 @@
 ---
 id: 042
 title: WER is computed and stored but never rendered, and nothing ever invokes the scoring pass
-status: pending
+status: green
 source: v3-corpus
 depends_on: [034]
 touches: [src/client/views/ResultsView.tsx, scripts/, src/harness/]
@@ -48,3 +48,37 @@ operator can produce WER analysis", which is what the operator actually asked fo
   transcripts. Both are already persisted — this is a join, not new measurement.
 - Prefer the script: it is re-runnable over a whole corpus after the fact, which is the entire point
   of WER being post-hoc, and it needs no UI decisions.
+
+## Attempt log
+
+- Green in one implementation pass, 30 red -> 0. Suite 1632/91; both tsconfigs clean; build clean.
+- **Render:** both derivations run ONCE at the view root and are passed down as props, so the cards
+  stay renderers of a model. The view never computes or inspects a WER number — `WerAggregate.cell`
+  already encodes the precedence (figure -> not applicable -> not yet measured), so the view has
+  exactly two behaviours: echo `.cell`, or use `WER_NOT_MEASURED_CELL` when the aggregate is absent
+  entirely. **There is no branch that can turn a null mean into a digit.**
+- The by-category cell is joined on **(category x arm)**, never the category alone — the same
+  mistake 032's test-writer caught in its own reference implementation, now defended at the view
+  layer too (mutation: 3 red).
+- `data-sidecar` and the `(sidecar transcript)` suffix stay on column a **unconditionally**, even
+  once it carries a figure. The test-writer verified the pre-existing `ResultsView.test.tsx:376`
+  survives only because of this; dropping the suffix when a figure appears would have broken it.
+- **Scoring pass:** `src/harness/scoreWer.ts` + a thin `scripts/score-wer.mjs` shell, mirroring
+  `export-results`. Its only write is `appendWerScore` — `runs/*.json` and `ledger.jsonl` are
+  byte-identical after a pass and `totals.runs` is untouched.
+- Implementer's good call, outside the ticket's `touches`: rather than restate the four-clause
+  aggregation gate it **exported `isGatePassingRun` from `exportResults.ts`** and imported it, so the
+  two cannot drift.
+- **Manifest absent != reference absent**, the decision that matters most here: a Recording with no
+  `utterances` manifest (a mic take), or a Run naming a Recording the store lacks, is SKIPPED. A
+  Cantonese manifest — entries present, no `referenceText` — is SCORED `wer: null` /
+  `no-reference-text`. Without the split every mic run would emit null scores that read as
+  "we tried and could not".
+- No de-duplication and no read of prior scores: last-write-wins lives only in `latestWerScores`, on
+  read, so a second pass appends lines without growing the atom set.
+- Mutation-checked:
+  | mutation | result |
+  |---|---|
+  | category WER keyed on category alone, not (category x arm) | 3 red |
+  | the scoring pass skips its gate check | 5 red |
+  | a no-manifest run scored as null instead of skipped | 2 red |
