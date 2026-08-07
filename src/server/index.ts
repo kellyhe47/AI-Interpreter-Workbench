@@ -33,6 +33,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createBlindComparisonsRouter, createRecordingsRouter, createRunsRouter } from './routes'
 import { createStorage } from './storage'
+import { loadServerEnv } from './env'
 import type { Storage } from './storage'
 import { createTokenRouter } from './token'
 import { attachCascadeWs } from './ws'
@@ -135,6 +136,12 @@ export function resolveApiPort(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 if (process.env.NODE_ENV !== 'test') {
+  // Ticket 037. BEFORE anything reads process.env: without this the provider
+  // keys are undefined, /api/realtime-token answers 500, and a Live session
+  // reaches "connected · listening" before failing opaquely. Skipped under
+  // NODE_ENV=test so the suite's environment stays hermetic and no test can
+  // accidentally acquire a real key.
+  loadServerEnv()
   const port = resolveApiPort()
   createAppServer().listen(port, () => console.log(`server listening on :${port}`))
 }
