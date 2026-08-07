@@ -1,7 +1,7 @@
 ---
 id: 039
 title: Cascade passes MODEL ids where the registry expects VENDOR names — Arms B and C cannot run at all
-status: pending
+status: green
 source: qa-live
 depends_on: []
 touches: [src/server/ws.ts, src/core/registry.ts, src/core/arms.ts]
@@ -74,3 +74,36 @@ real-runtime gap that hid ticket 021 (port) and ticket 037 (env). Third occurren
   in `ws.ts`.
 - `LiveSession` currently records the CONFIGURED triple (ticket 026, knowingly deferred). Once the
   wire carries a resolved vendor+model, revisit 026 — it may become trivially fixable.
+
+## Attempt log
+
+- Green in one implementation pass, 27 red -> 0. Suite 1300/71; both tsconfigs clean; build clean.
+- `src/core/models.ts` holds a per-kind table `Record<ProviderKind, Record<model, {vendor, optionKey}>>`.
+  Per-kind nesting makes kind isolation STRUCTURAL rather than a guard, so
+  `resolveModel('tts','gpt-4o-transcribe')` cannot resolve.
+- **The `modelId` trap is closed by construction:** the option key is stored per table entry beside
+  the vendor and the options object is built by computed key from that entry. There is no code path
+  where a uniform `model` could be substituted. Verified against the adapters —
+  `elevenlabs-tts.ts:98` reads `config.modelId`, `elevenlabs-stt.ts:140` reads `config.model`, so
+  ElevenLabs STT and TTS genuinely differ.
+- Known-model lists are derived from `MENUS`, so a menu entry added without a mapping fails loudly
+  and names itself.
+- `fixture` escapes BEFORE the lookup (the test-writer found this; without it the existing
+  `ws.test.ts` fixture path dies).
+- `resolveTriple` is called inside `ws.ts`'s existing try/catch, so an unknown MODEL now inherits
+  the same "error frame, socket stays open" contract unknown vendors already had.
+- Untouched as required: `registry.ts` (still vendor-keyed), `src/core/contracts`, `orchestrator.ts`.
+- Mutation-checked, four properties, each independently load-bearing:
+  | mutation | result |
+  |---|---|
+  | ElevenLabs TTS `modelId` collapsed to `model` | 8 red — the trap is defended |
+  | model dropped entirely (vendor-only "fix") | 17 red — B/C cannot collapse silently |
+  | `ws.ts` passes the raw wire string again (the original bug) | 4 red |
+  | fixture escape removed | 3 red |
+- Implementer's judgement worth keeping: it considered asserting at MODULE LOAD that every `MENUS`
+  entry has a mapping, and rejected it because a throw during import would take down both bundles
+  over one bad menu edit. The derived error list gives the same loudness at point of use.
+- Ticket 026 stays open. The test-writer correctly disagreed with this ticket's note that 026 would
+  become "trivially fixable": resolution happens server-side inside `ws.ts` and nothing about the
+  resolved pair travels back to the client or onto the stored record. 026 still needs its own
+  plumbing decision.
