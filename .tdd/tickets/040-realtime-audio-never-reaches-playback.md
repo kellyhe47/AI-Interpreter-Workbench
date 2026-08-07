@@ -1,7 +1,7 @@
 ---
 id: 040
 title: Realtime returns audio on the WebRTC media track, which nothing consumes — Arm A is silent and unmeasurable
-status: pending
+status: green
 source: qa-live
 depends_on: []
 touches: [src/client/transport/realtime.ts, src/client/views/useSessionController.ts]
@@ -110,3 +110,44 @@ project's headline comparison.
 If audio arrives on the media track, `audio_queued` cannot come from a PCM enqueue. Decide and
 document how it is stamped (first inbound RTP? first non-silent output sample?) — and make sure the
 definition stays comparable with cascade's, or Experiment 1 compares two different quantities.
+
+## Attempt log
+
+- Green in one implementation pass, 10 red -> 0. Suite 1323/71 at the time; both tsconfigs and the
+  build clean.
+- The open question was settled EMPIRICALLY before any code was written (see above): over WebRTC
+  OpenAI sends audio on the media track only, and `response.output_audio.delta` does not exist.
+- Implementation: `pc.ontrack` installed in `connect()` before `setRemoteDescription`;
+  `output_audio_buffer.started` -> `onTiming({event:'audio_queued'})` once per utterance, re-armed
+  at `response.done`; the runner resolves `audio_queued` as `firstAudioAt ?? <transport mark>` at
+  BOTH run and utterance level. A real `<audio srcObject>` sink is wired in `browserDeps`.
+- **The decoded-PCM path still WINS over a volunteered mark**, so cascade is untouched and the two
+  arms keep one definition of "first audio".
+- Both traps the test-writer found in its reference implementation were avoided because it flagged
+  them: the `this.pc === null` early-track guard, and per-utterance `status`/`errors` keying on the
+  RESOLVED timing rather than on `audioAt` (otherwise a track-carried utterance is marked
+  'no output audio' while the run simultaneously reports a latency sample).
+- Mutation-checked, five properties:
+  | mutation | result |
+  |---|---|
+  | `ontrack` never installed | 3 red |
+  | `audio_queued` mark renamed (code line, not comment) | 3 red |
+  | the `output_audio_buffer.started` case removed | 3 red |
+  | runner ignores the transport-sent mark | 2 red |
+  | early-track guard reduced to `this.pc !== pc` | **0 red at first — GAP, since closed** |
+- The last row was a real hole: the trap the test-writer had personally hit was not pinned. I sent
+  it back to add exactly one test, which fires `ontrack` from inside the fake's
+  `setRemoteDescription` (where a real peer connection raises it, since applying the answer creates
+  the receiver). Verified to discriminate: 27 pass with the correct guard, 1 fails with the mutated
+  one.
+
+### Follow-up the test-writer identified (NOT fixed here)
+
+`first_audio_delta` lives only on the `response.output_audio.delta` branch, so over WebRTC it never
+fires. `deriveRealtimeIntervals` computes `model = first_audio_delta - server_speech_stopped` and
+`queue = audio_queued - first_audio_delta`, so a real Arm A session renders its 3-interval
+breakdown with two nulls even though the headline end-to-end figure is now correct. Stamping it
+from `output_audio_buffer.started` too would report a fake 0 ms queue, so that was deliberately NOT
+done. Worth a ticket deciding whether realtime's middle interval is simply unobservable over WebRTC
+and should be labelled so — which would be consistent with PRD §12's opacity stance and with the
+existing "model: opaque" treatment.

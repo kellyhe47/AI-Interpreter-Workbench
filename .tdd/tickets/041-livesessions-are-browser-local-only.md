@@ -1,7 +1,7 @@
 ---
 id: 041
 title: LiveSessions are never persisted server-side — the stability benchmark lives in one browser's localStorage
-status: pending
+status: green
 source: qa-live
 depends_on: []
 touches: [src/server/routes/, src/server/storage/, src/client/state/hydrateLedger.ts, src/harness/exportResults.ts]
@@ -65,3 +65,40 @@ aggregated, exactly like a failed Run.
 
 Their takes are not lost — they are in that browser's localStorage and visible in Results on that
 machine. They are simply not in `data/` and not exportable yet.
+
+## Attempt log
+
+- Green in one implementation pass, 68 red -> 0. Suite 1405/78; both tsconfigs clean; build clean.
+- LiveSessions get their OWN append-only stream `data/live-sessions.jsonl`, mirroring
+  `appendBlindComparison` exactly: one line, `'a'` flag, no read of the existing file, shared
+  tolerant reader. Route `POST/GET /api/live-sessions`, code `invalid-live-session`.
+- **Two independent barriers keep them out of the run set**, neither relying on the other: on the
+  write side `appendLiveSession` touches only `liveSessionsFile` and never `appendRun`,
+  `runs/<id>.json` or `ledgerFile`; on the read side `exportResults` builds `byId` from
+  `stored ∪ ledger` only and `liveSessions` is a separate binding, so `totals`, `experiments` and
+  the per-run files are byte-identical with and without sessions present.
+- **Zero-utterance sessions are stored, hydrated and exported but never aggregated** — the failed-Run
+  treatment. `isRealLiveSession` deliberately still returns true for them: "not a fixture" and
+  "produced a measurement" are separate claims, and a test pins that distinction.
+- The route refuses an audio-bearing body, so §17 19h ("Live persists no audio") is enforced at the
+  boundary rather than assumed.
+- Both traps the test-writer flagged were handled: `App.tsx`'s `useMemo` observer now copies
+  `liveSessions` through `observe(...)` (synthesising the key unconditionally would make every
+  pre-041 bag claim a backend it does not have), and `hydrateLedger`'s header — which still said
+  "LIVESESSIONS ARE NOT HYDRATED. They have no server representation" — was rewritten.
+- Mutation-checked, four properties:
+  | mutation | result |
+  |---|---|
+  | sessions appended to `ledgerFile` instead of their own stream | 9 red |
+  | a zero-utterance session IS aggregated | 5 red |
+  | a fixture session passes the gate | 1 red |
+  | hydration drops live sessions | 8 red |
+
+### Open question the implementer raised — worth a decision
+
+`byArm` in the export summary may key on `'ad-hoc'`: no test covers an off-arm Live session, and the
+implementer deliberately mirrored `isAggregatableLiveSession` rather than adding an arm gate, so an
+ad-hoc-recipe session with utterances IS aggregated and appears under an `"ad-hoc"` key. The
+reasoning was that an arm gate here would make the exported bundle and the Results screen disagree
+about how much Live evidence exists. That is the right instinct, but the rule was never stated —
+decide it explicitly rather than leaving it inferred.
