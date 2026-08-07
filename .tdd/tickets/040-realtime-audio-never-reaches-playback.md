@@ -1,0 +1,81 @@
+---
+id: 040
+title: Realtime returns audio on the WebRTC media track, which nothing consumes — Arm A is silent and unmeasurable
+status: pending
+source: qa-live
+depends_on: []
+touches: [src/client/transport/realtime.ts, src/client/views/useSessionController.ts]
+iterations: 0
+test_files: []
+branch: ""
+---
+
+## Severity: HIGH — Arm A produces no audio and therefore no latency sample
+
+Operator report:
+
+> Realtime mode works! Picks up my utterances and I see the translated Spanish. However the play
+> button is not working — I don't hear any Spanish being spoken back to me.
+
+## What was ruled out first
+
+- `ArmPlayback` is **fine**. Driven directly in the operator's browser it started a real 440 Hz
+  tone: `playing: true`, `startedCount: 1`, `bufferedRemaining: 0`, context `running`.
+- The playback AudioContext is **not** suspended. A context created outside a user gesture in that
+  browser reported `running` and its `currentTime` advanced. (This was my first hypothesis and it
+  was wrong — recorded so it is not re-tried.)
+- Live wires playback correctly: `autoplay: true`, `onAudio -> playback.enqueue`.
+
+## Root cause
+
+`src/client/transport/realtime.ts` negotiates INBOUND audio and then never consumes it. Its own
+comment states the design:
+
+> "attach the live mic track BEFORE createOffer so the offer carries a sendrecv audio m-line
+> (mic up, **model audio down**). Without a stream, fall back to a recvonly transceiver so the
+> model's audio track could still flow — **playback itself stays on the data-channel PCM path by
+> design**."
+
+Playback depends on `response.output_audio.delta` events decoded from base64 on the data channel
+(`realtime.ts:308`). **There is no `ontrack` handler, no `srcObject`, and no
+`createMediaStreamSource` anywhere in the client** for the peer connection — a repo-wide grep
+returns only the *microphone* source in `browserDeps.ts`. So the model's audio track arrives and is
+dropped.
+
+This fits the symptom exactly: data-channel text events work (transcripts and the Spanish
+translation appear), and the media track — where WebRTC actually carries the audio — goes nowhere.
+
+**OPEN QUESTION to settle before implementing:** whether OpenAI's Realtime *WebRTC* transport emits
+`response.output_audio.delta` on the data channel at all, or sends audio solely over the media
+track. Over the WebSocket transport those deltas are the audio path; over WebRTC the media track
+normally is. Confirm by instrumenting a real session — count `output_audio.delta` events and check
+`pc.getReceivers()` inbound audio bytes — before choosing the fix. Do not implement on assumption.
+
+## The measurement consequence, which is worse than the silence
+
+`timings.audio_queued` is stamped at the first audio (`playback.audioQueuedAt` in Live,
+`firstAudioAt` in `runOnce`). If no audio ever arrives:
+
+- Live Arm A reports no perceived-latency figure at all
+- **Replay Arm A runs get `audio_queued: null`**, so they count toward `n` and cost but are
+  excluded from every percentile — Arm A silently contributes no latency sample to Experiment 1
+
+So this is not merely "no sound": Arm A is currently **unmeasurable**, which is half of the
+project's headline comparison.
+
+## Acceptance criteria
+
+- [ ] Settle the open question above with evidence from a real session; record the finding
+- [ ] The model's audio is audible in Live under autoplay, without pressing anything
+- [ ] `timings.audio_queued` is stamped from the FIRST audible sample of the utterance, by whichever
+      path actually carries it, so Arm A latency is comparable with cascade's
+- [ ] The play/pause control reflects and controls real audio
+- [ ] Replay Arm A produces a non-null `audio_queued` and therefore a real latency sample
+- [ ] Test fakes that implement neither `ontrack` nor media APIs keep working — the existing
+      realtime tests must not need a real peer connection
+
+## Notes
+
+If audio arrives on the media track, `audio_queued` cannot come from a PCM enqueue. Decide and
+document how it is stamped (first inbound RTP? first non-silent output sample?) — and make sure the
+definition stays comparable with cascade's, or Experiment 1 compares two different quantities.
