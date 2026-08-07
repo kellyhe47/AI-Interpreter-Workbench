@@ -6,7 +6,7 @@ source: v3-corpus
 depends_on: [030]
 touches: [src/client/replay/runner.ts, src/client/state/ledger.ts, src/server/storage/types.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/replay/runner.test.ts]
 branch: ""
 ---
 

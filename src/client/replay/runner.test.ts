@@ -13,9 +13,16 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag } from '../../core/arms';
+import type { CorpusUtterance } from '../../core/corpus';
 import { SAMPLE_RATE } from '../../core/protocol';
 import { writeWav } from '../../harness/wav';
-import { isRealRun, runArmTag, type Recording, type Run } from '../state/ledger';
+import {
+  isRealRun,
+  runArmTag,
+  type Recording,
+  type Run,
+  type RunUtterance,
+} from '../state/ledger';
 import {
   FIXTURE_PROVIDERS,
   FixtureTransport,
@@ -25,7 +32,13 @@ import {
 import type { TransportConfig, TransportKind } from '../transport/types';
 import { FRAME_MS, FRAME_SAMPLES } from './pacer';
 import { ApiError, type RecordingsClient, type RunsClient } from './recordingsClient';
-import { runOnce, type RunOnceConfig, type RunnerDeps } from './runner';
+import {
+  SEGMENTATION_IDLE_MS,
+  SEGMENTATION_SETTLE_MS,
+  runOnce,
+  type RunOnceConfig,
+  type RunnerDeps,
+} from './runner';
 
 /** Distinct sample values, so frame content is falsifiable. */
 const ramp = (n: number): Int16Array =>
@@ -553,5 +566,647 @@ describe('runOnce — a fixture-driven run can never become evidence', () => {
     await vi.advanceTimersByTimeAsync(1000);
     const { run } = await done;
     expect(isRealRun(run)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 031 — per-utterance measurement.
+//
+// A PRD §9 corpus Recording is a <=45 s take holding ~4 utterances of
+// deliberately DIFFERENT categories, so one Recording is not one utterance.
+// The measured atom is the utterance; the Run is the container that produced a
+// set of them. Every transport event already carries `utt` — the runner must
+// BUCKET by it, never flatten.
+//
+// The load-bearing rules pinned below:
+//  - each utterance's speech_end is t0 + manifest[i].trueSpeechEndMs, from the
+//    MANIFEST, never the Recording-level speechEndMs and never VAD;
+//  - a segmentation count that disagrees with the manifest is a RUN-LEVEL
+//    failure with a named reason and NO partial attribution.
+// ---------------------------------------------------------------------------
+
+/**
+ * The manifest is deliberately supplied OUT of array order: `CorpusUtterance.index`
+ * carries the ordering (see core/corpus.ts), the array position does not.
+ */
+const MANIFEST: CorpusUtterance[] = [
+  { id: 'u-2', index: 2, category: 'numbers-dates', trueSpeechEndMs: 400, referenceText: 'two' },
+  { id: 'u-1', index: 1, category: 'short-reply', trueSpeechEndMs: 200, referenceText: 'one' },
+  { id: 'u-4', index: 4, category: 'disfluency', trueSpeechEndMs: 800 },
+  { id: 'u-3', index: 3, category: 'long-compound', trueSpeechEndMs: 600, referenceText: 'three' },
+];
+
+/** 60 USD/min over a 1000 ms clip => a Run cost of exactly 1, easy to split. */
+const CORPUS_COST_PER_MIN = 60;
+
+/**
+ * A corpus Recording. `speechEndMs` (900) matches NO manifest entry, so any
+ * utterance anchored on the Recording instead of on its own manifest offset is
+ * caught by the anchoring assertions rather than passing by coincidence.
+ */
+const CORPUS_RECORDING: Partial<Recording> = {
+  origin: 'corpus',
+  durationMs: 1000,
+  speechEndMs: 900,
+  utterances: MANIFEST,
+  corpusVersion: 'corpus-v1',
+};
+
+interface CorpusScriptOptions {
+  /** How many utterances the TRANSPORT segments the clip into. */
+  count?: number;
+  /** These utts emit no output audio at all. */
+  silentUtts?: number[];
+  /** Gap between consecutive utterance answers. Default 100 ms. */
+  stepMs?: number;
+  extra?: FixtureScriptEvent[];
+}
+
+/** Utterance u answers on the [100 + step*u, 150 + step*u] ms window. */
+function corpusScript(opts: CorpusScriptOptions = {}): FixtureScriptEvent[] {
+  const count = opts.count ?? 4;
+  const step = opts.stepMs ?? 100;
+  const silent = new Set(opts.silentUtts ?? []);
+  const events: FixtureScriptEvent[] = [];
+  for (let utt = 0; utt < count; utt++) {
+    const base = 100 + utt * step;
+    events.push(
+      { at: base, type: 'sourceText', kind: 'partial', text: `src ${utt} partial`, utt },
+      { at: base + 5, type: 'sourceText', kind: 'final', text: `src ${utt}`, utt },
+      { at: base + 10, type: 'timing', event: 'stt_final', utt, t: base + 10, stage: 'stt' },
+      { at: base + 20, type: 'timing', event: 'tts_first_byte', utt, t: base + 20, stage: 'tts' },
+      { at: base + 25, type: 'targetText', kind: 'final', text: `tgt ${utt}`, utt },
+      { at: base + 50, type: 'utteranceComplete', record: { utt } },
+    );
+    if (!silent.has(utt)) {
+      events.push(
+        { at: base + 30, type: 'audio', pcm: ramp(240), utt },
+        { at: base + 40, type: 'audio', pcm: ramp(240), utt },
+      );
+    }
+  }
+  return [...events, ...(opts.extra ?? [])];
+}
+
+function corpusHarness(opts: CorpusScriptOptions & { recording?: Partial<Recording> } = {}) {
+  const script = corpusScript(opts);
+  return makeHarness({
+    recording: { ...CORPUS_RECORDING, ...opts.recording },
+    transportFactory: () =>
+      new FixtureTransport({
+        armId: 'fx',
+        kind: 'cascade',
+        script,
+        costPerMinUsd: CORPUS_COST_PER_MIN,
+      }),
+  });
+}
+
+/** Runs to completion on virtual time; every corpus script settles well inside 2 s. */
+async function runCorpus(h: Harness) {
+  const done = start(h);
+  await vi.advanceTimersByTimeAsync(2000);
+  return done;
+}
+
+function utterancesOf(run: Run): RunUtterance[] {
+  expect(run.utterances).toBeDefined();
+  return run.utterances!;
+}
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — a Run is a container of utterance records (ticket 031)', () => {
+  it('a 4-utterance Recording produces 4 RunUtterances in MANIFEST order, not array order', async () => {
+    const h = corpusHarness();
+    const { run } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(4);
+    expect(utterances.map((u) => u.index)).toEqual([1, 2, 3, 4]);
+    expect(utterances.map((u) => u.utteranceId)).toEqual(['u-1', 'u-2', 'u-3', 'u-4']);
+    expect(utterances.map((u) => u.category)).toEqual([
+      'short-reply',
+      'numbers-dates',
+      'long-compound',
+      'disfluency',
+    ]);
+    // The container is what gets POSTed, records and all.
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]!.utterances).toEqual(utterances);
+  });
+
+  it('the run does NOT end at the first utterance boundary — all four are measured', async () => {
+    const h = corpusHarness();
+    const { run } = await runCorpus(h);
+    // Pre-031 the run finished at utt 0's completion (150 ms) and utterances
+    // 2..4 were never delivered at all.
+    expect(run.status).toBe('complete');
+    expect(utterancesOf(run)).toHaveLength(4);
+    expect(utterancesOf(run)[3]!.transcripts.target).toBe('tgt 3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — per-utterance anchoring comes from the MANIFEST (ticket 031)', () => {
+  const anchorCases = [
+    { index: 1, utteranceId: 'u-1', trueSpeechEndMs: 200 },
+    { index: 2, utteranceId: 'u-2', trueSpeechEndMs: 400 },
+    { index: 3, utteranceId: 'u-3', trueSpeechEndMs: 600 },
+    { index: 4, utteranceId: 'u-4', trueSpeechEndMs: 800 },
+  ];
+
+  it.each(anchorCases)(
+    'utterance $index ($utteranceId) speech_end is t0 + $trueSpeechEndMs',
+    async ({ index, trueSpeechEndMs }) => {
+      const h = corpusHarness();
+      const { run, t0 } = await runCorpus(h);
+
+      const utterance = utterancesOf(run).find((u) => u.index === index)!;
+      expect(utterance.timings.speech_end).toBe(t0 + trueSpeechEndMs);
+      // The mutation check the ticket calls for: the Recording-level anchor
+      // (900) must NEVER be what an utterance reports.
+      expect(utterance.timings.speech_end).not.toBe(t0 + CORPUS_RECORDING.speechEndMs!);
+    },
+  );
+
+  it('every utterance has a DISTINCT anchor — none of them share the Recording anchor', async () => {
+    const h = corpusHarness();
+    const { run, t0 } = await runCorpus(h);
+    const anchors = utterancesOf(run).map((u) => u.timings.speech_end);
+    expect(anchors).toEqual([t0 + 200, t0 + 400, t0 + 600, t0 + 800]);
+    expect(new Set(anchors).size).toBe(4);
+  });
+
+  it('a transport-sent speech_end is STILL discarded, per utterance and run-wide', async () => {
+    const h = corpusHarness({
+      extra: [
+        { at: 130, type: 'timing', event: 'speech_end', utt: 0, t: 9999, stage: 'stt' },
+        { at: 230, type: 'timing', event: 'speech_end', utt: 1, t: 8888, stage: 'stt' },
+      ],
+    });
+    const { run, t0 } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances[0]!.timings.speech_end).toBe(t0 + 200);
+    expect(utterances[1]!.timings.speech_end).toBe(t0 + 400);
+    expect(run.timings.speech_end).toBe(t0 + CORPUS_RECORDING.speechEndMs!);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — marks and audio are BUCKETED by utt, never flattened (ticket 031)', () => {
+  it("utterance 1's stt_final survives utterance 2 arriving", async () => {
+    const h = corpusHarness();
+    const { run } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances.map((u) => u.timings.stt_final)).toEqual([110, 210, 310, 410]);
+    expect(utterances.map((u) => u.timings.tts_first_byte)).toEqual([120, 220, 320, 420]);
+    // Four distinct values where the pre-031 flat map held exactly one.
+    expect(new Set(utterances.map((u) => u.timings.stt_final)).size).toBe(4);
+  });
+
+  it("audio_queued is PER UTTERANCE — utterance 2 never reports utterance 1's first audio", async () => {
+    const h = corpusHarness();
+    const { run, t0 } = await runCorpus(h);
+
+    const queued = utterancesOf(run).map((u) => u.timings.audio_queued);
+    expect(queued).toEqual([t0 + 130, t0 + 230, t0 + 330, t0 + 430]);
+    expect(queued[1]).not.toBe(queued[0]);
+  });
+
+  it('transcripts are per utterance (final wins, exactly as at run level)', async () => {
+    const h = corpusHarness();
+    const { run } = await runCorpus(h);
+
+    expect(utterancesOf(run).map((u) => u.transcripts)).toEqual([
+      { source: 'src 0', target: 'tgt 0' },
+      { source: 'src 1', target: 'tgt 1' },
+      { source: 'src 2', target: 'tgt 2' },
+      { source: 'src 3', target: 'tgt 3' },
+    ]);
+  });
+
+  it('an utterance that produced no output audio is status failed with a null audio_queued', async () => {
+    const h = corpusHarness({ silentUtts: [2] });
+    const { run } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances[2]!.timings.audio_queued).toBeNull();
+    expect(utterances[2]!.status).toBe('failed');
+    expect(utterances[2]!.errors).toEqual(['no output audio']);
+    // Its neighbours are untouched, and the RUN itself is complete: the
+    // segmentation agreed with the manifest and no stage was lost.
+    expect(utterances.map((u) => u.status)).toEqual([
+      'complete',
+      'complete',
+      'failed',
+      'complete',
+    ]);
+    expect(utterances[1]!.errors).toEqual([]);
+    expect(run.status).toBe('complete');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — per-utterance cost (ticket 031)', () => {
+  it('splits the Run cost across the manifest spans and sums back to it exactly', async () => {
+    const h = corpusHarness();
+    const { run } = await runCorpus(h);
+
+    // Spans: 0->200, 200->400, 400->600, 600->1000 (the last absorbs the tail).
+    // At 60 USD/min that is 0.2 / 0.2 / 0.2 / 0.4 of a minute-second each.
+    const expected = [0.2, 0.2, 0.2, 0.4];
+    const utterances = utterancesOf(run);
+    utterances.forEach((u, i) => expect(u.cost).toBeCloseTo(expected[i]!, 10));
+
+    expect(run.cost).toBeCloseTo(1, 10);
+    const total = utterances.reduce((sum, u) => sum + u.cost, 0);
+    expect(total).toBeCloseTo(run.cost, 10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — segmentation mismatch is a RUN-LEVEL failure (ticket 031)', () => {
+  it('TOO MANY: 5 observed against a 4-entry manifest fails with a named reason and no attribution', async () => {
+    const h = corpusHarness({ count: 5 });
+    const { run } = await runCorpus(h);
+
+    expect(run.status).toBe('failed');
+    expect(run.errors).toContain('segmentation: expected 4 utterances, observed 5');
+    // NO partial attribution: a run whose segmentation disagrees is not evidence.
+    expect(run.utterances).toBeUndefined();
+    // Still stored — a failure is real information (PRD §12).
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]!.status).toBe('failed');
+    expect(h.posted[0]!.utterances).toBeUndefined();
+  });
+
+  it('TOO FEW: a run that loses a stage after 3 of 4 saves, fails, names both reasons, and RESOLVES', async () => {
+    const h = corpusHarness({
+      count: 3,
+      extra: [{ at: 400, type: 'error', message: 'TTS provider 503', opaque: false, stage: 'tts' }],
+    });
+    const { run } = await runCorpus(h); // resolves — never throws
+
+    expect(run.status).toBe('failed');
+    const joined = run.errors.join(' | ');
+    expect(joined).toContain('tts: TTS provider 503');
+    expect(run.errors).toContain('segmentation: expected 4 utterances, observed 3');
+    expect(run.utterances).toBeUndefined();
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]).toEqual(run);
+  });
+
+  it('a matching count is NOT reported as a mismatch (the rule is not vacuous)', async () => {
+    const h = corpusHarness();
+    const { run } = await runCorpus(h);
+    expect(run.status).toBe('complete');
+    expect(run.errors.join(' | ')).not.toContain('segmentation');
+  });
+
+  it('the settle window is what catches the extra split — it is waited out on the happy path too', async () => {
+    const h = corpusHarness();
+    const done = start(h);
+    // The 4th (last expected) completion lands at 450 ms.
+    await vi.advanceTimersByTimeAsync(450 + SEGMENTATION_SETTLE_MS - 1);
+    expect(h.posted).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(2);
+    await done;
+    expect(h.posted).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — backward compatibility (ticket 031 REGRESSION GUARDS)', () => {
+  it('REGRESSION: a Recording with NO manifest behaves exactly as today — ends at the first boundary, no utterances key', async () => {
+    // The script segments into two utterances; without a manifest the run is
+    // over at the first completion, exactly as it has always been.
+    const h = makeHarness({
+      recording: { origin: 'mic', durationMs: 1000, speechEndMs: 900 },
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'cascade',
+          script: corpusScript({ count: 2 }),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(2000);
+    const { run, t0 } = await done;
+
+    expect(run.utterances).toBeUndefined();
+    expect(run.status).toBe('complete');
+    expect(run.errors).toEqual([]);
+    expect(run.transcripts).toEqual({ source: 'src 0', target: 'tgt 0' });
+    expect(run.timings.stt_final).toBe(110);
+    expect(run.timings.speech_end).toBe(t0 + 900);
+    expect(run.timings.audio_queued).toBe(t0 + 130);
+  });
+
+  it('REGRESSION: a 1-entry manifest produces exactly one record and one anchored sample', async () => {
+    const single: CorpusUtterance[] = [
+      { id: 'solo', index: 1, category: 'proper-nouns', trueSpeechEndMs: 300 },
+    ];
+    const h = corpusHarness({ count: 1, recording: { utterances: single } });
+    const { run, t0 } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(1);
+    expect(utterances[0]).toMatchObject({
+      utteranceId: 'solo',
+      index: 1,
+      category: 'proper-nouns',
+      status: 'complete',
+      errors: [],
+    });
+    expect(utterances[0]!.timings.speech_end).toBe(t0 + 300);
+    expect(utterances[0]!.timings.audio_queued).toBe(t0 + 130);
+    // The whole clip is one span, so the split is the Run cost.
+    expect(utterances[0]!.cost).toBeCloseTo(run.cost, 10);
+    expect(run.status).toBe('complete');
+  });
+
+  it('REGRESSION: Run-level timings/transcripts/cost keep TODAY\'s semantics (last mark wins, first audio, Recording anchor)', async () => {
+    const h = corpusHarness();
+    const { run, t0 } = await runCorpus(h);
+
+    // Flat map, last utterance's marks — unchanged, so nothing downstream of
+    // the Run-level fields moves before ticket 032.
+    expect(run.timings.stt_final).toBe(410);
+    expect(run.timings.tts_first_byte).toBe(420);
+    expect(run.timings.speech_end).toBe(t0 + CORPUS_RECORDING.speechEndMs!);
+    expect(run.timings.audio_queued).toBe(t0 + 130);
+    expect(run.transcripts).toEqual({ source: 'src 3', target: 'tgt 3' });
+    expect(run.cost).toBeCloseTo(CORPUS_COST_PER_MIN * (1000 / 60_000), 10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — pacing and cancellation survive per-utterance measurement (ticket 031)', () => {
+  it('PACING IS UNCHANGED: one continuous 1x clip, one pacer — it does NOT stop at an utterance boundary', async () => {
+    const h = makeHarness({
+      recording: CORPUS_RECORDING,
+      samples: ramp(SAMPLE_RATE / 2), // 0.5 s => 25 frames, spanning 3 boundaries
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'cascade',
+          script: corpusScript(),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+    const done = start(h);
+
+    // The first utterance completes at 150 ms — frame 8 of 25.
+    await vi.advanceTimersByTimeAsync(200);
+    expect(h.sendTimes.length).toBeGreaterThan(8);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    const { run } = await done;
+
+    const frames = h.transports[0]!.received;
+    expect(frames).toHaveLength(25);
+    for (const frame of frames) expect(frame.length).toBe(FRAME_SAMPLES);
+    for (let k = 0; k < h.sendTimes.length; k++) {
+      expect(Math.abs(h.sendTimes[k]! - k * FRAME_MS)).toBeLessThanOrEqual(1);
+    }
+    expect(utterancesOf(run)).toHaveLength(4);
+  });
+
+  it('cancelling a corpus run still POSTs nothing at all', async () => {
+    const h = makeHarness({
+      recording: CORPUS_RECORDING,
+      samples: ramp(SAMPLE_RATE), // 1 s => 50 frames
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'cascade',
+          script: corpusScript(),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+    const controller = new AbortController();
+    const done = start(h, CASCADE_CONFIG, controller.signal);
+
+    await vi.advanceTimersByTimeAsync(200); // past the first utterance boundary
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(3000);
+    const result = await done;
+
+    expect(result.cancelled).toBe(true);
+    expect(h.posted).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 031 (ORCHESTRATOR DECISION) — a SHORT manifest must FAIL, not hang.
+//
+// The settle window catches "too many". "Too few" is the mirror and is NOT
+// self-announcing: a VAD that MERGED two utterances simply delivers N-1
+// completions and goes quiet — no error, no disconnect, nothing to react to.
+// Once pacing has completed, a manifest-backed run waits at most
+// SEGMENTATION_IDLE_MS for what it is still owed and then fails with the SAME
+// named reason. One merged clip must not stall an overnight sweep.
+//
+// A manifest-LESS run is deliberately untouched, hang included: its
+// termination is byte-for-byte what it has always been.
+// ---------------------------------------------------------------------------
+
+/** Long enough for the idle deadline (armed at pacing end) to have elapsed. */
+const PAST_IDLE_MS = SEGMENTATION_IDLE_MS * 2;
+
+describe('runOnce — a short manifest fails on the idle deadline (ticket 031)', () => {
+  it('a transport that delivers 3 of 4 and GOES QUIET resolves, fails, and names the segmentation reason', async () => {
+    // No error, no disconnect, no lost stage — the transport is simply done.
+    const h = corpusHarness({ count: 3 });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const { run } = await done; // RESOLVES — the whole point
+
+    expect(run.status).toBe('failed');
+    expect(run.errors).toContain('segmentation: expected 4 utterances, observed 3');
+    expect(run.utterances).toBeUndefined();
+    // Stored like any other failure (PRD §12).
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]).toEqual(run);
+  });
+
+  it('going quiet reaches the SAME named reason as losing a stage, by a different route', async () => {
+    const quiet = corpusHarness({ count: 3 });
+    const quietDone = start(quiet);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const quietRun = (await quietDone).run;
+
+    const lost = corpusHarness({
+      count: 3,
+      extra: [{ at: 400, type: 'error', message: 'TTS provider 503', opaque: false, stage: 'tts' }],
+    });
+    const lostDone = start(lost);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const lostRun = (await lostDone).run;
+
+    const REASON = 'segmentation: expected 4 utterances, observed 3';
+    expect(quietRun.errors).toContain(REASON);
+    expect(lostRun.errors).toContain(REASON);
+    expect(quietRun.status).toBe('failed');
+    expect(lostRun.status).toBe('failed');
+    // The routes ARE different: only the lost-stage run names a failing stage.
+    expect(quietRun.errors.join(' | ')).not.toContain('TTS provider 503');
+    expect(lostRun.errors.join(' | ')).toContain('tts: TTS provider 503');
+    expect(quietRun.utterances).toBeUndefined();
+    expect(lostRun.utterances).toBeUndefined();
+  });
+
+  it('the deadline is NOT charged before pacing has completed — it does not truncate the clip', async () => {
+    const h = makeHarness({
+      recording: CORPUS_RECORDING,
+      samples: ramp(SAMPLE_RATE / 2), // 0.5 s of pacing
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'cascade',
+          script: corpusScript({ count: 3 }),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const { run } = await done;
+
+    // Every frame still went out: the deadline governs the WAIT, not the clip.
+    expect(h.transports[0]!.received).toHaveLength(25);
+    expect(run.status).toBe('failed');
+    expect(run.errors).toContain('segmentation: expected 4 utterances, observed 3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — the idle deadline never fires on a healthy run (ticket 031)', () => {
+  it('a run whose 4 completions all arrive is complete, with no segmentation reason', async () => {
+    const h = corpusHarness();
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const { run } = await done;
+
+    expect(run.status).toBe('complete');
+    expect(run.errors).toEqual([]);
+    expect(utterancesOf(run)).toHaveLength(4);
+  });
+
+  it('a SLOW but valid final utterance, long after pacing ends, is not killed by the deadline', async () => {
+    // Answers at 150 / 1450 / 2750 / 4050 ms; pacing ends at ~100 ms, so the
+    // last completion lands ~3.95 s after the deadline was armed.
+    const h = corpusHarness({ stepMs: 1300 });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const { run } = await done;
+
+    expect(run.status).toBe('complete');
+    expect(run.errors.join(' | ')).not.toContain('segmentation');
+    expect(utterancesOf(run)).toHaveLength(4);
+    expect(utterancesOf(run).map((u) => u.utteranceId)).toEqual(['u-1', 'u-2', 'u-3', 'u-4']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — no timer leaks past a run (ticket 031)', () => {
+  it('HAPPY PATH: the run leaves no pending timer behind (the idle deadline is disarmed)', async () => {
+    const h = corpusHarness();
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(2000);
+    const { run } = await done;
+
+    expect(run.status).toBe('complete');
+    // A leaked idle deadline would still be pending here, 3 s before it fires.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('SHORT PATH: a run failed by the deadline leaves no pending timer behind', async () => {
+    const h = corpusHarness({ count: 3 });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    await done;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('LOST STAGE: failing mid-clip disarms both the settle window and the idle deadline', async () => {
+    const h = corpusHarness({
+      extra: [{ at: 200, type: 'error', message: 'TTS provider 503', opaque: false, stage: 'tts' }],
+    });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(2000);
+    const { run } = await done;
+
+    expect(run.status).toBe('failed');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — the idle deadline is MANIFEST-ONLY (ticket 031 REGRESSION GUARD)', () => {
+  it("REGRESSION: a manifest-less run whose transport never completes still hangs — termination is unchanged", async () => {
+    // The strongest available proof that no idle deadline is armed for a
+    // manifest-less run: if one were, this would resolve and fail.
+    const h = makeHarness({
+      recording: { origin: 'mic', durationMs: 1000, speechEndMs: 900 },
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'cascade',
+          // Every event of utterance 0 EXCEPT its completion.
+          script: corpusScript({ count: 1 }).filter((e) => e.type !== 'utteranceComplete'),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+
+    let settled = false;
+    void start(h).then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS * 2);
+    expect(settled).toBe(false);
+    expect(h.posted).toHaveLength(0);
+  });
+
+  it('REGRESSION: the same transport WITH a 1-entry manifest fails on the deadline instead of hanging', async () => {
+    // The mirror of the guard above — the rule is manifest-only, not absent.
+    const single: CorpusUtterance[] = [
+      { id: 'solo', index: 1, category: 'proper-nouns', trueSpeechEndMs: 300 },
+    ];
+    const h = makeHarness({
+      recording: { ...CORPUS_RECORDING, utterances: single },
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'cascade',
+          script: corpusScript({ count: 1 }).filter((e) => e.type !== 'utteranceComplete'),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS);
+    const { run } = await done;
+
+    expect(run.status).toBe('failed');
+    expect(run.errors).toContain('segmentation: expected 1 utterances, observed 0');
+    expect(run.utterances).toBeUndefined();
   });
 });

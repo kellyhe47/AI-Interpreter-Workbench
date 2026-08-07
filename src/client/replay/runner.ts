@@ -42,10 +42,52 @@
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag, type ArmTag, type RunConfig } from '../../core/arms';
 import { readWav } from '../../harness/wav';
 import type { InterpreterTransport, TransportConfig } from '../transport/types';
-import type { Recording, Run } from '../state/ledger';
+import type { Recording, Run, RunUtterance } from '../state/ledger';
 import { ApiError } from './recordingsClient';
 import { createPacer, type Pacer, type PacerDeps } from './pacer';
 import type { RecordingsClient, RunsClient } from './recordingsClient';
+
+/**
+ * TICKET 031 — the settle window a MANIFEST-CARRYING run waits after the last
+ * EXPECTED `utterance.complete` before it declares itself over.
+ *
+ * It exists so that a provider VAD which split the clip into MORE utterances
+ * than the manifest describes is CAUGHT rather than silently truncated: without
+ * it the run would stop the transport the instant the Nth completion landed and
+ * the (N+1)th — the evidence that the segmentation disagrees — would never be
+ * delivered. A run whose segmentation disagrees with the manifest is not
+ * evidence, so paying this window once per corpus run is the cheap side of the
+ * trade.
+ *
+ * It applies ONLY when the Recording carries a manifest; a mic run still ends
+ * at its first utterance boundary exactly as before.
+ */
+export const SEGMENTATION_SETTLE_MS = 250;
+
+/**
+ * TICKET 031 (orchestrator decision) — how long a MANIFEST-CARRYING run waits,
+ * AFTER PACING HAS COMPLETED, for the completions it is still owed.
+ *
+ * The settle window above catches the "too many" direction. This one catches
+ * "too few": if a provider's VAD MERGED two utterances, only N-1 completions
+ * ever arrive, the settle window never arms, and the run would otherwise never
+ * resolve. A merge is precisely the segmentation mismatch this ticket exists to
+ * catch, so it must surface as the SAME named run-level failure and never as a
+ * hang — one merged clip must not stall an overnight sweep.
+ *
+ * The deadline is armed ONCE, when pacing completes, and is a hard cap rather
+ * than an inter-event idle reset: "wait at most this long for the rest".
+ *
+ * 5 s is 20x the settle window and comfortably longer than any answer a healthy
+ * pipeline still owes once the clip has finished playing, so it never truncates
+ * a slow-but-valid final utterance; and it is 24x shorter than the batch
+ * runner's 120 s per-run patience (browserDeps RUN_TIMEOUT_MS), so a merged
+ * clip fails with a NAMED reason long before the sweep's blunt abort fires.
+ *
+ * It applies ONLY when the Recording carries a manifest; a manifest-less run's
+ * termination is byte-for-byte unchanged, hang included.
+ */
+export const SEGMENTATION_IDLE_MS = 5_000;
 
 export interface RunOnceConfig extends RunConfig {
   /** Forwarded to the transport config. */
@@ -150,6 +192,30 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // must not cost a session, a socket, or a provider call.
   const samples = decodeClip(await deps.recordings.getAudio(recordingId));
 
+  const manifest =
+    recording.utterances === undefined
+      ? undefined
+      : [...recording.utterances].sort((a, b) => a.index - b.index);
+  const expected = manifest?.length;
+  const uttTimings = new Map<number, Record<string, number | null>>();
+  const uttAudioAt = new Map<number, number>();
+  const uttSource = new Map<number, string>();
+  const uttTargetFinal = new Map<number, string>();
+  const uttTargetDelta = new Map<number, string>();
+  let observed = 0;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  const disarm = (): void => {
+    if (settleTimer !== null) {
+      clearTimeout(settleTimer);
+      settleTimer = null;
+    }
+    if (idleTimer !== null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+  };
+
   const timings: Record<string, number | null> = {};
   const errors: string[] = [];
   const audioChunks: Int16Array[] = [];
@@ -180,6 +246,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     errors.push(stage === undefined ? message : `${stage}: ${message}`);
     // The rest of the clip has nowhere to go.
     pacer?.cancel();
+    disarm();
     finish();
   };
 
@@ -187,24 +254,45 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     onSourceText: (e) => {
       // The final transcript wins; a partial is the best answer so far.
       if (e.kind === 'final' || sourceTranscript === undefined) sourceTranscript = e.text;
+      if (e.kind === 'final' || !uttSource.has(e.utt)) uttSource.set(e.utt, e.text);
     },
     onTargetText: (e) => {
       if (e.kind === 'final') targetFinal = e.text;
       else targetTranscript += e.text;
+      if (e.kind === 'final') uttTargetFinal.set(e.utt, e.text);
+      else uttTargetDelta.set(e.utt, (uttTargetDelta.get(e.utt) ?? '') + e.text);
     },
-    onAudio: (pcm) => {
+    onAudio: (pcm, utt) => {
       // audio_queued: the instant the first sample IS decoded and queued —
       // i.e. the instant it would begin sounding. Nothing is played.
       if (firstAudioAt === null) firstAudioAt = deps.now();
+      if (!uttAudioAt.has(utt)) uttAudioAt.set(utt, deps.now());
       audioChunks.push(pcm);
     },
     onTiming: (mark) => {
       // The one discarded mark: speech_end is the Recording's, always.
       if (mark.event === 'speech_end') return;
       timings[mark.event] = mark.t;
+      let bucket = uttTimings.get(mark.utt);
+      if (!bucket) {
+        bucket = {};
+        uttTimings.set(mark.utt, bucket);
+      }
+      bucket[mark.event] = mark.t;
     },
     onUtteranceComplete: () => {
-      finish();
+      observed += 1;
+      if (expected === undefined) {
+        finish();
+        return;
+      }
+      if (observed >= expected && settleTimer === null) {
+        settleTimer = setTimeout(() => {
+          settleTimer = null;
+          disarm();
+          finish();
+        }, SEGMENTATION_SETTLE_MS);
+      }
     },
     onError: (e) => {
       fail(e.message, e.stage);
@@ -240,11 +328,21 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   await pacer.start();
 
   const cancelled = signal?.aborted ?? false;
+  // The idle deadline is armed HERE — once the clip has finished playing — so
+  // it governs the WAIT for outstanding completions and never truncates pacing.
+  if (manifest !== undefined && !cancelled && !failed) {
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      disarm();
+      finish();
+    }, SEGMENTATION_IDLE_MS);
+  }
   // Pacing is done; the answer may still be in flight. The run is over only
   // once the utterance completes too — a cancelled or failed run waits for
   // nothing.
   if (!cancelled && !failed) await finished;
 
+  disarm();
   transport.stop();
 
   const outputAudio = concatPcm(audioChunks);
@@ -252,6 +350,40 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   timings.audio_queued = firstAudioAt;
 
   if (cancelled) errors.push('run cancelled');
+
+  const mismatched = expected !== undefined && observed !== expected;
+  if (mismatched) {
+    errors.push(`segmentation: expected ${expected} utterances, observed ${observed}`);
+  }
+
+  let utterances: RunUtterance[] | undefined;
+  if (manifest !== undefined && !mismatched) {
+    utterances = manifest.map((entry, i) => {
+      const bucket = { ...(uttTimings.get(i) ?? {}) };
+      bucket.speech_end = t0 + entry.trueSpeechEndMs;
+      const audioAt = uttAudioAt.get(i);
+      bucket.audio_queued = audioAt ?? null;
+      const previousEnd = i === 0 ? 0 : manifest[i - 1]!.trueSpeechEndMs;
+      const spanMs =
+        i === manifest.length - 1
+          ? recording.durationMs - previousEnd
+          : entry.trueSpeechEndMs - previousEnd;
+      const targetDelta = uttTargetDelta.get(i) ?? '';
+      return {
+        utteranceId: entry.id,
+        index: entry.index,
+        category: entry.category,
+        timings: bucket,
+        transcripts: {
+          source: uttSource.get(i),
+          target: uttTargetFinal.get(i) ?? (targetDelta.length > 0 ? targetDelta : undefined),
+        },
+        cost: transport.costPerMinUsd * (spanMs / 60_000),
+        status: audioAt === undefined ? 'failed' : 'complete',
+        errors: audioAt === undefined ? ['no output audio'] : [],
+      };
+    });
+  }
 
   const run: Run = {
     id: deps.newId(),
@@ -263,13 +395,14 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     armTag: deriveArmTag(config),
     // Only the batch runner (ticket 009) produces 'sweep'.
     origin: 'manual',
-    status: cancelled || failed ? 'failed' : 'complete',
+    status: cancelled || failed || mismatched ? 'failed' : 'complete',
     timings,
     transcripts: {
       source: sourceTranscript,
       target: targetFinal ?? (targetTranscript.length > 0 ? targetTranscript : undefined),
     },
     cost: transport.costPerMinUsd * (recording.durationMs / 60_000),
+    utterances,
     errors,
     createdAt: deps.now(),
   };

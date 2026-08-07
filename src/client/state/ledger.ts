@@ -101,7 +101,7 @@
  */
 
 import { deriveArmTag, type ArmTag, type ProviderTriple } from '../../core/arms';
-import type { CorpusUtterance } from '../../core/corpus';
+import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
 import type { RunOrigin } from '../../core/protocol';
 import type { Mode, UtteranceRecord } from '../../core/timing';
 
@@ -153,6 +153,33 @@ export interface RunAnnotations {
   repIndex?: number;
 }
 
+/**
+ * Ticket 031 — ONE MEASURED UTTERANCE. A corpus Recording is a ≤45 s take
+ * holding ~4 utterances of deliberately different categories (PRD §9), so the
+ * measured atom is the utterance and the Run is only the container that
+ * produced a set of them.
+ *
+ * `timings` is anchored PER UTTERANCE: `speech_end` is
+ * `t0 + manifest[index - 1].trueSpeechEndMs`, from the corpus manifest and
+ * never from VAD, and `audio_queued` is the first output sample attributable
+ * to THIS utterance (null when it produced none).
+ *
+ * Additive and optional: a mic Recording and every Run written before 031 has
+ * no key at all, and no aggregate reads it until ticket 032.
+ */
+export interface RunUtterance {
+  /** The manifest's `CorpusUtterance.id`. */
+  utteranceId: string;
+  /** 1-based, manifest order. Maps to transport `utt` as `index - 1`. */
+  index: number;
+  category: CorpusCategory;
+  timings: Record<string, number | null>;
+  transcripts: { source?: string; target?: string };
+  cost: number;
+  status: 'complete' | 'failed';
+  errors: string[];
+}
+
 export interface Run {
   id: string;
   recordingId: string;
@@ -174,6 +201,12 @@ export interface Run {
    * written before it; the Results derivations read it through `AnnotatedRun`.
    */
   annotations?: RunAnnotations;
+  /**
+   * Ticket 031 — the per-utterance records this Run produced, in manifest
+   * order. Absent when the Recording carries no manifest, and absent (never
+   * partial) when the run's segmentation disagreed with the manifest.
+   */
+  utterances?: RunUtterance[];
 }
 
 export interface LiveSessionUtterance {

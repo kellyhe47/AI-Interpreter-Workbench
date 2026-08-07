@@ -1,4 +1,4 @@
-import type { CorpusUtterance } from '../../core/corpus';
+import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
 
 /**
  * Entity vocabulary for the filesystem store (PRD §7). Server-only: this
@@ -68,6 +68,23 @@ export interface RunAnnotations {
   repIndex?: number;
 }
 
+/**
+ * Ticket 031 — one measured utterance. Mirrors src/client/state/ledger.ts's
+ * RunUtterance field-for-field; the Run is stored verbatim, so the server only
+ * needs the vocabulary, never a derivation.
+ */
+export interface RunUtterance {
+  utteranceId: string;
+  /** 1-based, manifest order. Maps to transport `utt` as `index - 1`. */
+  index: number;
+  category: CorpusCategory;
+  timings: Record<string, number | null>;
+  transcripts: { source?: string; target?: string };
+  cost: number;
+  status: 'complete' | 'failed';
+  errors: string[];
+}
+
 export interface Run {
   id: string;
   recordingId: string;
@@ -88,6 +105,12 @@ export interface Run {
    * with the rest of the record. Absent on every Run written before it.
    */
   annotations?: RunAnnotations;
+  /**
+   * Ticket 031 — the per-utterance records the run produced, in manifest order.
+   * Absent when the Recording carried no manifest, and absent (never partial)
+   * when the run's segmentation disagreed with the manifest.
+   */
+  utterances?: RunUtterance[];
 }
 
 /**
