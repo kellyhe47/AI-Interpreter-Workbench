@@ -6,7 +6,7 @@ source: v3-corpus
 depends_on: [030]
 touches: [src/client/batch/runner.ts, src/client/replay/runner.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/replay/runner.corpusVersion.test.ts, src/client/components/results/derive.corpusVersion.test.ts, src/harness/corpusVersionRoundTrip.test.ts]
 branch: ""
 ---
 

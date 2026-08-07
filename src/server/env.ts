@@ -31,6 +31,36 @@
  * gives no way to report which names were set.
  * ==========================================================================
  */
+/**
+ * Ticket 038 — the startup diagnostic, as a PURE FUNCTION.
+ *
+ * ============================ API DESIGN (normative) =======================
+ *   PROVIDER_KEY_NAMES                      the names the server cares about
+ *   describeProviderKeys(loaded, env)       -> StartupKeyReport
+ *
+ * WHY A PURE FUNCTION. `index.ts` must do nothing but log what this returns,
+ * so the decision is testable without spawning a process or capturing global
+ * stdout — the same discipline `resolveApiPort` already follows.
+ *
+ * NAMES ONLY, NEVER VALUES. The report is built from the NAME SET
+ * `loadServerEnv` returns plus `name in env` presence checks. No value, prefix,
+ * suffix or length ever enters it: a secret must not reach a log line, and the
+ * only way to guarantee that is to never read the value at all.
+ *
+ * ABSENCE IS A WARNING, NEVER A FAILURE. An ElevenLabs-less run is a
+ * legitimate configuration (PRD arms differ in which providers they touch), so
+ * this returns `level: 'warn'` and nothing else — it never throws and the
+ * caller never exits.
+ *
+ * SOURCE IS PART OF THE CLAIM. 'dotenv' vs 'environment' is what lets a
+ * deployment confirm its real env vars are the ones in force rather than a
+ * stray `.env` beside the build.
+ *
+ * SILENCE UNDER TEST is a property OF THE REPORT (`lines` is empty), not of the
+ * caller — so it is asserted here rather than trusted to a guard in index.ts.
+ * `keys` is still populated under test, so the classification stays testable.
+ * ==========================================================================
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -95,4 +125,52 @@ export function loadServerEnv(file: string = DEFAULT_ENV_FILE): Set<string> {
   }
 
   return loaded;
+}
+
+/* ======================== TICKET 038 — startup diagnostic ================= */
+
+/**
+ * The provider keys the server reads. Exactly the names `src/server/**` looks
+ * up in `process.env`, so a key the server never uses is never reported as
+ * missing.
+ */
+export const PROVIDER_KEY_NAMES = [
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'ELEVENLABS_API_KEY',
+] as const;
+
+export type ProviderKeyName = (typeof PROVIDER_KEY_NAMES)[number];
+
+/** Where a present key came from. `null` when the key is absent. */
+export type ProviderKeySource = 'dotenv' | 'environment';
+
+export interface ProviderKeyStatus {
+  name: ProviderKeyName;
+  present: boolean;
+  /** 'dotenv' when `loadServerEnv` set it; 'environment' when it was already there. */
+  source: ProviderKeySource | null;
+}
+
+export interface StartupKeyReport {
+  /** One entry per PROVIDER_KEY_NAMES, in that order. */
+  keys: ProviderKeyStatus[];
+  /** Names of the absent keys, in PROVIDER_KEY_NAMES order. */
+  missing: ProviderKeyName[];
+  /** 'warn' iff at least one key is absent. Never an error. */
+  level: 'info' | 'warn';
+  /** What index.ts logs, verbatim. EMPTY under NODE_ENV=test. */
+  lines: string[];
+}
+
+/**
+ * Builds the startup diagnostic from the names `loadServerEnv` set plus the
+ * environment it set them into. Pure: reads no file, logs nothing, throws
+ * never, and never touches a key's VALUE.
+ */
+export function describeProviderKeys(
+  _loaded: Set<string>,
+  _env: NodeJS.ProcessEnv = process.env,
+): StartupKeyReport {
+  throw new Error('not implemented: describeProviderKeys (ticket 038)');
 }

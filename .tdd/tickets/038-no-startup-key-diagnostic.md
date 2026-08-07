@@ -6,7 +6,7 @@ source: qa-live
 depends_on: [037]
 touches: [src/server/index.ts, src/server/env.ts]
 iterations: 0
-test_files: []
+test_files: [src/server/startupDiagnostic.test.ts]
 branch: ""
 ---
 

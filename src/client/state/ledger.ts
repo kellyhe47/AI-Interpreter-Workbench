@@ -183,6 +183,17 @@ export interface Recording {
 export interface RunAnnotations {
   /** 1-based repetition index within the sweep; 0 is the discarded warmup. */
   repIndex?: number;
+  /**
+   * Ticket 033 — the corpus version of the Recording this Run replayed, copied
+   * by `runOnce` at the moment of the run. Absent for a mic Recording and for
+   * every Run written before 033.
+   *
+   * COPIED, NOT LOOKED UP LATER. The ledger is append-only: a Run written
+   * without a corpus version can never be retro-fixed, so a re-cut of the
+   * corpus would leave two corpora and no way to say which numbers came from
+   * which.
+   */
+  corpusVersion?: string;
 }
 
 /**

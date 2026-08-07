@@ -66,6 +66,8 @@ export interface NewRecording {
 export interface RunAnnotations {
   /** 1-based repetition index within the sweep; 0 is the discarded warmup. */
   repIndex?: number;
+  /** Ticket 033 — the corpus version of the Recording this Run replayed. */
+  corpusVersion?: string;
 }
 
 /**

@@ -62,8 +62,15 @@
  *                     that lost a rep to read '4 of 5'.
  *     endpointingMs   always PINNED_ENDPOINTING_MS — a pinned control, not a
  *                     measurement.
- *     corpusVersion   the first annotations.corpusVersion among the
- *                     contributing Runs; null when none declares one.
+ *     corpusVersions  TICKET 033 — EVERY distinct annotations.corpusVersion
+ *                     among the contributing Runs, deduped and sorted
+ *                     ascending. An aggregate spanning two corpus versions
+ *                     NAMES BOTH; picking the first would imply homogeneity
+ *                     over evidence gathered from two corpora.
+ *     corpusVersion   that list when it holds EXACTLY one entry, else null —
+ *                     null for none AND for several, so a caller reading it
+ *                     alone degrades to "unrecorded" rather than to a wrong
+ *                     claim.
  *   The line's wording is not locked; the counts inside it are, and they are
  *   read from the same fields the figures are.
  * - groupByRecording(ledger): one row per (recordingId x configuration), in
@@ -248,7 +255,25 @@ export interface Provenance {
   intendedReps: number;
   /** The pinned endpointing control in ms — always PINNED_ENDPOINTING_MS. */
   endpointingMs: number;
-  /** Corpus version; null when no contributing sample declares one. */
+  /**
+   * TICKET 033 — EVERY distinct corpus version behind the figure, deduped and
+   * sorted ascending so the order is stable across ledger append order. Empty
+   * when no contributing Run declares one.
+   *
+   * THE RULE: an aggregate spanning two corpus versions NAMES BOTH. Picking the
+   * first and implying homogeneity is a confident, wrong provenance claim —
+   * strictly worse than the honest `corpus version unrecorded` it replaces
+   * (PRD §8: a number without provenance is a claim). Aggregation itself is NOT
+   * refused: the samples are real measurements and suppressing them would lose
+   * evidence; what the line owes the reader is that the input changed.
+   */
+  corpusVersions: string[];
+  /**
+   * The single corpus version behind the figure, or null when there is NOT
+   * exactly one — i.e. null for none AND for several. Read `corpusVersions`
+   * to tell those apart; a caller that renders this alone degrades to
+   * "unrecorded" on a mixed aggregate, which is honest rather than wrong.
+   */
   corpusVersion: string | null;
   /** Rendered line. Exact wording is NOT locked — assert containment only. */
   line: string;
@@ -482,6 +507,8 @@ function buildProvenance(
     completedReps,
     intendedReps,
     endpointingMs: PINNED_ENDPOINTING_MS,
+    // TICKET 033 stub — the multi-version derivation is not implemented yet.
+    corpusVersions: [],
     corpusVersion,
     line,
   };
