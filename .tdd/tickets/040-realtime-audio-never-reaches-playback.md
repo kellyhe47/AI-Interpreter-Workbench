@@ -45,7 +45,38 @@ dropped.
 This fits the symptom exactly: data-channel text events work (transcripts and the Spanish
 translation appear), and the media track — where WebRTC actually carries the audio — goes nowhere.
 
-**OPEN QUESTION to settle before implementing:** whether OpenAI's Realtime *WebRTC* transport emits
+### OPEN QUESTION — SETTLED EMPIRICALLY (2026-08-06), do not re-litigate
+
+Instrumented a real Realtime session in the operator's Chrome: patched `RTCPeerConnection` to
+capture the peer connection, every `ontrack`, and every data-channel event type, then drove the
+model to speak WITHOUT a microphone by sending `conversation.item.create` + `response.create` over
+the data channel. Result:
+
+```
+inbound audio RTP        42,153 bytes / 748 packets     <- audio IS on the media track
+ontrack fired            kind: 'audio'
+response.output_audio.delta       NOT PRESENT           <- the event the client listens for
+response.output_audio_transcript.delta   9 (TEXT)
+output_audio_buffer.started / .stopped   1 / 1
+```
+
+**Over WebRTC, OpenAI sends audio on the MEDIA TRACK only.** There is no
+`response.output_audio.delta`. The nine "audio delta" events are *transcript* deltas — text, which
+is exactly why the operator sees the Spanish and hears nothing. `realtime.ts:308` listens for an
+event that never arrives, so `onAudio` never fires, playback never gets a sample, and
+`timings.audio_queued` is never stamped.
+
+**Two consequences for the fix:**
+
+1. The inbound media track must be consumed — an `ontrack` handler routing the remote stream to an
+   output sink. The data-channel PCM path cannot be made to work; it does not exist over WebRTC.
+2. **`output_audio_buffer.started` is the natural `audio_queued` stamp** — it is the WebRTC signal
+   that the model's audio has begun on the track, which is the same instant the cascade path calls
+   "first audio queued". Using it keeps Experiment 1 comparing the same quantity across arms.
+
+(Superseded original text follows.)
+
+**OPEN QUESTION as originally written:** whether OpenAI's Realtime *WebRTC* transport emits
 `response.output_audio.delta` on the data channel at all, or sends audio solely over the media
 track. Over the WebSocket transport those deltas are the audio path; over WebRTC the media track
 normally is. Confirm by instrumenting a real session — count `output_audio.delta` events and check
