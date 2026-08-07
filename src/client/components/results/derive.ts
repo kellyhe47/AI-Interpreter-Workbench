@@ -492,14 +492,21 @@ function buildProvenance(
   const attemptedRepIndices = distinct(attempted.map((r) => r.annotations?.repIndex));
   const intendedReps = attemptedRepIndices.size > 0 ? attemptedRepIndices.size : completedReps;
 
-  const corpusVersion =
-    gatePassing.map((r) => r.annotations?.corpusVersion).find((v) => v !== undefined) ?? null;
+  // TICKET 033 — EVERY distinct version behind the figure, sorted so the order
+  // does not depend on ledger append order. Only GATE-PASSING Runs contribute:
+  // provenance follows the figures, so a Run outside them is not provenance for
+  // them. A Run declaring none is silence, never a version of its own.
+  const corpusVersions = [...distinct(gatePassing.map((r) => r.annotations?.corpusVersion))].sort();
+  // null for NONE and for SEVERAL alike: a caller rendering this alone degrades
+  // to the honest "unrecorded" rather than naming one corpus over evidence
+  // gathered from two.
+  const corpusVersion = corpusVersions.length === 1 ? corpusVersions[0]! : null;
 
   const line =
     `${armLabel(arm)} · ${utteranceCount} utterances · ` +
     `${completedReps} of ${intendedReps} reps completed · ` +
     `endpointing pinned ${PINNED_ENDPOINTING_MS} ms · turn-final trigger · ` +
-    `${corpusVersion ?? 'corpus version unrecorded'}`;
+    `${corpusVersions.length === 0 ? 'corpus version unrecorded' : corpusVersions.join(', ')}`;
 
   return {
     utteranceCount,
@@ -507,8 +514,7 @@ function buildProvenance(
     completedReps,
     intendedReps,
     endpointingMs: PINNED_ENDPOINTING_MS,
-    // TICKET 033 stub — the multi-version derivation is not implemented yet.
-    corpusVersions: [],
+    corpusVersions,
     corpusVersion,
     line,
   };

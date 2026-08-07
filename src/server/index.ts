@@ -38,7 +38,7 @@ import {
   createRunsRouter,
 } from './routes'
 import { createStorage } from './storage'
-import { loadServerEnv } from './env'
+import { describeProviderKeys, loadServerEnv } from './env'
 import type { Storage } from './storage'
 import { createTokenRouter } from './token'
 import { attachCascadeWs } from './ws'
@@ -149,7 +149,16 @@ if (process.env.NODE_ENV !== 'test') {
   // reaches "connected · listening" before failing opaquely. Skipped under
   // NODE_ENV=test so the suite's environment stays hermetic and no test can
   // accidentally acquire a real key.
-  loadServerEnv()
+  const loaded = loadServerEnv()
+  // Ticket 038. A missing provider key used to surface only as an opaque
+  // mid-session failure — exactly how 037's `.env` bug stayed invisible. The
+  // report decides everything (including its own silence under test); this does
+  // nothing but log it, and absence is a warning that never stops the server.
+  const keyReport = describeProviderKeys(loaded)
+  for (const line of keyReport.lines) {
+    if (keyReport.level === 'warn') console.warn(line)
+    else console.log(line)
+  }
   const port = resolveApiPort()
   createAppServer().listen(port, () => console.log(`server listening on :${port}`))
 }

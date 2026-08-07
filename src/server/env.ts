@@ -169,8 +169,47 @@ export interface StartupKeyReport {
  * never, and never touches a key's VALUE.
  */
 export function describeProviderKeys(
-  _loaded: Set<string>,
-  _env: NodeJS.ProcessEnv = process.env,
+  loaded: Set<string>,
+  env: NodeJS.ProcessEnv = process.env,
 ): StartupKeyReport {
-  throw new Error('not implemented: describeProviderKeys (ticket 038)');
+  const keys: ProviderKeyStatus[] = PROVIDER_KEY_NAMES.map((name) => {
+    // An EMPTY STRING is absent: a bare `FOO=` line in `.env` sets the name
+    // without configuring anything, and reporting it as present would say the
+    // server is configured when the very next provider call will fail.
+    const present = (env[name] ?? '') !== '';
+    // `loaded` is what `loadServerEnv` SET, so a name in it that is present can
+    // only have come from the file. Names outside PROVIDER_KEY_NAMES are never
+    // consulted — the report describes the keys the server reads, nothing else.
+    const source: ProviderKeySource | null = !present
+      ? null
+      : loaded.has(name)
+        ? 'dotenv'
+        : 'environment';
+    return { name, present, source };
+  });
+
+  const missing = keys.filter((k) => !k.present).map((k) => k.name);
+
+  // Only NAMES and the two fixed source words are ever interpolated. No value
+  // is read beyond the emptiness test above, so no value, prefix, suffix or
+  // length can reach a log line.
+  const rendered =
+    'provider keys · ' +
+    keys
+      .map((k) =>
+        k.present
+          ? `${k.name} present (${k.source === 'dotenv' ? 'from .env' : 'already in environment'})`
+          : `${k.name} ABSENT`,
+      )
+      .join(' · ');
+
+  return {
+    keys,
+    missing,
+    // Absence never fails: an ElevenLabs-less run is a legitimate configuration.
+    level: missing.length > 0 ? 'warn' : 'info',
+    // Silence under test is a property of the REPORT, and only of `lines` —
+    // `keys` and `missing` stay populated so the classification is testable.
+    lines: env.NODE_ENV === 'test' ? [] : [rendered],
+  };
 }

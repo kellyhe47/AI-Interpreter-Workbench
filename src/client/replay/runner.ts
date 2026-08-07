@@ -96,6 +96,19 @@
  *
  * A MANIFEST-LESS RUN IS BYTE-FOR-BYTE UNCHANGED: it ends at its first
  * utterance boundary, arms neither timer, and carries no `utterances` key.
+ *
+ * ------------------- TICKET 033: THE CORPUS VERSION IS COPIED HERE ---------
+ * `annotations.corpusVersion` is copied from the Recording being replayed, at
+ * the moment of the run. It happens HERE, where the Recording is in hand, and
+ * NOT in the batch runner's stamping wrapper the way `repIndex` (028) does,
+ * because a MANUAL run never passes through that wrapper and its provenance is
+ * displayed too. The wrapper spreads `run.annotations` before stamping
+ * `repIndex`, so the two ride the same envelope without clobbering each other.
+ *
+ * COPIED, NEVER DEFAULTED. A Recording that declares no version yields a Run
+ * with no `corpusVersion` key at all: the ledger is append-only, so inventing a
+ * version here would write a claim the corpus never made and it could never be
+ * retracted.
  * ==========================================================================
  */
 
@@ -557,6 +570,13 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     errors,
     createdAt: deps.now(),
   };
+
+  // TICKET 033 — the corpus version travels with the measurement. Only when the
+  // Recording declares one: an absent version stays absent rather than becoming
+  // a default nobody can ever take back out of an append-only ledger.
+  if (recording.corpusVersion !== undefined) {
+    run.annotations = { ...run.annotations, corpusVersion: recording.corpusVersion };
+  }
 
   // A failure is real information and is stored like any other run (PRD §12).
   // A cancellation is not: see the header.
