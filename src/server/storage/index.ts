@@ -11,6 +11,7 @@
  *   ledger.jsonl            append-only, ONE LINE PER RUN
  *   comparisons.jsonl       append-only, ONE LINE PER BLIND COMPARISON
  *   live-sessions.jsonl     append-only, ONE LINE PER LIVE SESSION
+ *   wer-scores.jsonl        append-only, ONE LINE PER WER SCORE
  *
  * THE BASE DIRECTORY IS INJECTED, NEVER HARDCODED. `createStorage(baseDir)`
  * takes the root as an argument so tests run against a `mkdtemp` directory and
@@ -47,6 +48,17 @@
  * not aggregating, and the exclusion belongs to the readers, exactly as it does
  * for a failed Run.
  *
+ * WER SCORES GET THEIR OWN STREAM TOO (TICKET 034), for the same reason again.
+ * `appendWerScore`/`listWerScores` obey the same append-only + tolerant-reader
+ * discipline against wer-scores.jsonl. WER is scored POST HOC, and the Run
+ * store deliberately has no update route: a score is a SECOND, later fact about
+ * an (runId, utteranceId) pair, so it gets its own destination and Runs stay
+ * immutable — a corpus can be re-scored without rewriting history. Re-scoring
+ * the same key writes a SECOND line; the readers collapse it last-write-wins
+ * (`latestWerScores`), so the earlier score is still on disk. A `wer: null`
+ * score — Cantonese has no written script (PRD §9) — is stored like any other:
+ * `not applicable` is a FACT worth persisting, and it is emphatically not a 0.
+ *
  * AUDIO IS IMMUTABLE. A Recording's WAV is written once, by `createRecording`,
  * and there is deliberately no method to replace it. Only the label is mutable
  * (`updateRecordingLabel`), and it rewrites the JSON alone. If a run's audio
@@ -70,7 +82,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { StorageError } from './types';
-import type { BlindComparison, LiveSession, NewRecording, Recording, Run } from './types';
+import type {
+  BlindComparison,
+  LiveSession,
+  NewRecording,
+  Recording,
+  Run,
+  WerScore,
+} from './types';
 
 export type {
   BlindComparison,
@@ -86,6 +105,7 @@ export type {
   RunOrigin,
   RunStatus,
   StorageErrorCode,
+  WerScore,
 } from './types';
 export { StorageError } from './types';
 
@@ -140,6 +160,25 @@ export interface Storage {
   appendLiveSession(session: LiveSession): Promise<LiveSession>;
   /** TICKET 041 — every stored LiveSession, in write order. Tolerant reader. */
   listLiveSessions(): Promise<LiveSession[]>;
+
+  /**
+   * TICKET 034 — append one post-hoc WER score to its OWN append-only file,
+   * `wer-scores.jsonl`, beside the ledger and NEVER inside it: `readLedger()`
+   * is typed `Run[]` and `exportResults` unions it into the exported run set,
+   * so a score sharing that file would be counted in `totals.runs`. A judgement
+   * about one utterance of a run is not another run.
+   *
+   * Same discipline as the other two side streams: one line, 'a' flag, no read
+   * of the existing file, record stored VERBATIM. RUNS ARE NEVER MUTATED — this
+   * method touches neither runs/ nor ledger.jsonl.
+   */
+  appendWerScore(score: WerScore): Promise<WerScore>;
+  /**
+   * TICKET 034 — every stored score, in write order, INCLUDING superseded ones.
+   * The history is the point: last-write-wins is a READ-SIDE collapse
+   * (`latestWerScores` in src/core/wer.ts), never a rewrite on disk.
+   */
+  listWerScores(): Promise<WerScore[]>;
 }
 
 /**
@@ -405,6 +444,18 @@ export function createStorage(baseDir: string): Storage {
       // Zero-utterance sessions are listed like any other — the aggregation
       // gate lives in the readers, not here.
       return readJsonl<LiveSession>(liveSessionsFile);
+    },
+
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async appendWerScore(_score: WerScore): Promise<WerScore> {
+      // TICKET 034 stub.
+      throw new Error('ticket 034: not implemented');
+    },
+
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async listWerScores(): Promise<WerScore[]> {
+      // TICKET 034 stub.
+      throw new Error('ticket 034: not implemented');
     },
 
     async readLedger(): Promise<Run[]> {

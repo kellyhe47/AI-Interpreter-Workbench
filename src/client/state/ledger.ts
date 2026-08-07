@@ -130,10 +130,29 @@
  * - `runAggregates()` is where record-awareness LIVES. The Results derivation
  *   layer delegates to it rather than reimplementing the gate, so there is one
  *   aggregate and not two that can drift.
+ *
+ * Ticket 034 — POST-HOC WER SCORES get a FIFTH append-only store, keyed by the
+ * measured atom (runId, utteranceId) and never merged into a Run:
+ *
+ * - `appendWerScore` / `getWerScores()` mirror every other store here — deep
+ *   copies in and out, never mutated, never removed — so a re-score APPENDS and
+ *   the earlier score survives, exactly as the server's wer-scores.jsonl does.
+ * - `getWerScore(runId, utteranceId)` is the LAST-WRITE-WINS read, delegating to
+ *   `latestWerScores` in src/core/wer.ts so the collapse rule has ONE
+ *   definition shared with the export.
+ * - It is NOT in `LedgerExport`, for exactly the reason ticket 016's
+ *   comparisons are not: that envelope's shape is pinned by the locked
+ *   export/import tests, and `importRuns` therefore leaves the score store
+ *   alone rather than discarding scores the export it was handed never carried.
+ * - THE WER TYPE IS IMPORTED FROM src/core/wer.ts, not re-declared: the
+ *   normalizer, the formula and the record are one vocabulary. (The
+ *   Recording/Run/LiveSession shapes are re-declared only because they live
+ *   under src/server, which the client program excludes.)
  */
 
 import { deriveArmTag, type ArmTag, type ProviderTriple } from '../../core/arms';
 import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
+import type { WerScore } from '../../core/wer';
 import type { RunOrigin } from '../../core/protocol';
 import type { Mode, UtteranceRecord } from '../../core/timing';
 
@@ -150,6 +169,8 @@ import type { Mode, UtteranceRecord } from '../../core/timing';
 export type RecordingOrigin = 'mic' | 'corpus';
 
 export type { RunOrigin };
+/** Ticket 034 — re-exported so callers reach it through the ledger barrel. */
+export type { WerScore };
 
 /** Failed runs are stored and listed like any other (PRD §12). */
 export type RunStatus = 'complete' | 'failed';
@@ -645,6 +666,8 @@ interface LedgerState {
   liveSessions?: LiveSession[];
   /** Ticket 016. Absent in every pre-016 blob; restored as empty. */
   blindComparisons?: BlindComparison[];
+  /** Ticket 034. Absent in every pre-034 blob; restored as empty. */
+  werScores?: WerScore[];
 }
 
 export class RunLedger {
@@ -812,6 +835,41 @@ export class RunLedger {
   /** Every persisted pairwise blind comparison, in append order. */
   getBlindComparisons(): BlindComparison[] {
     return deepCopy(this.blindComparisons);
+  }
+
+  /* --- ticket 034: post-hoc WER scores (additive, append-only) ----------
+   *
+   * Keyed by the MEASURED ATOM, (runId, utteranceId). Appending never mutates
+   * a Run and never rewrites an earlier score: re-scoring a corpus is a second
+   * line, and the first one stays readable. The collapse to one figure is on
+   * READ, in `getWerScore`.
+   *
+   * Like the comparison store this rides the same persisted blob but is
+   * deliberately NOT part of `LedgerExport`, whose shape is pinned by the
+   * locked export/import tests. */
+
+  /** Appends one post-hoc WER score. Never replaces an earlier one. */
+  appendWerScore(_score: WerScore): void {
+    // TICKET 034 stub.
+    throw new Error('ticket 034: not implemented');
+  }
+
+  /** Every persisted score, in append order, INCLUDING superseded ones. */
+  getWerScores(): WerScore[] {
+    // TICKET 034 stub.
+    throw new Error('ticket 034: not implemented');
+  }
+
+  /**
+   * The score in force for one measured atom — LAST WRITE WINS.
+   *
+   * `undefined` means NOT SCORED, which is a different fact from a stored
+   * `wer: null` (`not applicable`), and both are different from a 0. A reader
+   * that cannot tell the three apart cannot render Cantonese honestly.
+   */
+  getWerScore(_runId: string, _utteranceId: string): WerScore | undefined {
+    // TICKET 034 stub.
+    throw new Error('ticket 034: not implemented');
   }
 
   exportRuns(): LedgerExport {

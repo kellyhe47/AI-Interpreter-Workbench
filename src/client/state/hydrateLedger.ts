@@ -32,6 +32,13 @@
  *   before. A ZERO-UTTERANCE session hydrates like any other: it is stored and
  *   listed, and kept out of figures by `isAggregatableLiveSession`, not by
  *   being dropped here.
+ * - WER SCORES ARE HYDRATED TOO (ticket 034), through an OPTIONAL fourth
+ *   listing, so Results can render a WER computed on another machine. The
+ *   dedupe key is DIFFERENT from the others on purpose: a score has no id, and
+ *   re-scoring the same (runId, utteranceId) is a LEGITIMATE second record. The
+ *   key is therefore (runId, utteranceId, scoredAt) — repeated hydration adds
+ *   nothing, while a genuine re-score still lands. Collapsing to one figure
+ *   stays a read-side concern (`RunLedger.getWerScore`).
  * - FAILURE PROPAGATES. A rejected list() rejects the returned promise with
  *   the client's own `ApiError`, so the caller can tell "the backend is
  *   unreachable" from "the backend is empty" (PRD §12, and the F3 bug this
@@ -43,6 +50,7 @@ import type {
   LiveSessionsClient,
   RecordingsClient,
   RunsClient,
+  WerScoresClient,
 } from '../replay/recordingsClient';
 import type { LiveSession, RunLedger } from './ledger';
 
@@ -65,6 +73,12 @@ export interface LedgerHydrationSource {
    * survive at all.
    */
   liveSessions?: Pick<LiveSessionsClient, 'list'>;
+  /**
+   * TICKET 034 — the fourth listing, OPTIONAL on the same terms: a host that
+   * wires no WER backend (and every pre-034 test bag) gets exactly today's
+   * behaviour and the score store is left untouched.
+   */
+  werScores?: Pick<WerScoresClient, 'list'>;
 }
 
 /**
@@ -123,4 +137,6 @@ export async function hydrateLedger(
     knownSessions.add(session.id);
     ledger.appendLiveSession(session);
   }
+
+  // TICKET 034 stub: the score hydration itself is not implemented.
 }

@@ -8,7 +8,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { BlindComparison, LiveSession, NewRecording, Run } from './types';
+import { WER_NORMALIZATION_VERSION } from '../../core/wer';
+import type { BlindComparison, LiveSession, NewRecording, Run, WerScore } from './types';
 
 /** Relative paths of the normative layout (PRD §7). */
 export const LAYOUT = {
@@ -32,6 +33,12 @@ export const LAYOUT = {
    * `totals.runs` and derived into an arm.
    */
   liveSessions: (base: string) => path.join(base, 'live-sessions.jsonl'),
+  /**
+   * Ticket 034 — post-hoc WER scores get their OWN append-only file, for the
+   * same reason again: a score sharing ledger.jsonl would be read as a Run and
+   * counted in `totals.runs`.
+   */
+  werScores: (base: string) => path.join(base, 'wer-scores.jsonl'),
 };
 
 export async function makeTempBase(): Promise<string> {
@@ -126,6 +133,43 @@ export function makeEmptyLiveSession(overrides: Partial<LiveSession> = {}): Live
     latency: { p50: null, p95: null, driftMinute1ToEnd: null },
     cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
     stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
+    ...overrides,
+  });
+}
+
+/**
+ * Ticket 034 — a complete, SCORED WER record: a real number against a real
+ * reference. The `not applicable` case is built by `makeNotApplicableWerScore`,
+ * deliberately as a separate helper so no test can produce it by forgetting a
+ * field.
+ */
+export function makeWerScore(overrides: Partial<WerScore> = {}): WerScore {
+  return {
+    runId: 'run-1',
+    utteranceId: 'u-1',
+    wer: 0.25,
+    referenceText: 'The quick brown fox.',
+    hypothesisText: 'the quick brown ox',
+    normalizationVersion: WER_NORMALIZATION_VERSION,
+    scoredAt: 1_700_000_000_000,
+    ...overrides,
+  };
+}
+
+/**
+ * Ticket 034 — the Cantonese case (PRD §9): improvised from English prompt
+ * cards, so there is NO written script and no reference to score against.
+ * `wer` is null with a named reason and is NEVER 0 — a zero WER is a perfect
+ * score, which is the worst possible way to render "no reference".
+ */
+export function makeNotApplicableWerScore(overrides: Partial<WerScore> = {}): WerScore {
+  return makeWerScore({
+    runId: 'run-yue',
+    utteranceId: 'u-yue-1',
+    wer: null,
+    notApplicableReason: 'no-reference-text',
+    referenceText: null,
+    hypothesisText: '\u4f60\u597d\u55ce',
     ...overrides,
   });
 }

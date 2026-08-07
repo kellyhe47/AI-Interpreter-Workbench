@@ -72,6 +72,26 @@
  * toward no arm, disclosed by name: a take that produced nothing is the
  * finding, not a gap to smooth over.
  *
+ * WER SCORES ARE EXPORTED AND DISCLOSED (ticket 034, PRD §8, §9). They are read
+ * from their own append-only stream (wer-scores.jsonl), written verbatim as
+ * `wer-scores.json`, and counted in `summary.werScores` — a TOP-LEVEL field,
+ * never inside `totals`, because a post-hoc judgement about one utterance of a
+ * run is not another run. They are deliberately NOT unioned into the run record
+ * set, so they can reach neither `totals.runs` nor an experiment aggregate.
+ *
+ * THE SAME GATE AS LATENCY. A score counts toward `meanByArm` only when its Run
+ * passes the ledger gate above AND the Run's own record for that utterance
+ * completed — no fixture-sourced WER, no WER from a manual or failed run.
+ * LAST WRITE WINS is applied on read (`latestWerScores`, src/core/wer.ts), so a
+ * re-scored corpus reports the newest number while the superseded lines are
+ * still exported in full.
+ *
+ * NOT APPLICABLE IS NOT ZERO. Cantonese is improvised from English prompt cards
+ * and has no written script (PRD §9), so its scores carry `wer: null`. They are
+ * counted in `notApplicable` and NEVER folded into a mean — a zero WER is a
+ * perfect score, and averaging one in would report the unscoreable arm as the
+ * best one in the study.
+ *
  * FAILURE LEAVES THE SOURCE ALONE (PRD §12). The bundle is staged in a sibling
  * directory and renamed into place, so a failed export never leaves a
  * half-written `results/<date>/`. The error names the output path that could
@@ -83,6 +103,7 @@ import path from 'node:path';
 
 import { deriveArmTag } from '../core/arms';
 import type { ArmTag } from '../core/arms';
+import type { WerScore } from '../core/wer';
 import { createStorage } from '../server/storage/index';
 import type { BlindComparison, LiveSession, Run } from '../server/storage/index';
 
@@ -170,6 +191,34 @@ export interface LiveSessionSummary {
   byArm: Record<string, number>;
 }
 
+/**
+ * TICKET 034 — the WER disclosure. A TOP-LEVEL summary field and deliberately
+ * NOT part of `totals`, for the same reason `blindComparisons` and
+ * `liveSessions` are not: `totals` counts RUNS, its exact shape is pinned by
+ * the empty-bundle test, and a post-hoc score about one utterance is not a run.
+ */
+export interface WerScoreSummary {
+  /** Every line in the stream, INCLUDING superseded re-scores. */
+  total: number;
+  /** Distinct (runId, utteranceId) atoms after last-write-wins. */
+  atoms: number;
+  /**
+   * Atoms carrying a NUMBER whose Run and record both pass the gate — the
+   * population behind `meanByArm`.
+   */
+  aggregated: number;
+  /**
+   * Atoms whose score is `wer: null` — no reference text (Cantonese, PRD §9)
+   * or no hypothesis. Disclosed by name, and NEVER folded into a mean: a zero
+   * WER is a perfect score.
+   */
+  notApplicable: number;
+  /** Atoms the gate excludes, or that name a Run this bundle does not carry. */
+  excluded: number;
+  /** Mean WER per DERIVED arm over the aggregated atoms. Absent arms have none. */
+  meanByArm: Record<string, number>;
+}
+
 export interface ExportSummary {
   /** Bundle date, YYYY-MM-DD. */
   exportedAt: string;
@@ -178,6 +227,8 @@ export interface ExportSummary {
   blindComparisons: BlindComparisonSummary;
   /** Ticket 041 — the Live-session disclosure. Never inside `totals`. */
   liveSessions: LiveSessionSummary;
+  /** Ticket 034 — the post-hoc WER disclosure. Never inside `totals`. */
+  werScores: WerScoreSummary;
   totals: {
     /** ALL exported run records, including every excluded one. */
     runs: number;
@@ -398,6 +449,37 @@ function summariseLiveSessions(sessions: readonly LiveSession[]): LiveSessionSum
   };
 }
 
+/**
+ * TICKET 034 — the WER disclosure.
+ *
+ * LAST WRITE WINS FIRST: the stream is collapsed by (runId, utteranceId)
+ * through `latestWerScores`, the one place that rule lives, so `total` reports
+ * the lines on disk and every other figure reports the atoms in force.
+ *
+ * THE GATE IS THE LATENCY GATE. An atom contributes to `meanByArm` only when
+ * its Run is in the exported record set, that Run passes all four gate clauses,
+ * and the Run's OWN record for that utterance completed. A score naming a Run
+ * this bundle does not carry is `excluded` rather than attributed on the
+ * strength of an id nothing here defines — exactly how an unattributable blind
+ * comparison is handled.
+ *
+ * NOT APPLICABLE IS NOT ZERO: a `wer: null` atom is counted by name and never
+ * reaches a mean.
+ */
+/**
+ * TICKET 034 STUB. Deliberately TOTAL rather than throwing: `werScores` is a
+ * required field of `ExportSummary`, so a throwing stub here would take the 28
+ * pre-existing export tests down with it and hide which failures are 034's.
+ * It reports an empty disclosure over an unread stream — every substantive
+ * assertion in exportResults.wer.test.ts fails against it.
+ */
+function summariseWerScores(
+  _scores: readonly WerScore[],
+  _runsById: ReadonlyMap<string, Run>,
+): WerScoreSummary {
+  return { total: 0, atoms: 0, aggregated: 0, notApplicable: 0, excluded: 0, meanByArm: {} };
+}
+
 function reason(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -421,6 +503,7 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
   let stored: Run[];
   let comparisons: BlindComparison[];
   let liveSessions: LiveSession[];
+  let werScores: WerScore[];
   try {
     // Comparisons come from their OWN append-only stream (comparisons.jsonl),
     // never from the ledger — see the storage header. Reading them here is what
@@ -434,6 +517,8 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
       store.listBlindComparisons(),
       store.listLiveSessions(),
     ]);
+    // TICKET 034 stub: the wer-scores.jsonl read is not wired yet.
+    werScores = [];
   } catch (err) {
     throw new Error(`export-results: could not read the data store at ${dataDir} — ${reason(err)}`, {
       cause: err,
@@ -465,6 +550,7 @@ export async function exportResults(opts: ExportResultsOptions): Promise<ExportR
     intendedReps,
     blindComparisons: summariseComparisons(comparisons, new Set(byId.keys())),
     liveSessions: summariseLiveSessions(liveSessions),
+    werScores: summariseWerScores(werScores, byId),
     totals: { runs: runs.length, aggregated, excluded: runs.length - aggregated },
     experiments,
     empty,

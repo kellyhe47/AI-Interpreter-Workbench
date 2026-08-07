@@ -22,6 +22,7 @@
  */
 
 import type { CorpusUtterance } from '../../core/corpus';
+import type { WerScore } from '../../core/wer';
 import type { BlindComparison, LiveSession, Recording, Run } from '../state/ledger';
 
 /** The closed server envelope vocabulary, plus a catch-all for anything else. */
@@ -110,6 +111,21 @@ export interface BlindComparisonsClient {
 export interface LiveSessionsClient {
   create(session: LiveSession): Promise<LiveSession>;
   list(): Promise<LiveSession[]>;
+}
+
+/**
+ * TICKET 034 — the REST seam a post-hoc WER score travels over. Its own
+ * endpoint, matching its own append-only stream: the Run store has no update
+ * route, so a score is a second, later fact rather than an edit to a Run.
+ *
+ * `list()` takes NO filter and returns the stream UNCOLLAPSED — every line,
+ * superseded re-scores included. Last-write-wins is a read-side collapse
+ * (`latestWerScores` / `RunLedger.getWerScore`), so the rule lives in one
+ * place and the history stays visible.
+ */
+export interface WerScoresClient {
+  create(score: WerScore): Promise<WerScore>;
+  list(): Promise<WerScore[]>;
 }
 
 const KNOWN_CODES: readonly ApiErrorCode[] = [
@@ -294,6 +310,20 @@ export function createLiveSessionsClient(deps: ApiClientDeps): LiveSessionsClien
     // soak over free conversation.
     list: () => http.json<LiveSession[]>('/api/live-sessions', { method: 'GET' }),
   };
+}
+
+/**
+ * TICKET 034 — the WER-scores client.
+ *
+ * Like the blind-comparisons and live-sessions clients it declares NO
+ * per-endpoint fallback code: `invalid-wer-score` is a request-shape complaint,
+ * not one of the four states a caller branches on, so it surfaces as a plain
+ * 'http-error' carrying the server's own message.
+ */
+export function createWerScoresClient(deps: ApiClientDeps): WerScoresClient {
+  // TICKET 034 stub.
+  void deps;
+  throw new Error('ticket 034: not implemented');
 }
 
 export function createRunsClient(deps: ApiClientDeps): RunsClient {

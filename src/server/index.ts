@@ -36,6 +36,7 @@ import {
   createLiveSessionsRouter,
   createRecordingsRouter,
   createRunsRouter,
+  createWerScoresRouter,
 } from './routes'
 import { createStorage } from './storage'
 import { describeProviderKeys, loadServerEnv } from './env'
@@ -76,6 +77,8 @@ export function createApp(deps: AppDeps = {}): express.Express {
   // Ticket 041 — Live sessions over the SAME injected store: every Live take is
   // the stability artifact (PRD §17 19i), and it cannot live in one browser.
   app.use(createLiveSessionsRouter({ storage }))
+  // Ticket 034 — post-hoc WER scores, on their own append-only stream.
+  app.use(createWerScoresRouter({ storage }))
 
   // Production: serve the built SPA (PRD §13 — single origin, no CORS).
   // Read at CALL time so the branch is reachable in tests.

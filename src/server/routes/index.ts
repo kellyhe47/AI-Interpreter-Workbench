@@ -12,3 +12,6 @@ export type { BlindComparisonsRouterDeps } from './blindComparisons';
 // Ticket 041 — the live-sessions router.
 export { createLiveSessionsRouter } from './liveSessions';
 export type { LiveSessionsRouterDeps } from './liveSessions';
+// Ticket 034 — the post-hoc WER-scores router.
+export { createWerScoresRouter } from './werScores';
+export type { WerScoresRouterDeps } from './werScores';

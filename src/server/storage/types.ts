@@ -1,4 +1,13 @@
 import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
+/**
+ * TICKET 034 — the WER score shape lives in src/core/wer.ts and is IMPORTED by
+ * both sides, exactly as CorpusUtterance is. It is not re-declared here: the
+ * normalizer, the formula and the record are one vocabulary, and a second copy
+ * of the shape could drift from the function that produces it.
+ */
+import type { WerScore } from '../../core/wer';
+
+export type { WerScore };
 
 /**
  * Entity vocabulary for the filesystem store (PRD §7). Server-only: this

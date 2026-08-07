@@ -12,11 +12,19 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createStorage } from '../storage';
-import type { BlindComparison, LiveSession, Recording, Run, Storage } from '../storage';
+import type {
+  BlindComparison,
+  LiveSession,
+  Recording,
+  Run,
+  Storage,
+  WerScore,
+} from '../storage';
 import { createBlindComparisonsRouter } from './blindComparisons';
 import { createLiveSessionsRouter } from './liveSessions';
 import { createRecordingsRouter } from './recordings';
 import { createRunsRouter } from './runs';
+import { createWerScoresRouter } from './werScores';
 
 export interface ApiHarness {
   /** Origin of the running test server, e.g. http://127.0.0.1:54321 */
@@ -45,6 +53,8 @@ export async function startApi(): Promise<ApiHarness> {
   app.use(createBlindComparisonsRouter({ storage }));
   // Ticket 041 — the fourth router. Additive: it adds routes and shadows none.
   app.use(createLiveSessionsRouter({ storage }));
+  // Ticket 034 — the fifth. Additive again: it adds routes and shadows none.
+  app.use(createWerScoresRouter({ storage }));
 
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -168,6 +178,26 @@ export async function getLiveSessions(
 ): Promise<{ status: number; body: LiveSession[] }> {
   const res = await fetch(`${api.base}/api/live-sessions`);
   return { status: res.status, body: (await res.json()) as LiveSession[] };
+}
+
+/**
+ * Ticket 034 — POST /api/wer-scores. The body is passed through VERBATIM
+ * (typed `unknown`) so a malformed-body test can post anything at all.
+ */
+export async function postWerScore(api: ApiHarness, body: unknown): Promise<Response> {
+  return fetch(`${api.base}/api/wer-scores`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Ticket 034 — GET /api/wer-scores. Uncollapsed: every line, in write order. */
+export async function getWerScores(
+  api: ApiHarness,
+): Promise<{ status: number; body: WerScore[] }> {
+  const res = await fetch(`${api.base}/api/wer-scores`);
+  return { status: res.status, body: (await res.json()) as WerScore[] };
 }
 
 export async function bodyBytes(res: Response): Promise<Uint8Array> {

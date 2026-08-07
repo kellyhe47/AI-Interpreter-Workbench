@@ -6,7 +6,7 @@ source: v3-corpus
 depends_on: [031]
 touches: [src/server/routes/, src/server/storage/, src/client/components/results/derive.ts]
 iterations: 0
-test_files: []
+test_files: [src/core/wer.test.ts, src/server/storage/werScores.test.ts, src/server/routes/werScores.test.ts, src/client/state/ledger.wer.test.ts, src/client/replay/werScoresClient.test.ts, src/client/components/results/derive.wer.test.ts, src/harness/exportResults.wer.test.ts]
 branch: ""
 ---
 

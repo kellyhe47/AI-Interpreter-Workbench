@@ -95,6 +95,17 @@
  *   STT_UNCHANGED_CELL whenever the two arms share an STT stage; otherwise the
  *   mean-WER delta, or '—' when either side carries none. null when either arm
  *   has no gate-passing sample.
+ * - TICKET 034 — WER IS READ FROM THE SCORES STREAM, per arm and per category.
+ *   deriveWerByArm / deriveWerByCategory walk exactly the samples the latency
+ *   figures walk — `runSamples` + `isAggregatableUtterance` — and look each one
+ *   up by (runId, utteranceId) through `ledger.getWerScore`, which is
+ *   last-write-wins. So the realness rule and the aggregation gate apply to WER
+ *   EXACTLY as to latency: no fixture-sourced WER, no WER from a manual or
+ *   failed run. `meanWer` averages only the samples that carry a NUMBER.
+ *   NOT APPLICABLE IS NOT ZERO: Cantonese carries no referenceText by design
+ *   (PRD §9), its scores are `wer: null`, they are counted in `notApplicable`
+ *   and they NEVER enter the mean. An arm whose every sample is not applicable
+ *   reports `WER_NOT_APPLICABLE_CELL`, never '0.0%'.
  * - deriveLiveModel(ledger): one column per derived arm over LiveSessions.
  *   wer is ALWAYS null (PRD 7).
  * - formatMs(ms): null -> '—'; ms < 10000 -> seconds with 2 decimals + ' s';
@@ -324,6 +335,50 @@ export interface RecordingGroupRow {
   excludedFromExperiments: boolean;
   /** Why, for the runs that are excluded. Empty when nothing is excluded. */
   exclusionReasons: ExclusionReason[];
+}
+
+/* --------------------------------------------- ticket 034: WER derivations -- */
+
+/**
+ * How a WER cell renders when the corpus has no script to score against.
+ * PRD §9: Cantonese is improvised from English prompt cards. NEVER '0.0%' —
+ * a zero WER is a PERFECT score, which is the worst possible way to say
+ * "there is no reference".
+ */
+export const WER_NOT_APPLICABLE_CELL = 'not applicable';
+
+/**
+ * How a WER cell renders when the samples exist but nobody has scored them.
+ * Distinct from `not applicable`: one says the measurement is impossible, the
+ * other says it has not been taken.
+ */
+export const WER_NOT_MEASURED_CELL = 'not yet measured';
+
+/** One arm's (or one category × arm's) WER, over gate-passing samples only. */
+export interface WerAggregate {
+  /** Mean over the samples carrying a NUMBER. null when there are none. */
+  meanWer: number | null;
+  /** Gate-passing samples with a numeric WER — the mean's denominator. */
+  scored: number;
+  /**
+   * Gate-passing samples whose score says `not applicable` (no referenceText,
+   * or no hypothesis). Counted, never averaged, and never rendered as 0.
+   */
+  notApplicable: number;
+  /** Gate-passing samples with NO score record at all. */
+  unscored: number;
+  /**
+   * The rendered cell, decided in one place so no view can invent a zero:
+   * a percentage when anything scored, else WER_NOT_APPLICABLE_CELL when
+   * anything is not applicable, else WER_NOT_MEASURED_CELL.
+   */
+  cell: string;
+}
+
+/** One row of the by-category WER table: category × DERIVED arm. */
+export interface WerCategoryRow extends WerAggregate {
+  category: UtteranceCategory;
+  arm: ArmTag;
 }
 
 /** One row of the "By utterance category" secondary tab: category × arm. */
@@ -692,6 +747,32 @@ export function groupByCategory(ledger: RunLedger): CategoryGroupRow[] {
       costUsd: group.reduce((sum, entry) => sum + entry.sample.cost, 0),
     };
   });
+}
+
+/**
+ * TICKET 034 — a WER as a percentage, or '—' for null. Percentages, like every
+ * other formatter here, live in ONE place so no component formats by hand.
+ */
+export function formatWer(_wer: number | null): string {
+  // TICKET 034 stub.
+  throw new Error('ticket 034: not implemented');
+}
+
+/** TICKET 034 — WER per DERIVED arm, keyed by arm tag. Named arms only. */
+export function deriveWerByArm(_ledger: RunLedger): { [arm: string]: WerAggregate } {
+  // TICKET 034 stub.
+  throw new Error('ticket 034: not implemented');
+}
+
+/**
+ * TICKET 034 — WER per (category × DERIVED arm), the grouping the findings
+ * actually live in. Keyed on the PAIR for the same reason `groupByCategory` is:
+ * a mixed ledger yields several rows per category and a category-only lookup
+ * silently picks whichever arm was appended first.
+ */
+export function deriveWerByCategory(_ledger: RunLedger): WerCategoryRow[] {
+  // TICKET 034 stub.
+  throw new Error('ticket 034: not implemented');
 }
 
 /** Head-to-head for two named arms; null when either arm has no samples. */
