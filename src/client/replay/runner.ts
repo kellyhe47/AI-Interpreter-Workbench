@@ -17,6 +17,11 @@
  * - NOTHING AUTOPLAYS (PRD §7): the run buffers its output audio and reports
  *   it ready. `timings.audio_queued` is stamped when the first sample is
  *   decoded and queued — playback is the caller's business and never moves it.
+ *   TICKET 040: Arm A's audio rides the WebRTC MEDIA TRACK and never reaches
+ *   the data channel, so no sample is ever decoded. There the transport SENDS
+ *   an `audio_queued` mark and the run falls back to it. A decoded sample
+ *   always WINS over a volunteered mark, so cascade is unchanged; with
+ *   neither, the value stays null.
  * - A run that loses a stage is saved with status 'failed' plus the failing
  *   stage, is still POSTed, and runOnce RESOLVES rather than throwing.
  *
@@ -53,9 +58,13 @@
  *   the Recording-level `speechEndMs` and never from VAD. A transport-sent
  *   `speech_end` stays discarded per utterance exactly as it is run-wide.
  * - `audio_queued` IS PER UTTERANCE: the clock at the FIRST `onAudio` carrying
- *   that `utt`, and `null` when the utterance produced no output audio at all.
- *   Such an utterance is `status: 'failed'` with `errors: ['no output audio']`
- *   and does NOT fail the Run — one silent utterance is a datum, not a void run.
+ *   that `utt`, else (040) that utterance's own transport-sent `audio_queued`
+ *   mark, and `null` when it produced no output audio by either path. Only
+ *   that last case is `status: 'failed'` with `errors: ['no output audio']`,
+ *   and it does NOT fail the Run — one silent utterance is a datum, not a void
+ *   run. The status keys on the RESOLVED value, never on the PCM alone, or a
+ *   track-carried utterance would read as failed while the Run reported its
+ *   latency.
  * - COST IS SPLIT BY MANIFEST SPAN (`cost_i = costPerMinUsd * span_i / 60_000`,
  *   the last utterance absorbing the clip tail) so the splits sum back to the
  *   Run cost EXACTLY and nothing is invented or lost in the attribution.
@@ -293,8 +302,13 @@ function attributeUtterances(args: {
     // ...except the two the runner owns. The anchor is the MANIFEST's, never
     // the Recording's and never VAD's.
     timings.speech_end = t0 + entry.trueSpeechEndMs;
+    // TICKET 040 — a decoded PCM sample still wins; a transport-sent mark is
+    // the fallback for the WebRTC media-track case, where the audio never
+    // reaches the data channel and only the mark exists.
     const audioAt = buckets.audioAt.get(utt);
-    timings.audio_queued = audioAt ?? null;
+    const markedAt = typeof timings.audio_queued === 'number' ? timings.audio_queued : null;
+    const audioQueued = audioAt ?? markedAt;
+    timings.audio_queued = audioQueued;
 
     const previousEnd = i === 0 ? 0 : manifest[i - 1]!.trueSpeechEndMs;
     const spanMs = i === last ? durationMs - previousEnd : entry.trueSpeechEndMs - previousEnd;
@@ -311,9 +325,11 @@ function attributeUtterances(args: {
       },
       cost: costPerMinUsd * (spanMs / 60_000),
       // An utterance with no output audio has no end-to-end number to report,
-      // which is a fact about THAT utterance and not about the Run.
-      status: audioAt === undefined ? 'failed' : 'complete',
-      errors: audioAt === undefined ? ['no output audio'] : [],
+      // which is a fact about THAT utterance and not about the Run. Keyed on
+      // the RESOLVED value (040): a track-carried utterance DID produce audio
+      // and must not be marked failed while the run reports its latency.
+      status: audioQueued === null ? 'failed' : 'complete',
+      errors: audioQueued === null ? ['no output audio'] : [],
     };
   });
 }
@@ -491,7 +507,12 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
 
   const outputAudio = concatPcm(audioChunks);
   timings.speech_end = t0 + recording.speechEndMs;
-  timings.audio_queued = firstAudioAt;
+  // TICKET 040 — a decoded PCM sample wins, then a transport-sent mark (the
+  // WebRTC media-track case, where nothing is ever decoded), then null. Before
+  // this the mark was overwritten with a null firstAudioAt, so every Replay
+  // Arm A run counted toward n and cost while contributing no latency sample.
+  const markedAudioQueued = typeof timings.audio_queued === 'number' ? timings.audio_queued : null;
+  timings.audio_queued = firstAudioAt ?? markedAudioQueued;
 
   if (cancelled) errors.push('run cancelled');
 

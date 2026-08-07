@@ -68,7 +68,11 @@ import { runOnce, type RunnerDeps, type RunOnceConfig, type RunOnceResult } from
 import type { LedgerHydrationSource } from './state/hydrateLedger';
 import { RunLedger } from './state/ledger';
 import { CascadeTransport, type WsLike } from './transport/cascade';
-import { RealtimeTransport, type RtcPeerConnectionLike } from './transport/realtime';
+import {
+  RealtimeTransport,
+  type RemoteAudioSink,
+  type RtcPeerConnectionLike,
+} from './transport/realtime';
 import type { InterpreterTransport } from './transport/types';
 import type {
   ReplayBatchRequest,
@@ -114,6 +118,47 @@ const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
   };
 };
 
+/**
+ * TICKET 040 — the REAL output for the model's inbound WebRTC audio track.
+ *
+ * Over WebRTC OpenAI sends the response audio on the media track only, so the
+ * one conventional way to hear it is a hidden `<audio>` element carrying the
+ * remote MediaStream as `srcObject`; there is no PCM to feed an AudioContext.
+ * `autoplay` is what satisfies "audible in Live without pressing anything",
+ * and play()/pause() are what make Live's control move the real sound.
+ *
+ * The element is created lazily and reused across reconnects: attaching a new
+ * stream to the same element is exactly the reconnect story, and one element
+ * per session keeps a stale one from playing under a fresh one.
+ */
+function createRemoteAudioSink(): RemoteAudioSink {
+  let el: HTMLAudioElement | null = null;
+  const element = (): HTMLAudioElement => {
+    if (el === null) {
+      el = document.createElement('audio');
+      el.autoplay = true;
+      // Not a control surface: Live's own play/pause button drives it.
+      el.controls = false;
+      el.style.display = 'none';
+      document.body.appendChild(el);
+    }
+    return el;
+  };
+  return {
+    attach: (stream) => {
+      const node = element();
+      node.srcObject = stream as unknown as MediaStream;
+      // A rejected autoplay is not a failure worth surfacing: the operator
+      // still has the play button, which drives this same element.
+      void node.play?.().catch(() => {});
+    },
+    play: () => {
+      void element().play?.().catch(() => {});
+    },
+    pause: () => element().pause(),
+  };
+}
+
 /** Same-origin ws:// (or wss://) base for the cascade socket. */
 function websocketBase(): string {
   return `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
@@ -150,6 +195,10 @@ export function buildReplayDeps(): ReplayDeps {
 
   // Replay has no microphone: the clip is paced INTO the transport, so the
   // realtime peer connection carries no live track (getMediaStream omitted).
+  // NO `remoteAudioSink` either, and deliberately: NOTHING IN REPLAY AUTOPLAYS
+  // (PRD §7), and a sink here would sound the model's track the moment it
+  // arrived. The measurement Replay needs comes from the transport's
+  // `audio_queued` mark, which is stamped whether or not anything is listening.
   const createTransport = (config: RunOnceConfig): InterpreterTransport => {
     if (config.architecture === 'realtime') {
       return new RealtimeTransport(
@@ -250,6 +299,12 @@ export function buildBrowserDeps(): BrowserDeps {
   // re-read this on every connect). Exercised by browser QA, not unit tests.
   let liveMicStream: MediaStream | null = null;
 
+  // TICKET 040 — the Live output for the model's inbound track. ONE sink for
+  // the session: it is handed to every realtime transport the factory builds
+  // (so a reconnect re-attaches to the same element) and to the controller, so
+  // the play/pause control moves exactly the audio the operator is hearing.
+  const remoteAudioSink = createRemoteAudioSink();
+
   // Ticket 012 — ONE transport per session, built from the resolved recipe.
   // `config.realtimeModel` is already resolved by the controller (never left
   // to the transport's cheap dev default), so what runs is what the derived
@@ -263,6 +318,7 @@ export function buildBrowserDeps(): BrowserDeps {
           rtcFactory: () => new RTCPeerConnection() as unknown as RtcPeerConnectionLike,
           now: () => Date.now(),
           getMediaStream: () => liveMicStream,
+          remoteAudioSink,
         },
       );
     }
@@ -295,6 +351,7 @@ export function buildBrowserDeps(): BrowserDeps {
         onLevel: cbs.onLevel,
       }),
     playbackContextFactory: () => new AudioContext() as unknown as PlaybackAudioContextLike,
+    remoteAudioSink,
     ledger: new RunLedger(window.localStorage),
     now: () => Date.now(),
     replay,

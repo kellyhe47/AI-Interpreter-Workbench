@@ -208,6 +208,11 @@ export class RealtimeTransport implements InterpreterTransport {
   private sourceAccum = '';
   /** Whether first_audio_delta has fired for the current utterance. */
   private firstAudioMarked = false;
+  /**
+   * TICKET 040 — whether audio_queued has been stamped for the current
+   * utterance. Re-armed at response.done, exactly like firstAudioMarked.
+   */
+  private audioQueuedMarked = false;
 
   constructor(opts: RealtimeTransportOptions, deps: RealtimeDeps) {
     this.armId = opts.armId;
@@ -242,12 +247,29 @@ export class RealtimeTransport implements InterpreterTransport {
       const pc = this.deps.rtcFactory();
       const channel = pc.createDataChannel('oai-events');
 
+      // TICKET 040 — the inbound audio path. Installed BEFORE
+      // setRemoteDescription (in fact before the offer is even built) because
+      // the remote track can fire the instant the answer is applied, and a
+      // handler installed after it would miss the only audio there is. The
+      // guard tolerates `this.pc === null`: on the first connect the field is
+      // not assigned until the answer has landed, so `this.pc !== pc` alone
+      // would drop exactly the early track this ordering exists to catch.
+      pc.ontrack = (ev) => {
+        if (this.stopped) return;
+        if (this.pc !== null && this.pc !== pc) return;
+        if (ev.track.kind !== 'audio') return;
+        const stream = ev.streams[0];
+        if (stream === undefined) return;
+        this.deps.remoteAudioSink?.attach(stream);
+      };
+
       // Production path (browser QA, not unit tests): attach the live mic
       // track BEFORE createOffer so the offer carries a sendrecv audio
       // m-line (mic up, model audio down). Without a stream, fall back to a
-      // recvonly transceiver so the model's audio track could still flow —
-      // playback itself stays on the data-channel PCM path by design. Test
-      // fakes implement neither optional method and behave as before.
+      // recvonly transceiver so the model's audio track still flows — since
+      // ticket 040 that track IS the playback path (see the ontrack handler
+      // above). Test fakes implement neither optional method and behave as
+      // before.
       const media = this.deps.getMediaStream?.() ?? null;
       if (media && typeof pc.addTrack === 'function') {
         for (const track of media.getAudioTracks()) pc.addTrack(track, media);
@@ -358,12 +380,27 @@ export class RealtimeTransport implements InterpreterTransport {
         h.onAudio?.(base64ToInt16(String(msg.delta ?? '')), this.utt);
         break;
       }
+      // TICKET 040 — the WebRTC audio_queued stamp. Over WebRTC the model's
+      // audio rides the media track, so there is no PCM enqueue to time from;
+      // this event is the instant that audio begins on the track, which is the
+      // same quantity cascade calls "first audio queued".
+      case 'output_audio_buffer.started': {
+        if (this.audioQueuedMarked) break;
+        this.audioQueuedMarked = true;
+        h.onTiming?.({ event: 'audio_queued', t: this.deps.now(), utt: this.utt });
+        break;
+      }
+      case 'output_audio_buffer.stopped': {
+        // Inert: the end of the buffer measures nothing this project reports.
+        break;
+      }
       case 'response.done': {
         const response = msg.response as { usage?: unknown } | undefined;
         h.onUtteranceComplete?.({ utt: this.utt, usage: response?.usage });
         this.utt++;
         this.sourceAccum = '';
         this.firstAudioMarked = false;
+        this.audioQueuedMarked = false;
         break;
       }
       case 'error': {

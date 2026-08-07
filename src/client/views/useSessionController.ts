@@ -28,7 +28,11 @@
  *   router.sendAudio. START while micPermission === 'denied' is a machine
  *   no-op, so clicking the denied-card retry does NOT re-invoke
  *   deps.startCapture (browsers do not re-prompt after a denial).
- * - Playback: one ArmPlayback for the session, autoplay ALWAYS on.
+ * - Playback: one ArmPlayback for the session, autoplay ALWAYS on. TICKET 040:
+ *   realtime audio arrives on the WebRTC media track and never as PCM, so
+ *   ArmPlayback is empty for a realtime session and `togglePlay` also drives
+ *   the OPTIONAL deps.remoteAudioSink — the real sound. Cascade keeps moving
+ *   the queue; the sink is simply absent.
  * - Ledger: each onUtteranceComplete assembles/completes an UtteranceRecord,
  *   stamps `runId` with the live session run id (`session-${startedAt}`) and
  *   `arm` with the DERIVED arm tag, and appends it. Footer figures (p50 /
@@ -698,12 +702,19 @@ export function useSessionController(deps: SessionDeps): SessionController {
     },
     setContextPolicy: (value) => dispatch({ type: 'SET_CONTEXT_POLICY', value }),
     togglePlay: () => {
+      // TICKET 040 — the sink is the REAL audio path for realtime (the media
+      // track), the ArmPlayback queue the real one for cascade. Both are
+      // driven: only one of them ever holds anything, and the control must
+      // move whichever it is.
+      const sink = depsRef.current.remoteAudioSink;
       if (stateRef.current.status === 'playing') {
         store.playback.pause();
+        sink?.pause();
         dispatch({ type: 'PLAYBACK_ENDED' });
       } else {
         store.playback.onEnded(() => dispatch({ type: 'PLAYBACK_ENDED' }));
         store.playback.play();
+        sink?.play();
         dispatch({ type: 'PLAY' });
       }
     },
