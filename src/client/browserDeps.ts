@@ -59,6 +59,7 @@ import { segmentTake } from './replay/segment';
 import {
   createBlindComparisonsClient,
   createLiveSessionsClient,
+  createWerScoresClient,
   createRecordingsClient,
   createRunsClient,
   type BlindComparisonsClient,
@@ -315,6 +316,9 @@ export function buildBrowserDeps(): BrowserDeps {
   // wires is a seam that does not exist — which is exactly how twelve real
   // takes ended up reachable from one browser profile and nowhere else.
   const liveSessions: LiveSessionsClient = createLiveSessionsClient({ fetchImpl: browserFetch });
+  // Ticket 042 — the WER scores the post-hoc pass writes. Hydration ONLY: the
+  // app never scores in-browser, it reads what `npm run score-wer` produced.
+  const werScores = createWerScoresClient({ fetchImpl: browserFetch });
 
   // Ticket 012 — ONE transport per session, built from the resolved recipe.
   // `config.realtimeModel` is already resolved by the controller (never left
@@ -367,6 +371,6 @@ export function buildBrowserDeps(): BrowserDeps {
     now: () => Date.now(),
     replay,
     liveSessions,
-    hydrate: { recordings: replay.recordings, runs: replay.runs, liveSessions },
+    hydrate: { recordings: replay.recordings, runs: replay.runs, liveSessions, werScores },
   };
 }

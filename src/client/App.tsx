@@ -230,6 +230,13 @@ export default function App(props: AppProps): ReactElement {
     if (liveSessions !== undefined) {
       wrapped.liveSessions = { list: observe(() => liveSessions.list()) };
     }
+    // Ticket 042 — the same rule for WER scores. Forgetting this key is not a
+    // visible failure: hydration succeeds, Results renders, and every WER cell
+    // reads 'not yet measured' over a store full of scores.
+    const { werScores } = source;
+    if (werScores !== undefined) {
+      wrapped.werScores = { list: observe(() => werScores.list()) };
+    }
     return wrapped;
   }, [deps]);
 
