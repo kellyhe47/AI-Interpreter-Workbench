@@ -62,6 +62,29 @@ anchors is preserved and now holds per utterance.
 - [ ] Cancellation still POSTs nothing
 - [ ] Pacing is unchanged: still 1x, still one continuous clip, still one pacer
 
+## ORCHESTRATOR DECISION — a short manifest must FAIL, not hang
+
+Raised by the test-writer during 031 and decided here rather than deferred.
+
+The "too many" direction is detectable (the extra completion arrives inside a settle window). The
+**"too few"** direction is not: if a provider's VAD MERGES two utterances, only N-1 completions ever
+arrive, the settle timer never starts, and `runOnce` never resolves. A manual run has no timeout at
+all, and in an overnight 30-run sweep one merged clip stalls the entire sweep.
+
+A merge is precisely the segmentation mismatch this ticket exists to catch, so it must surface as
+the same named run-level failure — never as a hang.
+
+**Rule:** for a manifest-backed run, once pacing has completed, wait at most
+`SEGMENTATION_IDLE_MS` for the outstanding completions. If the count is still short, fail the Run
+with the SAME named reason (`segmentation: expected N utterances, observed M`) and record no
+per-utterance attribution. Manifest-less runs are unaffected — their termination is unchanged.
+
+- [ ] A run whose transport delivers only N-1 completions and then goes quiet RESOLVES, saves
+      `status: 'failed'`, names the segmentation reason, and records no `utterances`
+- [ ] It does so without a lost stage — going quiet is the whole scenario
+- [ ] No timer leaks past the run in either the short or the happy path
+- [ ] A manifest-less run's termination is byte-for-byte unchanged
+
 ## Explicitly NOT in this ticket
 
 Aggregation over the new records — that is **032**. Until it lands, `RunUtterance[]` is written and
