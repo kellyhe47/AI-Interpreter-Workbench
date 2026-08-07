@@ -150,6 +150,12 @@ These exist because a violation would produce a number that looks fine and is wr
   have been committed by accident before.
 - `.env` holds `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `ANTHROPIC_API_KEY`.
 - Commit in logical units with meaningful messages; never push without being asked.
+- **A lock commit stages ONLY the ticket's declared `test_files`** — never `git add -A`. A
+  test-writer that runs a reference implementation first (a practice worth keeping: it has caught
+  three real design problems) leaves source in the tree at exactly the moment the orchestrator
+  commits the "failing tests".
+- **Never mutate a constant the tests import** — the expectation moves with it and nothing fails.
+  Mutate the behaviour instead (don't arm the timer at all).
 - **A mutation you did not verify landed is worse than no mutation check** — it prints a
   green-looking line and buys false confidence. Confirm each sabotage produces a non-empty
   `git diff` in EXECUTABLE code (matching a comment does not count) before believing its result.
