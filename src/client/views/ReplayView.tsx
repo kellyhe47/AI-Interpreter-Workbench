@@ -63,9 +63,21 @@
  *     panel state; never a control, and nothing anywhere sets a tag.
  *   [data-replay-context][data-locked='true'] — pinned to zero, contains NO
  *     enabled control of any kind.
- *   [data-pinned-note] verbatim; buttons 'Run' and 'Batch sweep…', both
- *     `disabled` with an explanatory `title` while no Recording is selected
- *     (ticket 024) — and unaffected by a run already in flight.
+ *   [data-pinned-note] verbatim; buttons 'Run' ([data-run-button]) and
+ *     'Batch sweep…' ([data-batch-button]), both `disabled` with an
+ *     explanatory `title` while no Recording is selected (ticket 024) — and,
+ *     ticket 044, ALSO while a request of their own kind is in flight, which
+ *     applies 024's principle rather than overturning it: a Replay run is
+ *     billable, and an enabled button that swallows the click is the failure
+ *     024 exists against. The no-selection title always wins over the busy one.
+ *   [data-run-inflight] — present ONLY while a MANUAL run this panel started
+ *     is in flight, carrying the in-flight copy verbatim. A readout, never a
+ *     control. Absent during a sweep: BatchProgress is the sweep's sole
+ *     indication, and two panels claiming different things about what is
+ *     executing is the contradiction ticket 044 forbids. It clears on every
+ *     exit — a run that completes, a run that RESOLVES as `status: 'failed'`,
+ *     and a runOnce that REJECTS — so a failure never leaves the panel
+ *     looking permanently busy.
  *   Defaults: architecture 'cascade', providers DEFAULT_CASCADE_TRIPLE, so an
  *   untouched panel derives Arm B.
  *
@@ -337,6 +349,13 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
   const [config, setConfig] = useState<ReplayConfigState>(initialConfig);
   const [sweep, setSweep] = useState<SweepState | null>(null);
+  /**
+   * Ticket 044 — a MANUAL run this view started and has not seen settle. It
+   * mirrors `sweep` deliberately: one pattern for "a request of this kind is
+   * out", not two. The run's semantics are untouched — this state is read only
+   * to say so on screen and to refuse a second, billable click.
+   */
+  const [runInFlight, setRunInFlight] = useState(false);
   const [blindOpen, setBlindOpen] = useState(false);
   /** Ticket 036 — the record flow is OPENED, never standing: no panel, no mic. */
   const [recordOpen, setRecordOpen] = useState(false);
@@ -428,7 +447,11 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   };
 
   const run = (): void => {
-    if (selectedRecordingId === null) return;
+    // The guard mirrors startSweep's: the disabled button is the affordance,
+    // this is the fact. Both halves are needed — a click that arrives anyway
+    // (keyboard, a stale render) must not spend the provider budget twice.
+    if (selectedRecordingId === null || runInFlight) return;
+    setRunInFlight(true);
     void deps
       .runOnce({
         recordingId: selectedRecordingId,
@@ -439,7 +462,18 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
         },
       })
       .then((result) => {
+        // A run that RESOLVES as `status: 'failed'` is a Run like any other —
+        // runner.ts loses a stage by resolving, not by throwing.
         setRuns((previous) => [...previous, result.run]);
+      })
+      // A REJECTED runOnce is the third exit, and it must be CAUGHT: an
+      // unhandled rejection is not a UI state anyone can act on, and leaving
+      // it uncaught would also skip the clear below.
+      .catch(() => {})
+      // One rule for all three exits — complete, resolved-failed, rejected —
+      // so a failure can never leave the panel looking permanently busy.
+      .finally(() => {
+        setRunInFlight(false);
       });
   };
 
@@ -605,6 +639,8 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
             onRun={run}
             onBatchSweep={startSweep}
             batchProgress={batchProgress}
+            runInFlight={runInFlight}
+            sweepInFlight={sweep !== null}
           />
 
           {blindTrigger}

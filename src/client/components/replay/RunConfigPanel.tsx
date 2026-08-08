@@ -24,9 +24,17 @@
  * Recording to act ON, so with none selected they carry the real `disabled`
  * attribute plus a title naming the missing precondition, rather than
  * accepting a click and doing nothing — silent inaction reads as a broken
- * button. The gate is the SELECTION and nothing else: a run already in flight
- * does not disable Run, because whether the operator may start a run is not a
- * fact about the previous request.
+ * button.
+ *
+ * Ticket 044 — THE SAME PRINCIPLE, A SECOND REASON. There are now two facts
+ * that make an action unable to act: no Recording to act on, and a request of
+ * that kind ALREADY IN FLIGHT. Disabling during flight APPLIES 024 rather than
+ * overturning it — a Replay run is billable, and an enabled button that
+ * silently swallows the click is precisely the failure 024 was written
+ * against. The two reasons stay distinguishable in the `title`: the
+ * no-selection explanation always WINS, so it is never replaced by a busy one.
+ * The in-flight state is also said out loud, as [data-run-inflight] — a
+ * readout beside the button, never a control.
  */
 
 import type { CSSProperties, ReactElement } from 'react';
@@ -48,6 +56,15 @@ export interface RunConfigPanelProps {
   onBatchSweep: () => void;
   /** Rendered inside the panel while a sweep is in flight. */
   batchProgress?: ReactElement | null;
+  /**
+   * Ticket 044 — a MANUAL run this panel started is still out. A sweep is not
+   * a manual run, so this stays false for the whole of one: BatchProgress is
+   * the sweep's sole indication, and two panels claiming different things
+   * about what is executing is the contradiction the ticket forbids.
+   */
+  runInFlight?: boolean;
+  /** Ticket 044 — a sweep is out. Its indication is `batchProgress`. */
+  sweepInFlight?: boolean;
 }
 
 /* ------------------------------------------------------------------ copy -- */
@@ -57,6 +74,20 @@ const NO_SELECTION = 'select a Recording to run against';
 
 /** Why the actions are inert: the missing precondition, not a missing handler. */
 const NO_SELECTION_HINT = 'Select a Recording in the library to run against';
+
+/**
+ * Ticket 044 — the visible in-flight indication. It names the PACING because
+ * that is the honest explanation of the wait: a Replay run plays the clip at
+ * 1×, so nothing is stuck, and a ≤45 s corpus take takes about 45 s.
+ */
+const RUN_INFLIGHT_NOTE =
+  'Running — the clip is playing at 1×, so this takes about as long as the Recording.';
+
+/** Why Run cannot act right now: the previous run, never the selection. */
+const RUN_BUSY_HINT = 'A run is already in flight — the clip is playing at 1×';
+
+/** Why Batch sweep cannot act right now. */
+const BATCH_BUSY_HINT = 'A batch sweep is already in flight';
 
 const REALTIME = 'Realtime';
 const CASCADE = 'Cascade';
@@ -123,6 +154,17 @@ const lockedFieldStyle: CSSProperties = {
   fontSize: 'var(--text-sm)',
 };
 
+/** The in-flight readout: stated in the panel's own vocabulary, not shouted. */
+const inflightNoteStyle: CSSProperties = {
+  display: 'block',
+  background: 'var(--surface-sunken)',
+  borderRadius: 'var(--radius-md)',
+  padding: 'var(--space-2) var(--space-3)',
+  color: 'var(--text-secondary)',
+  fontSize: 'var(--text-sm)',
+  lineHeight: 'var(--leading-normal)',
+};
+
 const noteStyle: CSSProperties = {
   color: 'var(--text-muted)',
   fontSize: 'var(--text-xs)',
@@ -187,6 +229,18 @@ export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement
 
   /** No Recording to act on — the precondition both actions need (ticket 024). */
   const noSelection = props.recordingLabel === null;
+
+  /* Ticket 044 — the second reason either action cannot act. The no-selection
+     reason is checked FIRST everywhere below, so 024's explanation always
+     wins and is never quietly replaced by a busy one. */
+  const runInFlight = props.runInFlight === true;
+  const sweepInFlight = props.sweepInFlight === true;
+
+  const runDisabled = noSelection || runInFlight;
+  const sweepDisabled = noSelection || sweepInFlight;
+
+  const runHint = noSelection ? NO_SELECTION_HINT : runInFlight ? RUN_BUSY_HINT : undefined;
+  const sweepHint = noSelection ? NO_SELECTION_HINT : sweepInFlight ? BATCH_BUSY_HINT : undefined;
 
   // The single source of truth for membership, read fresh on every render.
   const tag = deriveArmTag({
@@ -285,23 +339,25 @@ export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement
           paddingTop: 'var(--space-3)',
         }}
       >
-        {/* SELECTION is the gate, and the only one: an in-flight run leaves
-            both of these alone (ticket 024). */}
+        {/* Two gates, two explanations (tickets 024 + 044): no Recording to
+            act on, or a request of that kind already in flight. */}
         <button
           type="button"
+          data-run-button=""
           onClick={props.onRun}
-          disabled={noSelection}
-          title={noSelection ? NO_SELECTION_HINT : undefined}
-          style={actionButtonStyle(true, noSelection)}
+          disabled={runDisabled}
+          title={runHint}
+          style={actionButtonStyle(true, runDisabled)}
         >
           {RUN}
         </button>
         <button
           type="button"
+          data-batch-button=""
           onClick={props.onBatchSweep}
-          disabled={noSelection}
-          title={noSelection ? NO_SELECTION_HINT : undefined}
-          style={actionButtonStyle(false, noSelection)}
+          disabled={sweepDisabled}
+          title={sweepHint}
+          style={actionButtonStyle(false, sweepDisabled)}
         >
           {BATCH_SWEEP}
         </button>
@@ -309,6 +365,13 @@ export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement
           {PINNED_NOTE}
         </span>
       </div>
+
+      {/* A READOUT of what is happening, holding no control of its own. */}
+      {runInFlight ? (
+        <span data-run-inflight="" style={inflightNoteStyle}>
+          {RUN_INFLIGHT_NOTE}
+        </span>
+      ) : null}
 
       {props.batchProgress ?? null}
     </div>
