@@ -198,6 +198,12 @@ export interface SessionController {
   target: TargetView;
   footer: SessionFooterData;
   elapsedMs: number;
+  /**
+   * TICKET 049 (STUB) — true once translated audio could not be sounded because
+   * the AudioContext could not be constructed. A SURFACED, non-fatal state: the
+   * session keeps running and keeps measuring; only the sound is missing.
+   */
+  playbackUnavailable: boolean;
   actions: SessionActions;
 }
 
@@ -784,6 +790,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
     target: store.target,
     footer,
     elapsedMs,
+    playbackUnavailable: false,
     actions,
   };
 }

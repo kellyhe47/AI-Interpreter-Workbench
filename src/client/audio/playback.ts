@@ -71,6 +71,13 @@ export interface ArmPlaybackOptions {
   autoplay: boolean;
   /** Injectable performance.now-style clock (ms). */
   now?: () => number;
+  /**
+   * TICKET 049 (STUB — see playback.degraded.test.ts) — reported ONCE when a
+   * chunk could not be sounded because the AudioContext could not be built.
+   * Never called from play(): a failed resume with nothing queued has cost the
+   * operator no sound (realtime enqueues nothing at all).
+   */
+  onPlaybackUnavailable?: (error: unknown) => void;
 }
 
 export class ArmPlayback {
@@ -96,6 +103,11 @@ export class ArmPlayback {
   private getContext(): PlaybackAudioContextLike {
     if (!this.context) this.context = this.opts.audioContextFactory();
     return this.context;
+  }
+
+  /** TICKET 049 (STUB) — true once a chunk was dropped for want of a context. */
+  get playbackUnavailable(): boolean {
+    return false;
   }
 
   /** Captured at the FIRST enqueue (per utterance); null before any audio. */
