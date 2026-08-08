@@ -116,3 +116,105 @@ swapping providers buys.
 The rate table is a **declared control**, like `corpus-v1` and `wer-norm-v1`. Stamp it
 (`pricing-v1`), record it in provenance, and make a rate change visibly restate results rather than
 silently move them.
+
+---
+
+## ROUND 2 — code review of `513c5ef` (with 051 r2 at `e4b0452`)
+
+**`src/core/pricing.ts` itself is excellent and heavily pinned** — 25 of 28 mutations killed. The
+cached-token arithmetic was executed and verified EXACT (1M audio-in with 600k cached = **$13.04** =
+400k x 32/M + 600k x 0.40/M; every term a disjoint slice, no token billed twice or dropped; cached
+input is now CHEAPER than uncached, inverting R2-3's inversion). The 1k-char floor is structurally
+uncollapsible inside the module — `StageUsage` has no total field — and 12x100 chars ($0.60) vs
+1x1200 ($0.06) is 10x apart, as it must be.
+
+**Everything OUTSIDE that module is untested.** Five majors.
+
+### R2-1 (MAJOR) — the `$0.00 -> not measured` rule is VACUOUS at both Live enforcement points
+Two mutations that restore **the literal headline defect this ticket was filed against** leave
+2014/2014 green:
+- footer initialiser `costUsd: null, costCell: COST_NOT_MEASURED_CELL` -> `costUsd: 0, costCell: '$0.00'` — **SURVIVED**
+- `aggregates()`'s `if (r.costUnits !== null)` -> unconditional `(agg.costUsd ?? 0) + (r.costUnits ?? 0)` — **SURVIVED**
+
+The Replay twin IS guarded (the same mutation in `runAggregates` kills 5 tests). The **Live** path —
+the one the ticket names in its first line — has nothing. `LiveView.timings.test.tsx:485` pins
+`costUnits === null` on the RECORD; nothing pins what the FOOTER renders from it.
+A cascade Live session (every `costUnits` null today by design) can regress to a confident
+`session $0.00` with CI green.
+
+### R2-2 (MAJOR) — the whole cascade cost path has ZERO coverage, wiring seam included
+Five mutations, all green: `cascadeCostUsd` body -> `return 0`; `requestCharCounts: chunks.map(...)`
+-> one summed total; `ws.ts` `models: msg.providers` -> `models: undefined`; `sttSamples += len` ->
+`+= 0`; drop the `rateFor(models.tts)?.shape === 'per-character'` gate.
+`cascadeCostUsd` — the function that exists to stop cascade reporting `$0.00` — **can be replaced
+with `return 0` and nothing notices.** The `models` forwarding in `ws.ts` is the
+"wiring-seam-delivered-incidentally" pattern again: load-bearing for every future cascade price,
+pinned by nothing. And the ElevenLabs per-request modelling is exercised only INSIDE `pricing.ts`,
+never end to end.
+
+### R2-3 (MAJOR) — `exportResults`' entire 052 change is unguarded
+Replacing `sumMeasuredCosts(...costFromStored)` with the old `reduce((t,r) => t + (r.cost ?? 0), 0)`
+and `measuredCostRuns: aggregated.length` — **SURVIVED 2014/2014**. `measuredCostRuns`, `costCell`
+and `pricingVersion` appear in **no test file**. This is the artifact the write-up cites: an arm with
+3 of 5 runs priced exports as if all 5 were, and the field that would disclose it is asserted
+nowhere.
+
+### R2-4 (MAJOR) — the denominator does not reach the Live surface; `measuredCostRecords` is DEAD
+Results/Replay experiment cards are CORRECT — `cost measured on X of N samples` renders and is
+non-vacuous in both directions. But:
+- **Live footer** renders a bare dollar figure summed over measured records only, with no count.
+  `ArmAggregate.measuredCostRecords` is computed for exactly this and **read by nothing outside
+  tests.**
+- **Results Live card** names sessions, utterances, the anchor and WER — no cost denominator.
+Ticket 051's deferred clause said 052 would add the `n of m metered` disclosure. The nullable half
+landed; the disclosure half did not. Arm A is where it bites: `priceRealtimeUsage` returns null
+whenever a `response.done` arrives with no usage block — a PER-TURN condition, not all-or-nothing.
+**DECIDED:** render `$0.041 · 3 of 5 metered` in the Live footer; same clause on the Results Live line.
+
+### R2-5 (MAJOR) — three of this ticket's OWN acceptance criteria are unimplemented, their code dead
+- **`pricing-v1` is not in provenance.** It reaches `exportResults` only. `Provenance` has no
+  `pricingVersion`; the rendered line names `corpus-v1` and never the rate source. A rate change
+  would restate the bundle but not the screen.
+- **Nothing labels an unverified figure.** `PRICING_ASSUMPTIONS`, `assumptionsFor`,
+  `isVerifiedPricing` and `CostResult.verified` appear ONLY in `pricing.ts` and its tests. `verified`
+  is discarded at every call site. **No surface can ever say "unverified"** — including the
+  cached-token assumption, which exists precisely so a reader is warned.
+- **Cost slope is not implemented.** `costSlope()` and `costPerMinuteUsd()` are dead exports;
+  `useSessionController` hardcodes `perMinuteMinute1: null, perMinuteFinalMinute: null`, so
+  ResultsView's two Live rows render `—` forever. PRD §8 makes the climb the finding for Arm A.
+**DECIDED:** implement all three. Shipping a module with its consumers missing is the failure this
+ticket was written against.
+
+### R2-6 (MINOR, but it becomes the dominant term after 053) — the ElevenLabs meter is at the WRONG SEAM
+`orchestrator.ts:220` bills `targetPartials` — the **MT token stream, one token at a time**. But
+`elevenlabs-tts.ts` opens ONE WebSocket per utterance and sends one frame per chunk. A 40-token
+sentence models as 40 x 1000 = 40,000 billed chars = **$2.00 for one sentence** against ~$0.01
+one-shot. Harmless today only because `priceCascade` nulls the total on the MT hole.
+**DECIDED:** meter at the TTS adapter (frames actually sent), not at the MT bridge, and say in the
+assumption text that a chunk is an MT token delta.
+
+### R2-7 (MINOR) — cached-token edge cases
+- `cached_tokens: 0` with `cached_tokens_details.audio_tokens: 600_000` -> discount applied anyway
+- `cached_tokens: 600_000` with details summing to `100_000` -> 500k silently full-priced, no mismatch
+- `audio_tokens: -5` -> `measured: true, usd: 0` — a malformed count becomes a measured FREE turn
+**DECIDED:** refuse (`shape-mismatch`) when `cached_tokens` and the details disagree; treat a
+negative count as unreported.
+
+### R2-8 (MINOR) — smaller
+- `requestCharCounts.length === 0` -> `measured(0)` SURVIVED; the comment calls it a metering hole
+- `exportResults.latencySample` has no guard pinning its Replay anchor (the ledger twin does)
+- `ExperimentArmAggregate.costCell` is computed and pinned but **rendered nowhere** — ResultsView
+  shows `costPerMinuteUsd` via `formatUsd` -> `—`, not `not measured`. Two vocabularies, one screen.
+- `data/live-sessions.jsonl`'s 8 stored sessions carry `cost.totalUsd: 0`, now read back as MEASURED
+  $0.00. Inert today; if 053 surfaces it, those rows lie. Migrate or reinterpret on read.
+
+## ALSO — one 051 residual worth fixing here (same screen)
+**The Live bar denominator is not honest and is not pinned.** The four bars sum to
+`audio_queued - vad_fired`; the headline immediately below reads `tts_first_byte - vad_fired`. **The
+number the bars decompose is never displayed.** A reader sees four bars at 100% and one total and
+reads the former as a decomposition of the latter — so `deliver` reads as a share of a latency it is
+explicitly outside of. On real stored data (`session-1786215745428` utt 1) `deliver` takes 13.8% of
+the bar row while contributing 0% of the headline, and that fraction grows without bound on a longer
+utterance — R2-1's confound re-entering as pixels instead of digits.
+**DECIDED:** bars decompose the HEADLINE (`transcribe`/`translate`/`synthesize`); render `deliver`
+with no bar or a muted one, matching its outside-the-headline status. Pin it.
