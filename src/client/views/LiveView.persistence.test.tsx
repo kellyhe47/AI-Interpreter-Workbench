@@ -52,6 +52,9 @@ const SESSION_KEYS = [
   'id',
   'latency',
   'modelSnapshots',
+  // TICKET 052 R2 — the declared price source the session's figures came from.
+  // Metadata, not audio: the rule this list enforces is untouched.
+  'pricingVersion',
   'providerTriple',
   'quality',
   'stability',

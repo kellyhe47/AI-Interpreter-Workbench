@@ -84,7 +84,9 @@ import {
 } from '../../core/arms';
 import {
   COST_NOT_MEASURED_CELL,
+  PRICING_VERSION,
   costFromStored,
+  costSlope,
   formatCostUsd,
   priceRealtimeUsage,
   sumMeasuredCosts,
@@ -186,6 +188,19 @@ export interface SessionFooterData {
   costUsd: number | null;
   /** Pre-rendered through the ONE formatter, so no view can invent `$0.00`. */
   costCell: string;
+  /**
+   * TICKET 052 R2 — records behind the figure, from the LEDGER AGGREGATE's
+   * `count`. Deliberately NOT `utterances` (the session's live turn counter):
+   * the two are different quantities and conflating them puts a denominator
+   * under a numerator it does not belong to.
+   */
+  costRecords: number;
+  /**
+   * How many of them carried a price. `priceRealtimeUsage` returns null PER
+   * TURN whenever a `response.done` omits usage, so `$0.041 over 3 of 5` and
+   * `$0.041 over 5 of 5` are different claims the dollars cannot separate.
+   */
+  measuredCostRecords: number;
 }
 
 export interface SessionActions {
@@ -298,6 +313,20 @@ function emptyTarget(): TargetView {
 // input at $32.40/M — dearer than uncached — and nothing else in the app could
 // have disagreed with it, because nothing else priced anything.
 // ---------------------------------------------------------------------------
+
+/**
+ * WHEN a Live utterance happened, for the purpose of placing it in a minute
+ * bucket. `audio_queued` is the turn's last observable instant and the one every
+ * completed utterance carries; the endpointer marks are the fallback for a turn
+ * that produced no output audio. Null when nothing on the record says when.
+ */
+function utteranceInstant(timings: Record<string, number | null>): number | null {
+  for (const key of ['audio_queued', 'server_speech_stopped', 'vad_fired', 'speech_end']) {
+    const value = timings[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return null;
+}
 
 /** Nearest-rank percentile, matching RunLedger's convention exactly. */
 function nearestRank(sorted: number[], p: number): number {
@@ -607,6 +636,42 @@ export function useSessionController(deps: SessionDeps): SessionController {
   };
 
   /**
+   * TICKET 052 R2 — the session's spend bucketed BY WALL-CLOCK MINUTE, then read
+   * as PRD §8's cost slope: $/min in minute 1 against $/min in the final minute.
+   *
+   * Buckets are placed by each utterance's own marks, not by arrival order, so
+   * a turn that completed at 02:50 lands in minute 3 however late the record was
+   * assembled. A bucket nobody priced is UNMEASURED, never 0 — a zero slope is
+   * the claim that the cost curve is FLAT, which is the finding under test.
+   */
+  const perMinuteCosts = (
+    startedAt: number,
+    endedAt: number,
+  ): { perMinuteMinute1: number | null; perMinuteFinalMinute: number | null } => {
+    const durationMs = Math.max(0, endedAt - startedAt);
+    const minutes = Math.max(1, Math.ceil(durationMs / 60_000));
+    // A session shorter than two minutes has no final minute to compare minute
+    // 1 against; `costSlope` says so by returning nulls rather than a flat 0.
+    const buckets: Array<Array<number | null>> = Array.from({ length: minutes }, () => []);
+
+    for (const u of store.utterances) {
+      const at = utteranceInstant(u.timings);
+      if (at === null) continue;
+      const index = Math.floor((at - startedAt) / 60_000);
+      if (index < 0 || index >= minutes) continue;
+      buckets[index]!.push(u.costUsd);
+    }
+
+    const slope = costSlope(
+      buckets.map((bucket) => costFromStored(sumMeasuredCosts(bucket.map(costFromStored)).usd)),
+    );
+    return {
+      perMinuteMinute1: slope.minute1UsdPerMin,
+      perMinuteFinalMinute: slope.finalMinuteUsdPerMin,
+    };
+  };
+
+  /**
    * The metrics-only soak record. NO audio-bearing field exists on the stored
    * shape — audio is discarded by construction. `quality.wer` is null because
    * free conversation has no reference transcript.
@@ -633,6 +698,10 @@ export function useSessionController(deps: SessionDeps): SessionController {
       // Cascade is context-free BY DESIGN: 'n/a' states that positively so a
       // cascade session can never land in PRD §8's realtime-default column.
       contextPolicy: (cascade ? 'n/a' : config.contextPolicy) as LiveContextPolicy,
+      // TICKET 052 R2 — the price source this session's figures were computed
+      // under. A session with no stamp was written before a cost model existed
+      // and its zeros are absences, not measurements (see `LiveSession`).
+      pricingVersion: PRICING_VERSION,
       modelSnapshots: cascade
         ? { ...(config.providers ?? DEFAULT_CASCADE_TRIPLE) }
         : { realtime: config.realtimeModel ?? REALTIME_MODEL },
@@ -652,8 +721,11 @@ export function useSessionController(deps: SessionDeps): SessionController {
           store.utterances.length === 0
             ? 0
             : sumMeasuredCosts(store.utterances.map((u) => costFromStored(u.costUsd))).usd,
-        perMinuteMinute1: null,
-        perMinuteFinalMinute: null,
+        // TICKET 052 R2 (PRD §8) — THE COST SLOPE, the finding for Arm A.
+        // Realtime replays the accumulated conversation each turn, so $/min
+        // CLIMBS with session length; a ≤1-minute clip cannot show it, which is
+        // one of the reasons Live exists at all and Replay cannot answer this.
+        ...perMinuteCosts(startedAt, endedAt),
       },
       stability: {
         utterancesCompleted: store.utterances.length,
@@ -871,11 +943,15 @@ export function useSessionController(deps: SessionDeps): SessionController {
     // the footer must never make.
     costUsd: null,
     costCell: COST_NOT_MEASURED_CELL,
+    costRecords: 0,
+    measuredCostRecords: 0,
   };
   if (store.runId) {
     const agg = depsRef.current.ledger.aggregates(store.runId);
     for (const arm of Object.values(agg.perArm)) {
       if (arm.costUsd !== null) footer.costUsd = (footer.costUsd ?? 0) + arm.costUsd;
+      footer.costRecords += arm.count;
+      footer.measuredCostRecords += arm.measuredCostRecords;
       if (arm.p50Ms !== null) {
         footer.p50Ms = footer.p50Ms === null ? arm.p50Ms : Math.max(footer.p50Ms, arm.p50Ms);
       }

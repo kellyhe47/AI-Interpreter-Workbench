@@ -23,7 +23,7 @@
  * asserts that footer figures come from ledger aggregates.
  */
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { vi } from 'vitest';
 import App from '../App';
@@ -314,6 +314,13 @@ export function makeDeps(opts: TestDepsOptions = {}): TestDeps {
 // ---------------------------------------------------------------------------
 
 export function renderApp(opts: TestDepsOptions = {}) {
+  // TICKET 052 R2 — UNMOUNT ANY PREVIOUS APP FIRST. `render` appends a fresh
+  // container, and every accessor here is `document.querySelector`, which
+  // returns the FIRST match. A test that renders two sessions to compare them
+  // therefore read the FIRST one twice and asserted the same figures against
+  // itself — a comparison that can never fail. Cleaning up makes the second
+  // render the only App in the document, so the accessors mean what they say.
+  cleanup();
   const kit = makeDeps(opts);
   const view = render(createElement(App, { deps: kit.deps }));
   return { ...kit, view };

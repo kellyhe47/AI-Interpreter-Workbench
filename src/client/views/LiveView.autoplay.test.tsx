@@ -135,7 +135,15 @@ function stubController(state: Partial<SessionState>): SessionController {
     armTag: deriveArmTag({ ...runConfig, providers: DEFAULT_CASCADE_TRIPLE }),
     runConfig,
     target: readyTarget(),
-    footer: { utterances: 1, p50Ms: 980, p95Ms: 980, costUsd: 0.005, costCell: '$0.005' },
+    footer: {
+      utterances: 1,
+      p50Ms: 980,
+      p95Ms: 980,
+      costUsd: 0.005,
+      costCell: '$0.005',
+      costRecords: 1,
+      measuredCostRecords: 1,
+    },
     elapsedMs: 12_000,
     // TICKET 049 — the healthy default. The degraded state is pinned by
     // LiveView.playbackFailure.test.tsx; here it must stay false so these

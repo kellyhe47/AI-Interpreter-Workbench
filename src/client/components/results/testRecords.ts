@@ -33,6 +33,7 @@ import {
   type ProviderTriple,
 } from '../../../core/arms';
 import type { CorpusUtterance } from '../../../core/corpus';
+import { PRICING_VERSION } from '../../../core/pricing';
 import type {
   LiveSession,
   Recording,
@@ -124,6 +125,8 @@ export function makeLiveSessionEntity(overrides: Partial<LiveSession> = {}): Liv
     architecture: 'cascade',
     providerTriple: { ...ARM_B_TRIPLE },
     modelSnapshots: { ...ARM_B_TRIPLE },
+    // A session built by TODAY's code carries today's price source (052 R2).
+    pricingVersion: PRICING_VERSION,
     utterances: [],
     latency: { p50: null, p95: null, driftMinute1ToEnd: null },
     cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },

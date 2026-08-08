@@ -125,7 +125,13 @@ import {
 // union in src/harness/corpus.ts is the pre-22a synthetic placeholder kept for
 // bench/soak — importing it here left two copies free to drift apart.
 import type { CorpusCategory } from '../../../core/corpus';
-import { costFromStored, formatCostUsd, sumMeasuredCosts } from '../../../core/pricing';
+import {
+  PRICING_VERSION,
+  assumptionsFor,
+  costFromStored,
+  formatCostUsd,
+  sumMeasuredCosts,
+} from '../../../core/pricing';
 import { anchoredLatencyMs } from '../../../core/timing';
 import type { WerScore } from '../../../core/wer';
 import {
@@ -302,6 +308,14 @@ export interface Provenance {
    * same reason `completedReps` / `intendedReps` sit beside `n`.
    */
   measuredCostSamples: number;
+  /**
+   * TICKET 052 R2 — the DECLARED price source behind the cost figure, the
+   * sibling of `corpusVersion`. A vendor moving a rate must visibly RESTATE the
+   * screen the way it restates the committed bundle; a cost whose rate table is
+   * unnamed is exactly the unprovenanced claim the corpus clause exists to
+   * prevent (PRD §8).
+   */
+  pricingVersion: string;
   /** Rendered line. Exact wording is NOT locked — assert containment only. */
   line: string;
 }
@@ -318,6 +332,16 @@ export interface ExperimentArmAggregate {
   costCell: string;
   /** Cost per audio minute, normalized by the source Recordings' duration. */
   costPerMinuteUsd: number | null;
+  /**
+   * TICKET 052 R2 — false when an UNVERIFIED pricing assumption bears on any
+   * stage THIS ARM PINS. Derived from the arm's recipe, never from the stored
+   * number: `costFromStored` cannot know which assumptions produced a figure
+   * already written to the ledger, but the arm knows which models it pins and
+   * `assumptionsFor` knows what is in question about them.
+   */
+  costVerified: boolean;
+  /** The assumption ids behind the label, so it is not a bare flag. */
+  costAssumptions: string[];
   provenance: Provenance;
 }
 
@@ -440,6 +464,18 @@ export interface LiveArmColumn {
   driftMinute1ToEndMs: number | null;
   costPerMinuteMinute1: number | null;
   costPerMinuteFinalMinute: number | null;
+  /**
+   * TICKET 052 R2 — the column's spend, summed over the utterances that were
+   * actually PRICED, or null when none was. Recomputed from the utterances and
+   * deliberately NOT read from `session.cost.totalUsd`: the sessions stored
+   * before this ticket carry `totalUsd: 0`, which is the ABSENCE of a
+   * measurement wearing a measurement's shape.
+   */
+  costTotalUsd: number | null;
+  /** Utterances in the column — the denominator. */
+  costUtterances: number;
+  /** How many of them carried a price. `priceRealtimeUsage` nulls PER TURN. */
+  measuredCostUtterances: number;
   /** ALWAYS null in Live — there is no reference text (PRD §7). */
   wer: null;
 }
@@ -546,6 +582,65 @@ function costOf(values: Array<number | null>): { costUsd: number | null; costCel
   return { costUsd: sum.usd, costCell: formatCostUsd(sum.usd) };
 }
 
+/**
+ * TICKET 052 R2 — the UNVERIFIED pricing assumptions bearing on an arm, by id.
+ *
+ * Read from the arm's PINNED RECIPE through the module's own assumption store,
+ * so a newly flagged model moves the screen without anyone editing a derivation.
+ * A configuration that is no frozen arm pins nothing and carries no label.
+ */
+function armCostAssumptions(arm: ArmTag): string[] {
+  const definition = ARMS.find((a) => a.tag === arm);
+  if (!definition) return [];
+  const models =
+    definition.config.architecture === 'realtime'
+      ? [definition.config.realtimeModel ?? REALTIME_MODEL]
+      : [
+          definition.config.providers?.stt,
+          definition.config.providers?.mt,
+          definition.config.providers?.tts,
+        ];
+
+  const ids: string[] = [];
+  for (const model of models) {
+    if (model === undefined) continue;
+    for (const assumption of assumptionsFor(model)) {
+      if (!assumption.verified && !ids.includes(assumption.id)) ids.push(assumption.id);
+    }
+  }
+  return ids;
+}
+
+/**
+ * TICKET 052 R2 — one Live column's cost, with its own denominator attached.
+ * `priceRealtimeUsage` returns null PER TURN whenever a `response.done` omits
+ * its usage block, so a five-utterance session can easily be metered on three —
+ * and `$0.041 over 3 of 5` and `$0.041 over 5 of 5` are different claims.
+ */
+function liveCostOf(sessions: LiveSession[]): {
+  costTotalUsd: number | null;
+  costUtterances: number;
+  measuredCostUtterances: number;
+} {
+  const costs = sessions.flatMap((s) =>
+    s.utterances.map((u) =>
+      // A SESSION WITH NO PRICE SOURCE PRICED NOTHING. The stored sessions
+      // written before this ticket carry `costUsd: 0` on every utterance,
+      // because the build that wrote them hardcoded it; reading those forward
+      // publishes takes asserting the configuration was free. The stamp is the
+      // discriminator, not the value — a session written TODAY that really did
+      // cost 0 still reports, which is what keeps 0 and null distinct.
+      s.pricingVersion === undefined ? costFromStored(null) : costFromStored(u.costUsd),
+    ),
+  );
+  const sum = sumMeasuredCosts(costs);
+  return {
+    costTotalUsd: sum.usd,
+    costUtterances: sum.total,
+    measuredCostUtterances: sum.measured,
+  };
+}
+
 function meanOf(values: number[]): number | null {
   if (values.length === 0) return null;
   return values.reduce((a, b) => a + b, 0) / values.length;
@@ -561,6 +656,7 @@ function buildProvenance(
   gatePassing: AnnotatedRun[],
   attempted: AnnotatedRun[],
   measuredCostSamples: number,
+  costAssumptions: string[],
 ): Provenance {
   // TICKET 032 — the arm's ATTEMPTED atoms: every record of every gate-passing
   // Run, failed ones included, or the single Run-level sample when a Run
@@ -606,7 +702,15 @@ function buildProvenance(
     `${completedReps} of ${intendedReps} reps completed · ` +
     `endpointing pinned ${PINNED_ENDPOINTING_MS} ms · turn-final trigger · ` +
     `cost measured on ${measuredCostSamples} of ${measuredSamples} samples · ` +
-    `${corpusVersions.length === 0 ? 'corpus version unrecorded' : corpusVersions.join(', ')}`;
+    // The rate source, named like the corpus version beside it. A rate change
+    // therefore restates the SCREEN as visibly as it restates the bundle.
+    `rates ${PRICING_VERSION}` +
+    // …and the caveat the figure travels with, only when there IS one: a label
+    // that is always on teaches a reader nothing.
+    (costAssumptions.length === 0
+      ? ''
+      : ` · cost unverified (${costAssumptions.join(', ')})`) +
+    ` · ${corpusVersions.length === 0 ? 'corpus version unrecorded' : corpusVersions.join(', ')}`;
 
   return {
     utteranceCount,
@@ -617,6 +721,7 @@ function buildProvenance(
     corpusVersions,
     corpusVersion,
     measuredCostSamples,
+    pricingVersion: PRICING_VERSION,
     line,
   };
 }
@@ -655,6 +760,8 @@ export function deriveExperimentAggregates(ledger: RunLedger): ExperimentAggrega
     const gatePassing = runs.filter((run) => isAggregatableRun(run) && runArmTag(run) === tag);
     const attempted = runs.filter((run) => run.origin === 'sweep' && runArmTag(run) === tag);
 
+    const costAssumptions = armCostAssumptions(tag);
+
     const audioMs = gatePassing.reduce(
       (sum, run) => sum + (durationByRecording.get(run.recordingId) ?? 0),
       0,
@@ -673,7 +780,15 @@ export function deriveExperimentAggregates(ledger: RunLedger): ExperimentAggrega
       // total being absent and cannot drift from the figure it came from.
       costPerMinuteUsd:
         entry.costUsd === null || audioMs === 0 ? null : (entry.costUsd * 60_000) / audioMs,
-      provenance: buildProvenance(tag, gatePassing, attempted, entry.measuredCostSamples),
+      costVerified: costAssumptions.length === 0,
+      costAssumptions,
+      provenance: buildProvenance(
+        tag,
+        gatePassing,
+        attempted,
+        entry.measuredCostSamples,
+        costAssumptions,
+      ),
     };
   }
 
@@ -982,8 +1097,12 @@ export function deriveComparison(
       {
         a: a.costPerMinuteUsd,
         b: b.costPerMinuteUsd,
-        valueA: formatUsd(a.costPerMinuteUsd),
-        valueB: formatUsd(b.costPerMinuteUsd),
+        // TICKET 052 R2 — ONE VOCABULARY PER SCREEN. `formatUsd` renders a null
+        // as '—', which this codebase already uses for "no sample"; a reader
+        // then cannot tell "nobody priced this arm" from "there is nothing
+        // here". `formatCostUsd` is the one formatter and it says which.
+        valueA: formatCostUsd(a.costPerMinuteUsd),
+        valueB: formatCostUsd(b.costPerMinuteUsd),
       },
       'lower',
       (d) => `${sign(d)}${formatUsd(Math.abs(d))}`,
@@ -1127,6 +1246,13 @@ export function deriveLiveModel(ledger: RunLedger): LiveModel {
       costPerMinuteFinalMinute: meanOf(
         sessions.map((s) => s.cost.perMinuteFinalMinute).filter((v): v is number => v !== null),
       ),
+      // TICKET 052 R2 — recomputed FROM THE UTTERANCES, never read off
+      // `session.cost.totalUsd`. The sessions stored before this ticket existed
+      // carry `totalUsd: 0` from a build with no cost model at all; reading that
+      // forward publishes takes asserting the configuration was free. The
+      // utterances are the evidence, and an unpriced one contributes nothing —
+      // not a zero — so a wholly unpriced arm reports null.
+      ...liveCostOf(sessions),
       // PRD §7: there is no reference text in Live, so WER is never available.
       wer: null,
     };

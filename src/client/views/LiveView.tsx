@@ -419,6 +419,16 @@ interface StageRowData {
   ms: number | null;
   /** Realtime's model interval: the asymmetry is the PRD finding. */
   opaque?: boolean;
+  /**
+   * TICKET 052 R2 — is this row INSIDE the headline the card reports?
+   *
+   * `deliver` is not: it is the tail of synthesis AFTER the first audio byte,
+   * and it grows without bound with sentence length. The bars decompose the
+   * headline, so a row outside it gets a figure and a span and NO BAR — giving
+   * it one made the widest visual claim on the card belong to the one row that
+   * contributes nothing to the number printed beneath it.
+   */
+  inHeadline?: boolean;
 }
 
 /**
@@ -443,11 +453,12 @@ function stageRowsFor(
     const iv = deriveLiveCascadeIntervals(target.timings as CascadeTimestamps);
     return {
       rows: [
-        { label: 'transcribe', span: `${DETECTED_END} → transcript`, ms: iv.transcribe },
-        { label: 'translate', span: 'transcript → translated text', ms: iv.translate },
-        { label: 'synthesize', span: `translated text → ${FIRST_AUDIO}`, ms: iv.synthesize },
+        { label: 'transcribe', span: `${DETECTED_END} → transcript`, ms: iv.transcribe, inHeadline: true },
+        { label: 'translate', span: 'transcript → translated text', ms: iv.translate, inHeadline: true },
+        { label: 'synthesize', span: `translated text → ${FIRST_AUDIO}`, ms: iv.synthesize, inHeadline: true },
         // Real information, deliberately OUTSIDE the headline: this tail is the
-        // rest of synthesis and it grows with how long the sentence is.
+        // rest of synthesis and it grows with how long the sentence is. It keeps
+        // its figure and loses its bar (ticket 052 R2).
         { label: 'deliver', span: `${FIRST_AUDIO} → audio complete`, ms: iv.deliver },
       ],
       total: iv.total,
@@ -456,7 +467,7 @@ function stageRowsFor(
   const iv = deriveLiveRealtimeIntervals(target.timings as RealtimeTimestamps);
   return {
     rows: [
-      { label: 'model', span: `${DETECTED_END} → ${FIRST_AUDIO}`, ms: iv.model, opaque: true },
+      { label: 'model', span: `${DETECTED_END} → ${FIRST_AUDIO}`, ms: iv.model, opaque: true, inHeadline: true },
     ],
     total: iv.total,
   };
@@ -511,7 +522,7 @@ function TargetCard({
   const { rows, total } = stageRowsFor(architecture, target);
   const showDetails = !failed && !inFlight && target.hasData;
   /** R2-7 — one row has no proportion to show. */
-  const showBars = rows.length > 1;
+  const showBars = rows.filter((r) => r.inHeadline === true).length > 1;
 
   return (
     <div
@@ -608,14 +619,17 @@ function TargetCard({
           }}
         >
           {rows.map((row) => {
-            // The bars are PROPORTIONS OF THE ROWS SHOWN — including `deliver`,
-            // which sits outside the headline — so they always sum to the full
-            // width of what is on screen.
-            const barTotal = rows.reduce((sum, r) => sum + (r.ms ?? 0), 0);
+            // TICKET 052 R2 — THE BARS DECOMPOSE THE HEADLINE, which is the
+            // number printed directly beneath them. They used to divide by the
+            // sum of the rows shown, and that sum is never displayed anywhere:
+            // a reader saw four bars filling one row above one total and read
+            // the former as a decomposition of the latter. On real data
+            // `deliver` took the widest bar on the card while contributing 0%
+            // of the headline — the same confound as `$0.00`, in pixels.
             const pct =
-              row.ms === null || barTotal <= 0
+              row.inHeadline !== true || row.ms === null || total === null || total <= 0
                 ? 0
-                : Math.max(1, Math.round((row.ms / barTotal) * 100));
+                : Math.max(1, Math.round((row.ms / total) * 100));
             return (
               <div
                 key={row.label}
@@ -652,15 +666,20 @@ function TargetCard({
                       display: 'block',
                     }}
                   >
-                    <i
-                      style={{
-                        display: 'block',
-                        height: 5,
-                        borderRadius: 3,
-                        background: 'var(--accent)',
-                        width: `${pct}%`,
-                      }}
-                    />
+                    {/* A row outside the headline gets the TRACK (so the grid
+                        still lines up) and no fill: it has no share of the
+                        number the bars add up to. */}
+                    {pct > 0 && (
+                      <i
+                        style={{
+                          display: 'block',
+                          height: 5,
+                          borderRadius: 3,
+                          background: 'var(--accent)',
+                          width: `${pct}%`,
+                        }}
+                      />
+                    )}
                   </span>
                 )}
                 <span style={{ textAlign: 'right', ...monoStyle }}>{formatSeconds(row.ms)}</span>
@@ -1217,6 +1236,15 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
               literal source of the `$0.00` that read as "this configuration is
               free" for every session in the study. */}
           <span style={{ fontFamily: 'var(--font-mono)' }}>{footer.costCell}</span>
+          {/* TICKET 052 R2 — THE DENOMINATOR, stated ALWAYS. `priceRealtimeUsage`
+              nulls per turn when a `response.done` omits its usage block, so the
+              same dollar figure can cover three turns of five. A disclosure that
+              appeared only when something was missing would teach the reader to
+              read its absence as "complete", which is a claim nothing checks. */}
+          {' · '}
+          <span data-cost-metered style={{ fontFamily: 'var(--font-mono)' }}>
+            {`${footer.measuredCostRecords} of ${footer.costRecords} metered`}
+          </span>
         </span>
         {/* TICKET 051 — the anchor, named ONCE for the whole footer. These
             percentiles start at the endpointer's decision; Replay's start at

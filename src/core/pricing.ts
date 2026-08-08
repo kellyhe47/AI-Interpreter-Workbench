@@ -54,6 +54,55 @@ export const COST_NOT_MEASURED_CELL = 'not measured';
  */
 export const ELEVENLABS_MIN_CHARS_PER_REQUEST = 1000;
 
+/**
+ * ElevenLabs' documented default `generation_config.chunk_length_schedule` for
+ * the WebSocket stream-input endpoint: the vendor buffers incoming text and
+ * flushes a generation once the buffer reaches the next threshold, in
+ * CHARACTERS, holding the last value thereafter.
+ *
+ * WHY THE MODEL NEEDS IT. The 1,000-character minimum is charged PER REQUEST,
+ * so the bill depends entirely on where request boundaries fall — and the
+ * orchestrator's own view of "a chunk" is the MT token stream, which is an
+ * artefact of how the translator punctuated its output. Billing that would make
+ * a 40-token sentence 40 floored requests ($2.00) against ~$0.01 one-shot, and
+ * would mean re-chopping the SAME sentence changed the TTS bill. The schedule is
+ * POSITIONAL: boundaries fall at cumulative character offsets, so nothing about
+ * the arrival pattern can move them.
+ */
+export const ELEVENLABS_CHUNK_LENGTH_SCHEDULE: readonly number[] = Object.freeze([
+  120, 160, 250, 290,
+]);
+
+/**
+ * The per-request character counts ElevenLabs would bill for ONE synthesized
+ * utterance — the input to the 1,000-char floor, ONE ENTRY PER REQUEST.
+ *
+ * A pure function of the TEXT, never of how it arrived: that is the invariant
+ * keeping the translator's chunking out of the vendor's bill.
+ */
+export function elevenLabsRequestCharCounts(text: string): number[] {
+  const counts: number[] = [];
+  let remaining = text.length;
+  let step = 0;
+  while (remaining > 0) {
+    const threshold =
+      ELEVENLABS_CHUNK_LENGTH_SCHEDULE[
+        Math.min(step, ELEVENLABS_CHUNK_LENGTH_SCHEDULE.length - 1)
+      ]!;
+    if (remaining >= threshold) {
+      counts.push(threshold);
+      remaining -= threshold;
+      step += 1;
+    } else {
+      // The tail flush at end-of-input: whatever is still buffered goes as one
+      // final request, however short — and a short request still pays the floor.
+      counts.push(remaining);
+      remaining = 0;
+    }
+  }
+  return counts;
+}
+
 /* -------------------------------------------------------------- rate card -- */
 
 /** The three meters. Deliberately not unifiable — see rule 2 above. */
@@ -187,11 +236,16 @@ export const PRICING_ASSUMPTIONS: readonly PricingAssumption[] = Object.freeze([
     id: 'elevenlabs-1k-minimum-per-request',
     models: ['eleven_flash_v2_5'],
     statement:
-      'ElevenLabs bills a 1,000-character minimum PER REQUEST. Arm C streams translated ' +
-      'text in chunks, so each chunk is modelled as its own billed request and a short ' +
-      'chunk is charged at the 1,000-character floor. Whether the vendor aggregates a ' +
-      "streamed turn into one request or bills each chunk has NOT been checked against a " +
-      'real invoice, and the two answers differ by an order of magnitude.',
+      'ElevenLabs bills a 1,000-character minimum PER REQUEST, so Arm C\'s bill depends ' +
+      'entirely on where request boundaries fall, and a short request pays the floor. ' +
+      "Boundaries are modelled from the vendor's documented default chunk_length_schedule " +
+      '[120, 160, 250, 290] characters applied to the text actually synthesized — ' +
+      'deliberately NOT from the MT token deltas the orchestrator streams, which would ' +
+      'make a 40-token sentence forty floored requests. Two things are UNVERIFIED against ' +
+      'a real invoice: that the schedule (rather than one aggregate request per turn) ' +
+      "determines billing at all, and that our adapter's auto_mode=true — which asks the " +
+      'vendor to generate on every frame — does not bypass the schedule and bill per ' +
+      "frame instead. The answers differ by an order of magnitude in Arm C's disfavour.",
     verified: false,
   }),
   Object.freeze({
@@ -276,9 +330,18 @@ function unmeasured(reason: CostNotMeasuredReason, verified = true): UnmeasuredC
   return { measured: false, usd: null, reason, pricingVersion: PRICING_VERSION, verified };
 }
 
-/** A metered count, defensively: anything non-finite is 0 tokens, not NaN dollars. */
+/**
+ * Did the vendor REPORT this field? A finite, non-negative number is a report;
+ * everything else (absent, NaN, negative) is silence. Silence and zero are
+ * different facts and this module never conflates them.
+ */
+function isReported(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+/** A metered count, defensively: anything unreported is 0 tokens, not NaN dollars. */
 function count(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+  return isReported(value) ? value : 0;
 }
 
 /** Price ONE stage from its metered usage. Absent usage → `no-usage-reported`. */
@@ -359,15 +422,19 @@ export function priceRealtimeUsage(usage: unknown, model: string = REALTIME_MODE
   // AT LEAST ONE metered number, or the envelope told us nothing. `{}` and
   // `{ input_token_details: {} }` are both "no usage reported" — not a turn
   // that consumed nothing.
+  // A NEGATIVE COUNT IS NOT A REPORT. `audio_tokens: -5` is a number nobody can
+  // act on; treating it as "zero of that thing" turns a metering fault into the
+  // claim that the turn was FREE, which is this ticket's defect arriving through
+  // a bad input instead of a missing model. The field is dropped and the
+  // envelope is judged on what remains — so an envelope whose ONLY numbers are
+  // negative reported nothing at all.
   const fields = [
     u.input_token_details?.audio_tokens,
     u.input_token_details?.text_tokens,
     u.output_token_details?.audio_tokens,
     u.output_token_details?.text_tokens,
   ];
-  if (!fields.some((v) => typeof v === 'number' && Number.isFinite(v))) {
-    return unmeasured('no-usage-reported');
-  }
+  if (!fields.some(isReported)) return unmeasured('no-usage-reported');
 
   const rate = rateFor(model);
   if (rate === undefined) return unmeasured('unknown-model');
@@ -388,6 +455,18 @@ export function priceRealtimeUsage(usage: unknown, model: string = REALTIME_MODE
   // cached rate. Unmeasured is the honest answer.
   if (cachedTotal > 0 && cachedDetails === undefined) {
     return unmeasured('shape-mismatch', verified);
+  }
+
+  // AND THE TWO MUST AGREE. `cached_tokens: 0` beside a breakdown claiming 600k
+  // applies an 80x discount the envelope's own total says was never earned;
+  // `cached_tokens: 600k` beside a breakdown summing to 100k full-prices 500k
+  // tokens it was told were cached, silently. Either way the report contradicts
+  // itself, and a figure built on it is confident and wrong — the thing this
+  // module exists to refuse. Only checked when a breakdown is present at all;
+  // an envelope reporting no caching is not in disagreement with anything.
+  if (cachedDetails !== undefined) {
+    const detailed = count(cachedDetails.audio_tokens) + count(cachedDetails.text_tokens);
+    if (detailed !== cachedTotal) return unmeasured('shape-mismatch', verified);
   }
 
   const cachedAudioIn = Math.min(count(cachedDetails?.audio_tokens), audioIn);

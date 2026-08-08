@@ -74,7 +74,13 @@ import { SAMPLE_RATE } from '../../core/protocol';
 import type { TimingMark, TimingSink } from '../../core/decorators/index';
 import { withRetry, withTimeout, withTiming } from '../../core/decorators/index';
 import { createMt, createStt, createTts } from '../../core/registry';
-import { priceCascade, rateFor, type StageUsage } from '../../core/pricing';
+import {
+  elevenLabsRequestCharCounts,
+  priceCascade,
+  rateFor,
+  type CascadeCost,
+  type StageUsage,
+} from '../../core/pricing';
 import type { ProviderTriple } from '../../core/arms';
 
 export interface CascadeProviders {
@@ -121,6 +127,18 @@ export interface RunCascadeOptions {
    * reported here right before utterance.complete (test/observability seam).
    */
   onTimings?: (utt: number, timings: CascadeTimestamps) => void;
+  /**
+   * TICKET 052 R2 — the COST twin of `onTimings`, reported for every completed
+   * utterance right before `utterance.complete`.
+   *
+   * The record carries ONE number (`costUnits`), and one number cannot say
+   * WHICH stage was unmetered. "The cascade total is null because MT reports no
+   * usage" and "it is null because nobody metered the audio" are materially
+   * different findings, and the per-stage attribution is precisely what
+   * Experiment 2 exists to produce. The observability seam is where that lives —
+   * a record field would put a per-stage breakdown on every stored utterance.
+   */
+  onCost?: (utt: number, cost: CascadeCost) => void;
 }
 
 /**
@@ -177,8 +195,9 @@ function stageErrorMessage(stage: CascadeStage, err: unknown): string {
 }
 
 /**
- * TICKET 052 — the cascade's METERED spend for one utterance, in USD, or `null`
- * when a stage could not be metered.
+ * TICKET 052 — the cascade's METERED spend for one utterance, PER STAGE.
+ * `total` is measured only when every stage is; `costUnits` takes `total.usd`,
+ * which is `null` when it is not.
  *
  * THREE VENDORS, THREE RATE CARDS (PRD §5). What this pipeline can honestly
  * meter today, and what it cannot:
@@ -201,36 +220,47 @@ function stageErrorMessage(stage: CascadeStage, err: unknown): string {
  * `$0.00` it replaces was not. The per-stage attribution is already wired, so
  * the moment a provider reports usage the stage prices with no further change.
  */
-function cascadeCostUsd(
+function cascadeCost(
   models: ProviderTriple | undefined,
   sttSamples: number,
-  ttsChunks: readonly string[],
-): number | null {
-  if (models === undefined) return null;
+  ttsDeltas: readonly string[],
+): CascadeCost {
+  // NO MODEL IDS, NO PRICES. `provider.name` is a VENDOR name and prices
+  // nothing, so an un-forwarded triple must reach `priceCascade` as three
+  // holes — never as a zero. Deliberately NOT an early `return null`: the
+  // per-stage breakdown still has to say WHICH stage is unmetered, and here the
+  // honest answer is "all three, because nobody said what they were".
+  if (models === undefined) return priceCascade({});
 
   const stt: StageUsage | undefined =
     sttSamples > 0
       ? { model: models.stt, shape: 'per-minute', audioMs: (sttSamples / SAMPLE_RATE) * 1000 }
       : undefined;
 
-  // Only a per-CHARACTER vendor is metered from the chunk list. Handing a
-  // token-billed TTS model a character count would be a shape mismatch, which
-  // is a different (and less informative) way of saying "not metered".
-  const billedChunks = ttsChunks.filter((chunk) => chunk.length > 0);
+  // R2-6 — THE METER IS ON THE TEXT SYNTHESIZED, NOT ON THE MT TOKEN STREAM.
+  // `ttsDeltas` is how the TRANSLATOR punctuated its output; billing one
+  // request per delta makes a 40-token sentence forty floored requests ($2.00
+  // against ~$0.01) and means re-chopping the same sentence changes the vendor's
+  // bill. `elevenLabsRequestCharCounts` re-frames the concatenated text on the
+  // vendor's own documented chunk schedule, which is positional — so the figure
+  // depends on WHAT was said and not on HOW it arrived.
+  const synthesized = ttsDeltas.join('');
+  const perCharacter = rateFor(models.tts)?.shape === 'per-character';
   const tts: StageUsage | undefined =
-    rateFor(models.tts)?.shape === 'per-character' && billedChunks.length > 0
+    perCharacter && synthesized.length > 0
       ? {
           model: models.tts,
           shape: 'per-character',
           // ONE ENTRY PER REQUEST, never a total — a total cannot express the
           // difference the 1k-char floor makes.
-          requestCharCounts: billedChunks.map((chunk) => chunk.length),
+          requestCharCounts: elevenLabsRequestCharCounts(synthesized),
         }
       : undefined;
 
-  // MT carries no usage today, so the TOTAL is `stage-unmeasured` and the
-  // per-stage figures that DID meter are simply not reported at record level.
-  return priceCascade({ stt, mt: undefined, tts }).total.usd;
+  // MT carries no usage today (`MtProvider.translate` yields text and reports
+  // none), so the TOTAL is `stage-unmeasured` while the stages that DID meter
+  // still report through `onCost`.
+  return priceCascade({ stt, mt: undefined, tts });
 }
 
 /**
@@ -425,6 +455,8 @@ export async function* runCascade(
       }
 
       opts?.onTimings?.(utt, timings);
+      const cost = cascadeCost(opts?.models, sttSamples, targetPartials);
+      opts?.onCost?.(utt, cost);
       const session = opts?.session;
       const record: UtteranceRecord = {
         id: `utt-${utt}`,
@@ -448,7 +480,7 @@ export async function* runCascade(
           mt: providers.mt.name,
           tts: providers.tts.name,
         },
-        costUnits: cascadeCostUsd(opts?.models, sttSamples, targetPartials),
+        costUnits: cost.total.usd,
         corpusId: session?.corpusId ?? '',
         runId: session?.runId ?? '',
       };

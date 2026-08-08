@@ -406,6 +406,8 @@ describe('stopping the session', () => {
       'id',
       'latency',
       'modelSnapshots',
+      // TICKET 052 R2 — the declared price source, metadata not audio.
+      'pricingVersion',
       'providerTriple',
       'quality',
       'stability',

@@ -323,6 +323,19 @@ export interface LiveSession {
    * structurally unfillable. Optional so pre-012 sessions still parse.
    */
   contextPolicy?: LiveContextPolicy;
+  /**
+   * TICKET 052 R2 — the price source in force WHEN THIS SESSION WAS WRITTEN.
+   *
+   * ABSENT MEANS "WRITTEN BEFORE A COST MODEL EXISTED", and the costs on such a
+   * session are not measurements. The eight sessions in `data/live-sessions.jsonl`
+   * carry `costUsd: 0` on every utterance because the build that wrote them
+   * hardcoded `costUnits: 0`; read forward naively they are eight takes
+   * asserting the configuration was free. The stamp is what tells a zero that
+   * was MEASURED from a zero that is the absence of a measurement — the same
+   * job `corpusVersion` does for a Run, and the reason a versioned control is
+   * stamped onto the record rather than assumed at read time.
+   */
+  pricingVersion?: string;
   modelSnapshots: Record<string, string>;
   utterances: LiveSessionUtterance[];
   latency: { p50: number | null; p95: number | null; driftMinute1ToEnd: number | null };
