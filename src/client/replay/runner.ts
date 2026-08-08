@@ -326,7 +326,24 @@ async function uploadOutputAudio(args: {
  * handle armed costs one live 2 s timer per run, which is 60 of them in a sweep
  * and a fake-timer teardown that lies about what is still pending.
  */
-async function closeTransport(closing: void | Promise<void>, timeoutMs: number): Promise<void> {
+async function closeTransport(
+  stop: () => void | Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  // ROUND 4 (R4-2) — A THUNK, so the CALL is inside the guard too.
+  //
+  // The rejection guard below and the race guard after it both cover the promise
+  // `stop()` returns; neither covers `stop()` THROWING. A synchronous throw — a
+  // mock, an older or patched implementation, an AudioContext method that throws
+  // on a removed device — would propagate straight out of `runOnce`, so no Run is
+  // POSTed and the measurement is lost. That is exactly the trade the comments
+  // around this refuse twice: giving up on a CONTEXT must never cost the RUN.
+  let closing: void | Promise<void>;
+  try {
+    closing = stop();
+  } catch {
+    return;
+  }
   // Nothing to wait for: a transport that closes no context (cascade, every
   // fixture) must not pay a microtask, let alone arm a timer.
   if (closing === undefined) return;
@@ -643,7 +660,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   //
   // ROUND 3 (R3-1) — and BOUNDED. See closeTransport: a wedged context must cost
   // a leak, never the run.
-  await closeTransport(transport.stop(), TRANSPORT_CLOSE_TIMEOUT_MS);
+  await closeTransport(() => transport.stop(), TRANSPORT_CLOSE_TIMEOUT_MS);
 
   // TICKET 046 — the transport's OWN captured output audio, for the arm whose
   // audio never reaches `onAudio` at all: over WebRTC the model's voice rides
@@ -697,7 +714,17 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // and never on `errors`, so a diagnostic that flipped the status would silently
   // disqualify runs from every figure — far worse than the blind spot it closes.
   const captureStats = transport.outputAudioStats?.();
-  if (captureStats !== undefined && captureStats.dropped > 0 && captureStats.admitted === 0) {
+  if (
+    captureStats !== undefined &&
+    captureStats.dropped > 0 &&
+    captureStats.admitted === 0 &&
+    // The model demonstrably STARTED an output buffer. Still the transport's own
+    // mark at this point — it is resolved a few lines below — and it is the only
+    // thing separating a stuck gate from a model that never spoke.
+    typeof timings.audio_queued === 'number' &&
+    // ...and nobody took the run away from capture mid-answer.
+    !cancelled
+  ) {
     errors.push(
       `${CAPTURE_GATE_NEVER_OPENED}: saw ${captureStats.dropped} samples on the track, ` +
         `admitted ${captureStats.admitted}`,
