@@ -56,7 +56,10 @@ import {
   cascadeUtteranceScript,
   clickStartMicrophone,
   makeDeps,
+  makeGrantingCapture,
+  micIndicator,
   realtimeUtteranceScript,
+  stateLabelEl,
   targetCard,
   text,
 } from './sessionTestKit';
@@ -373,6 +376,54 @@ describe('translated audio plays immediately, with ZERO user action', () => {
     expect(rec.suspends).toBe(0);
   });
 
+  it('CASCADE: a THROWING playbackContextFactory must not stop the microphone (R3-1)', async () => {
+    // R2-3 put `playback.play()` in the Start handler, which constructs the
+    // AudioContext SYNCHRONOUSLY. `new AudioContext()` throws for real —
+    // Chrome at the per-document limit (reachable after a dozen Replay
+    // presses, which build one per play and never close it), Safari under some
+    // policy states. Ordered before `requestCapture()`, that throw skipped the
+    // microphone entirely: 0 calls on the first click and on every retry,
+    // swallowed by React into a guarded callback, `micPermission` stuck at
+    // 'requesting' so not even the denied card renders. Live silently dead.
+    //
+    // Autoplay recovery is BEST-EFFORT. The microphone is not.
+    const capture = makeGrantingCapture();
+    const kit = makeDeps({
+      initialState: { mode: 'cascade' },
+      // NO audio events: `enqueue` builds the context too, and a factory that
+      // throws THERE has thrown since long before this ticket. R3-1 is about
+      // the START path only — see the note at the bottom of this test.
+      scripts: { cascade: cascadeUtteranceScript().filter((e) => e.type !== 'audio') },
+      capture: capture.fn,
+    });
+    kit.deps.playbackContextFactory = () => {
+      const err = new Error('the number of hardware contexts reached the maximum');
+      err.name = 'NotSupportedError';
+      throw err;
+    };
+    render(createElement(App, { deps: kit.deps }));
+
+    await clickStartMicrophone();
+
+    // The microphone was still requested, and the session reached a REAL
+    // permission outcome rather than hanging in 'requesting' forever.
+    expect(capture.fn).toHaveBeenCalledTimes(1);
+    expect(micIndicator()).toHaveAttribute('data-mic-indicator', 'granted');
+    expect(text(stateLabelEl())).not.toContain('requesting');
+
+    // ...and the session goes on to RUN: the transport started, the utterance
+    // flowed, the card settled. Not merely "no throw" — Live is alive.
+    await advance(1300);
+    expect(targetCard()).toHaveAttribute('data-target-status', 'ready');
+    expect(screen.getByRole('button', { name: 'Stop session' })).toBeInTheDocument();
+
+    // NOT pinned here, and pre-existing: a factory that throws is still fatal
+    // at the first `enqueue`, because ArmPlayback builds its context lazily
+    // there too. That was true before the Start-path resume existed and is not
+    // what R3-1 decided; it is recorded so the next reader does not mistake
+    // this test for full coverage of a hostile AudioContext.
+  });
+
   it('REALTIME: the session runs end to end with no affordance to press', async () => {
     const kit = makeDeps({
       scripts: { realtime: realtimeUtteranceScript().filter((e) => e.type !== 'audio') },
@@ -543,26 +594,45 @@ describe('source-level guarantees — Live can never suspend its own audio', () 
   ];
 
   /**
-   * The ONE permitted assignment in the whole client: ticket 046's Replay
-   * silent sink, on an <audio> ELEMENT. Written as an exact-line allow-list
-   * rather than a regex exemption on purpose — `t.enabled = false` and
-   * `track.muted = true` cannot masquerade as it, and neither can a widened
-   * `el.muted = shouldMute` that someone points at the microphone later.
+   * ROUND 3 (R3-2, R3-3) — WHAT THIS GUARD IS AND IS NOT.
+   *
+   * It is a TRIPWIRE, not proof. Nothing drives a real `MediaStream` through
+   * the Live capture path in jsdom, so there is no behavioural partner here the
+   * way the multi-chunk `suspends === 0` assertion partners the pause grep. A
+   * determined edit can still get past it (`Reflect.set`, a computed key, a
+   * helper in a file not on this list). It exists to make the OBVIOUS
+   * reintroduction loud, which is the failure mode that actually happened
+   * twice: `t.enabled = false` (M6b) and `t['enabled'] = false` (M10).
+   *
+   * R3-2: bracket access is covered, because that is exactly how M10 slipped.
+   * R3-3: the RECEIVER must be track-ish. Keying on the property name alone
+   * meant an unrelated `this.enabled = false` anywhere in realtime.ts (~750
+   * lines) would fail a test whose message claims barge-in was killed — a guard
+   * that fails for a reason other than the one it states is worse than none.
    */
-  const ALLOWED_MUTE_LINES: Record<string, string[]> = {
-    'src/client/browserDeps.ts': ['el.muted = options.muted;'],
-  };
+  const GATES_A_TRACK =
+    /\b(\w*(?:track|stream|mic|audio)\w*|t|tr|trk)\s*(?:\.\s*enabled|\[\s*['"]enabled['"]\s*\])\s*=[^=]/i;
 
   for (const file of TRACK_HOLDING_FILES) {
-    it(`${file} mutes and gates nothing — barge-in stays possible`, () => {
+    it(`${file} gates no microphone track — barge-in stays possible`, () => {
       // Input gating during output was CONSIDERED AND REJECTED: it kills
       // barge-in (hiding a real architectural difference between arms), it can
       // silently drop real speech, and it layers a second gate on the pinned
       // `silence_duration_ms: 500` VAD control.
-      const found = matchingLines(readCode(file), /\.(enabled|muted)\s*=[^=]/);
-      expect(found).toEqual(ALLOWED_MUTE_LINES[file] ?? []);
+      expect(matchingLines(readCode(file), GATES_A_TRACK)).toEqual([]);
     });
   }
+
+  it('the ONLY muting assignment in the client is Replay’s silent <audio> element', () => {
+    // Kept as an exact-line allow-list across ALL the files at once, rather
+    // than a regex exemption: `el.muted = true` (which would silence the
+    // operator) and `track.muted = true` (which is not even the same object)
+    // both fail, because neither IS the allowed line.
+    const found = TRACK_HOLDING_FILES.flatMap((file) =>
+      matchingLines(readCode(file), /(?:\.\s*muted|\[\s*['"]muted['"]\s*\])\s*=[^=]/),
+    );
+    expect(found).toEqual(['el.muted = options.muted;']);
+  });
 
   it('the stale comments that justified the deleted control are gone from browserDeps.ts (R2-3)', () => {
     // `browserDeps.ts:173` was not decoration: "a rejected autoplay is not a
@@ -570,15 +640,32 @@ describe('source-level guarantees — Live can never suspend its own audio', () 
     // JUSTIFICATION for swallowing `play().catch(() => {})`. There is no play
     // button. A comment that asserts a lie about the recovery path is worse
     // than no comment.
+    //
+    // R3-4: scoped to the CLAIM, not the vocabulary. The previous version
+    // banned the substring "play/pause" outright, which distorted the source —
+    // a comment was visibly reworded to dodge it. Describing Replay's
+    // play/pause seam is legitimate; asserting Live has a recovery affordance
+    // is not.
     const raw = readSource('src/client/browserDeps.ts');
-    expect(matchingLines(raw, /play\s*\(\s*\)\s*\/\s*pause|play\/pause|play button/i)).toEqual([]);
+    expect(
+      matchingLines(
+        raw,
+        /still has the play button|operator (still )?has[^.\n]*\bplay\b|Live's (own )?play/i,
+      ),
+    ).toEqual([]);
   });
 
   it("LiveView.tsx no longer advertises 'playing' as a [data-target-status] value (R2-4)", () => {
     // The removal itself is correct — nothing dispatches PLAY — but the DOM
     // contract at the top of the file still listed a value the view cannot
     // render, and that header is what the next author reads first.
+    // R3-4: matched as an ENUMERATION (`[data-target-status] in ... 'playing'`)
+    // rather than any mention of the word, so a note that the value USED to
+    // exist — which is exactly the kind of history worth writing down — does
+    // not fail the suite.
     const raw = readSource('src/client/views/LiveView.tsx');
-    expect(matchingLines(raw, /\[data-target-status\][^\n]*'playing'/)).toEqual([]);
+    expect(
+      matchingLines(raw, /\[data-target-status\][^\n]*\bin\b[^\n]*'playing'/),
+    ).toEqual([]);
   });
 });

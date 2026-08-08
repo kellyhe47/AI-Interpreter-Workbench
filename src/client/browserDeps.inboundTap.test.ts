@@ -230,7 +230,9 @@ describe('browserDeps — Replay’s remote sink is MUTED, not absent (round 2, 
 
   it('LIVE’s sink is the AUDIBLE one — muting Replay must not mute the operator', () => {
     const deps = buildBrowserDeps();
-    const el = attachAndReadElement(deps.remoteAudioSink!, 'live-remote');
+    // Non-optional on BrowserDeps since ticket 047 moved it off SessionDeps:
+    // the browser bag ALWAYS builds one, so there is nothing to assert away.
+    const el = attachAndReadElement(deps.remoteAudioSink, 'live-remote');
     expect(el.muted).toBe(false);
     expect(el.autoplay).toBe(true);
   });
