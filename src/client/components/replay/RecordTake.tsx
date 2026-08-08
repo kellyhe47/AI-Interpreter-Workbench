@@ -111,16 +111,27 @@ export interface RecordTakeProps {
   /**
    * On-demand playback of the recorded take. NEVER called at render.
    *
-   * TICKET 049 R3-1 — the SECOND argument is not optional decoration: it is how
-   * a press that could not build an AudioContext says so. Replay shares one
-   * context per deps bag, so such a press is otherwise a silent no-op — and a
-   * freshly recorded take has no "no audio stored" explanation available at
-   * all, which makes it the most ambiguous silence on either screen. This prop
-   * was previously narrowed to one argument, which quietly stranded the
-   * reporter `buildReplayDeps().playTake` accepts.
+   * TICKET 049 R3-1 — a press that could not build an AudioContext must SAY SO.
+   * Replay shares one context per deps bag, so such a press is otherwise a
+   * silent no-op, and a freshly recorded take has no "no audio stored"
+   * explanation available at all — the most ambiguous silence on either screen.
    *
-   * Typed as the SEAM ITSELF rather than a restatement of its shape, so this
-   * prop cannot drift back out of step with `ReplayDeps['playTake']`.
+   * WHAT PREVENTS THAT REGRESSION IS THE HOST'S FUNNEL, NOT THIS TYPE.
+   * `ReplayView` passes its own `playTake` callback, which binds the reporter
+   * in a closure; it never forwards `deps.playTake` raw. Both ways of undoing
+   * that are caught by locked tests (the raw forward, and a funnel that drops
+   * the callback). The type is NOT a barrier in the dangerous direction — R4-2
+   * verified with `tsc` that narrowing this prop back to one argument, and
+   * restoring the raw forward, BOTH compile clean and leave the suite green,
+   * because TypeScript lets a fewer-parameter function satisfy a
+   * more-parameter signature. Seam-typing below is single-source-of-truth
+   * hygiene — it does propagate changes to the seam's first parameter — and
+   * nothing more. Do not delete the funnel on the strength of it.
+   *
+   * COROLLARY: with the funnel in place this prop's ARITY IS INERT. The
+   * reporter lives entirely in the host, and the call site here passes one
+   * argument on purpose. That is the intended architecture: the component
+   * presses play, the host owns the notice.
    */
   playTake?: NonNullable<ReplayDeps['playTake']>;
   /** Provenance stamped onto a corpus save; absent hosts stamp nothing. */

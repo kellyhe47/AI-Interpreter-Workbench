@@ -624,10 +624,17 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
 
   const recordPanel =
     recordOpen && startTake !== undefined && segmentTake !== undefined ? (
-      /* R3-1 — `playTake` is the FUNNEL, never `deps.playTake` raw: the raw
-         forward was narrowed back to one argument here and stranded the
-         reporter. `undefined` is preserved so a host that wires no playback
-         renders exactly as it did. */
+      /* R3-1 — `playTake` here is the FUNNEL, never `deps.playTake` raw. The
+         raw forward was re-narrowed to one argument inside RecordTake and
+         stranded the reporter; THIS line is what prevents that, not the prop's
+         type (see RecordTake's own note).
+
+         The `undefined` ternary is forward-looking defence only, and today it
+         is INERT: [data-record-play] renders unconditionally and the funnel
+         already no-ops when `deps.playTake` is absent, so passing the funnel
+         unconditionally would behave identically. It is kept so the prop stays
+         a truthful signal of "this host can play a take", in case that button
+         is ever gated on it. */
       <RecordTake
         startTake={startTake}
         segmentTake={segmentTake}
