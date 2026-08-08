@@ -128,12 +128,21 @@
  *   `runs.uploadAudio`  AUDIO_UPLOAD_TIMEOUT_MS     costs the artifact (045)
  *   `runs.create`       RUN_POST_TIMEOUT_MS         costs the ROW (048 R3-1)
  *
- * THOSE FOUR SUM TO LESS THAN `startBatch`'s PER-RUN PATIENCE (77 s against
- * browserDeps' 120 s), and that inequality is the load-bearing part rather than
- * any single number: it means a run ALWAYS RETURNS before the sweep abandons it,
- * so a retry can never be started beside an attempt whose POST is still in
- * flight — which is the only way one repetition can reach an append-only ledger
- * as two aggregatable Runs. There is a guard test on the sum; do not break it.
+ * A RUN ALWAYS RETURNS BEFORE THE SWEEP ABANDONS IT, so a retry can never be
+ * started beside an attempt whose POST is still in flight — which is the only
+ * way one repetition can reach an append-only ledger as two aggregatable Runs.
+ * ROUND 4 (R4-1) corrected what that sum has to include: PACING is the run's
+ * DOMINANT cost (MAX_CLIP_MS, up to 45 s at 1x for a §9 take) and round 3 left
+ * it out, along with the two unbounded setup awaits — claiming 43 s of slack
+ * against an omitted term larger than the slack itself. The reachable worst case
+ * is 45 + 77 = 122 s, so browserDeps' patience went to 180 s. There is a guard
+ * test on both sums; do not break it.
+ *
+ * THE INEQUALITY IS THE SECOND LINE OF DEFENCE, NOT THE FIRST. It is a promise
+ * about constants that nobody re-derives when one is tuned. The primary defence
+ * is structural and lives in `startBatch`: a cell whose attempt already POSTed is
+ * never retried while that POST's fate is UNKNOWN, so the duplicate is
+ * impossible whatever these numbers say.
  *
  * THE REMAINING AWAITS ARE DELIBERATELY LEFT TO `runTimeoutMs`, not overlooked:
  * `recordings.get` and `recordings.getAudio`. Both are SETUP calls whose failure
@@ -323,9 +332,8 @@ export const RUN_POST_TIMEOUT_MS = 15_000;
 export const RUN_POST_TIMED_OUT = 'run record post failed: no response within';
 
 /**
- * TICKET 048 ROUND 4 (R4-1, STUB — declared for the locked tests; NOT YET WIRED)
- * — the longest clip a run can be asked to pace, from PRD §9: a corpus Recording
- * is a ≤45 s take.
+ * TICKET 048 ROUND 4 (R4-1) — the longest clip a run can be asked to pace, from
+ * PRD §9: a corpus Recording is a ≤45 s take.
  *
  * IT BELONGS IN THE BUDGET ARITHMETIC BECAUSE IT IS THE RUN'S DOMINANT COST.
  * Round 3's guard enumerated the worst case as "park on `finished`, wedge the

@@ -88,6 +88,7 @@
 import type { RunOrigin } from '../../core/protocol';
 import type { RunsClient } from '../replay/recordingsClient';
 import {
+  RUN_POST_TIMED_OUT,
   abandonedRunStub,
   runOnce,
   type RunOnceConfig,
@@ -136,6 +137,27 @@ export interface BatchExecutorRequest {
   origin: RunOrigin;
   /** Aborted when the batch is cancelled or the per-run timeout elapses. */
   signal: AbortSignal;
+  /**
+   * TICKET 048 ROUND 4 (R4-1) — the executor tells the runner when the ledger
+   * POST for this attempt is IN FLIGHT (`true` at the call, `false` on
+   * acknowledgement).
+   *
+   * IT EXISTS TO SUPPRESS THE RETRY, and only that. A retry started beside an
+   * attempt whose POST may still land writes a SECOND `origin: 'sweep'` Run
+   * carrying the same `annotations.repIndex`; both pass `isAggregatableRun`, and
+   * `derive.ts` counts DISTINCT rep indices, so p50/p95 and `n` are pooled over
+   * two samples of one repetition under a provenance line that reads a clean
+   * "1 of 1". No gate downstream can tell the two rows apart, which is why this
+   * has to be prevented rather than filtered.
+   *
+   * THE RULE IS "FATE UNKNOWN", NOT "ALREADY POSTED". An ACKNOWLEDGED POST is a
+   * known outcome — including a POST that stored a legitimately `failed` Run —
+   * and the sweep's single specified retry still runs for it. Only an
+   * unacknowledged POST (abandoned mid-flight, or bounded out by
+   * RUN_POST_TIMEOUT_MS) leaves the row's existence genuinely unknown to the
+   * client, and only then is the retry unsafe.
+   */
+  reportPostInFlight?: (inFlight: boolean) => void;
 }
 
 export type BatchExecutor = (request: BatchExecutorRequest) => Promise<RunOnceResult>;
@@ -322,7 +344,12 @@ export function startBatch(options: BatchOptions): BatchHandle {
     });
   };
 
-  const attempt = async (cell: PlannedCell, attemptNo: number): Promise<AttemptOutcome> => {
+  const attempt = async (
+    cell: PlannedCell,
+    attemptNo: number,
+    /** Mutated by the executor; read by `runCell` to decide about the retry. */
+    post: { inFlight: boolean },
+  ): Promise<AttemptOutcome> => {
     // A fresh controller per attempt: the retry of a timed-out run must start
     // with a live signal, or it would abort before the transport was touched.
     const controller = new AbortController();
@@ -352,6 +379,9 @@ export function startBatch(options: BatchOptions): BatchHandle {
         // out of the ledger's aggregate for good.
         origin: cell.warmup ? 'manual' : 'sweep',
         signal: controller.signal,
+        reportPostInFlight: (inFlight: boolean) => {
+          post.inFlight = inFlight;
+        },
       });
       // An abandoned attempt usually fails on its own long afterwards. What keeps
       // that from being an unhandled rejection is the SHAPE below — `pending` is
@@ -387,13 +417,36 @@ export function startBatch(options: BatchOptions): BatchHandle {
       if (cancellation.signal.aborted) {
         return { kind: 'cancelled', run: result.cancelled ? undefined : result.run };
       }
-      // runOnce RESOLVES a lost-stage run rather than throwing, so a resolved
-      // result is not automatically a success.
-      if (result.cancelled || result.run.status !== 'complete') {
+      // TICKET 048 ROUND 4 (R4-2) — A RUN WHOSE POST WENT UNACKNOWLEDGED IS NOT
+      // A COMPLETED REP, whatever its `status` says.
+      //
+      // Bounding the POST (R3-1) converted "the run hangs" into "the run returns
+      // `complete`, the batch counts it, and NO ROW EXISTS". No stub covers it —
+      // the attempt was never abandoned, so the executor's abort path never
+      // fires — so three reps could run, two rows exist, and the sweep report
+      // read `completedRuns: 3` with `failures: []`. That is R2-3's failure mode
+      // reintroduced through a new door.
+      //
+      // The status is deliberately LEFT ALONE (the measurement really is
+      // complete; it is the STORE that failed) and NOTHING is written here: a
+      // stub would invent a row that may yet land server-side, and re-POSTing
+      // would risk the very duplicate R4-1 exists to kill. Surfacing it in
+      // `failures` invents nothing and loses nothing.
+      //
+      // KNOWN RESIDUAL — TICKET 050. The rendered provenance still reads "2 of 2"
+      // rather than "2 of 3" for a lost rep, because `intendedReps` is distinct
+      // `repIndex` over sweep ROWS and this rep has none. Only an idempotent
+      // server-side POST keyed by run id can restore that denominator honestly.
+      const postUnacknowledged = result.run.errors.some((e) => e.startsWith(RUN_POST_TIMED_OUT));
+      if (result.cancelled || postUnacknowledged || result.run.status !== 'complete') {
         return {
           kind: 'failed',
           runId: result.run.id,
-          error: timedOut ? `run exceeded ${runTimeoutMs} ms` : result.run.errors[0],
+          error: timedOut
+            ? `run exceeded ${runTimeoutMs} ms`
+            : postUnacknowledged
+              ? result.run.errors.find((e) => e.startsWith(RUN_POST_TIMED_OUT))
+              : result.run.errors[0],
         };
       }
       return { kind: 'ok', run: result.run };
@@ -434,10 +487,25 @@ export function startBatch(options: BatchOptions): BatchHandle {
 
     for (let attemptNo = 1; attemptNo <= maxAttempts; attemptNo++) {
       spent = attemptNo;
-      outcome = await attempt(cell, attemptNo);
+      const post = { inFlight: false };
+      outcome = await attempt(cell, attemptNo, post);
       if (outcome.kind !== 'failed') break;
       // Cancel must not spend the retry on a run it just aborted.
       if (cancellation.signal.aborted) break;
+      // TICKET 048 ROUND 4 (R4-1) — AND NEITHER MUST A POST WHOSE FATE IS
+      // UNKNOWN. If the attempt reached `runs.create` and never got an
+      // acknowledgement — abandoned mid-flight, or bounded out by
+      // RUN_POST_TIMEOUT_MS — the row may still land, and a retry beside it
+      // writes a SECOND aggregatable Run for this rep that no downstream gate can
+      // tell from the first. This is the STRUCTURAL half of the defence: it holds
+      // whatever the budget arithmetic says, which matters because that
+      // arithmetic is a promise about constants nobody re-derives when one moves.
+      //
+      // NOT "already POSTed" — that would be too broad, deleting the sweep's
+      // specified retry for a run whose legitimately `failed` Run was stored and
+      // ACKNOWLEDGED. A known outcome is still retryable; only an unknown one is
+      // not.
+      if (post.inFlight) break;
     }
 
     if (!cell.warmup) measuredSettled += 1;
@@ -596,13 +664,29 @@ export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
 
     const runs: RunsClient = {
       create: async (run: Run) => {
+        // Both flags are set HERE, at CALL time, before any await — which is what
+        // makes them race-free against the abort listener above (`abort()`
+        // dispatches its listeners synchronously, so it can never interleave).
         wrote = true;
+        // TICKET 048 ROUND 4 (R4-1) — from this instant the row's existence is
+        // UNKNOWN to the client, and stays unknown until the store answers. A
+        // retry started inside that window can write a second aggregatable Run
+        // for this rep.
+        request.reportPostInFlight?.(true);
         stamped = {
           ...run,
           origin: request.origin,
           annotations: { ...run.annotations, repIndex: request.repIndex },
         };
-        return deps.runs.create(stamped);
+        const acknowledged = await deps.runs.create(stamped);
+        // ...and CLEARED only on a real acknowledgement. A POST that was
+        // abandoned mid-flight or bounded out by RUN_POST_TIMEOUT_MS never
+        // reaches this line, so the retry stays suppressed for exactly the cases
+        // where the row may still land. A rejection does not clear it either: a
+        // refused fetch is no more proof the server dropped the write than a
+        // timeout is.
+        request.reportPostInFlight?.(false);
+        return acknowledged;
       },
       list: (recordingId?: string) => deps.runs.list(recordingId),
       getAudio: (id: string) => deps.runs.getAudio(id),

@@ -123,8 +123,23 @@ export interface BrowserDeps extends SessionDeps {
  * `runOnce`'s own deadlines strictly inside it (runner.unboundedWaits.test.ts)
  * imports the real number instead of hardcoding a copy that rots the day this
  * moves.
+ *
+ * TICKET 048 ROUND 4 (R4-1) — RAISED FROM 120 s, because the guard it anchors
+ * was summing the wrong things. It counted only `runOnce`'s own deadlines
+ * (30 + 2 + 30 + 15 = 77 s) and omitted PACING — a PRD §9 take is up to 45 s at
+ * 1x, a term larger than the 43 s of slack the guard was claiming — plus the two
+ * setup awaits deliberately left unbounded (`recordings.getAudio` and the WebRTC
+ * handshake, neither exotic at 10-25 s on a bad link). The real worst case is
+ * 45 + 77 = 122 s, which does NOT fit inside 120: the sweep could abandon an
+ * attempt mid-POST and its retry would write a SECOND aggregatable Run for the
+ * same rep. 180 s restores ~58 s of headroom.
+ *
+ * IT IS THE SECOND LINE OF DEFENCE, NOT THE FIRST. An inequality is a promise
+ * about constants nobody re-derives when one is tuned, so the primary guarantee
+ * is structural and lives in the batch runner: a cell whose attempt already
+ * POSTed is never retried.
  */
-export const RUN_TIMEOUT_MS = 120_000;
+export const RUN_TIMEOUT_MS = 180_000;
 
 /** ScriptProcessor-based capture pipeline (source -> processor -> emit). */
 const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
