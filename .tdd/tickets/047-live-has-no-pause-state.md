@@ -4,7 +4,7 @@ title: Live always plays the translation immediately — remove the pause state 
 status: pending
 source: operator
 depends_on: []
-touches: [src/client/views/LiveView.tsx, src/client/views/useSessionController.ts, src/client/browserDeps.ts]
+touches: [src/client/views/LiveView.tsx, src/client/views/useSessionController.ts, src/client/browserDeps.ts, src/client/audio/capture.ts]
 iterations: 0
 test_files: []
 branch: ""
