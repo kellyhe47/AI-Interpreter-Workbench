@@ -174,3 +174,95 @@ writing** and resolve it in the test-writer's own pass; an implementer hitting a
 conflict on label text is a wasted dispatch. If the Replay relabelling turns out to be substantially
 more invasive than the Live work, say so and it will be split into its own ticket rather than
 allowed to stall this one.
+
+---
+
+## ROUND 2 — code review of `ef7c204`
+
+The anchor fallback was verified clean (`speech_end` always wins — mutating that fails 4 tests
+including both GUARD cases; no Replay aggregate moves; `first_audio_delta` is not in the chain and
+cannot rescue a record). `speech_stopped` in the STT provider is safe — no exhaustive switch exists,
+the turn-final contract still holds, and an empty-text `speech_stopped` provably does not finalise
+a turn. Live still creates no Runs and persists no audio. Seven of the label/span/merge mutations
+all fail. **Three MAJOR problems remain.**
+
+### R2-1 (MAJOR) — `audio_queued` IS NOT THE SAME EVENT IN THE TWO ARMS, and the `speak` span deletes the only mark that could reconcile them
+`orchestrator.ts:47,309` — cascade: `timings.audio_queued = Date.now(); // updated per chunk => last
+chunk wins` — the **LAST** TTS byte.
+`realtime.ts:599` — Arm A: stamped **ONCE** from `output_audio_buffer.started` — the **FIRST** audio.
+
+So `total from detected end of speech` is **time-to-FIRST-audio on Arm A and time-to-LAST-audio on
+cascade**. Cascade's figure scales with utterance length (synthesis duration); Arm A's does not.
+Ticket 051 newly renders both under ONE label on the same card, pools both into
+`ledger.aggregates()` p50/p95, and writes both into `LiveSession.latency` -> Results.
+
+Concrete harm: a 2-word Arm A session (0.9 s) beside a long-sentence cascade session (3.4 s) reads
+as *"cascade is ~4x slower"*. Most of that delta is playout duration of a longer utterance.
+
+**And my `speak` design call was wrong.** `mt_first_token -> audio_queued` absorbs `tts_first_byte`,
+which the server DOES stamp (`orchestrator.ts:307`) and which is the ONLY mark from which cascade's
+time-to-first-audio — the quantity commensurable with Arm A's — can be recovered. My justification
+("names no event the operator can reason about") does not survive contact with `RunsList.tsx`, which
+already renders that row in Replay. It also costs an observable interval against PRD §8's
+"5 vs 3 — the auditability gap, quantified", for no gain.
+`exportResults.ts:308` already documents latency as "to the **first** byte of output audio being
+queued" — which cascade's `audio_queued` is not. The repo's own definitions already disagree.
+
+**DECIDED:** four cascade rows — `transcribe`, `translate`, `synthesize` (`mt_first_token ->
+tts_first_byte`, *"translated text -> audio starts"*), `deliver` (`tts_first_byte -> audio_queued`,
+*"audio starts -> audio complete"*) — and the **HEADLINE becomes `tts_first_byte - vad_fired`**, so
+both arms' totals measure time-to-first-audio and are comparable. `deliver` stays visible as its own
+row; it is real information, just not the headline.
+
+### R2-2 (MAJOR) — the anchor fix stops at LiveView; Results now publishes a wrong-statistic Live p50
+`derive.ts:1043`. `deriveLiveModel` still reads `u.timings?.speech_end`, which **Live never has**, so
+`samples` is ALWAYS empty and the column falls through to `meanOf(sessions.map(s => s.latency.p50))`
+— a *mean of per-session p50s*, not a pooled nearest-rank percentile.
+Before 051 that branch produced `null` and the column was blank. **After 051 `saveLiveSession`
+yields real numbers, so Results begins publishing an endpointer-anchored figure, computed by the
+wrong statistic, immediately beside Replay's corpus-anchored p50, with no anchor label anywhere in
+`ResultsView`.** This ticket's entire thesis, violated one file over.
+Both directions are vacuous today: forcing the fallback (`if (true || …) return null`) leaves
+1927/1927 green, and switching it to the anchored rule ALSO leaves 1927/1927 green.
+**DECIDED:** `deriveLiveModel` uses `anchoredLatencyMs`; delete the mean-of-p50s fallback (or keep it
+only as an explicitly-degraded path); carry `from detected end of speech` onto the Results Live card.
+
+### R2-3 (MAJOR) — ROUTED TO TICKET 052, not fixed here
+The Arm A meter adds `cached_tokens * cachedIn` **on top of** `audio_tokens * audioIn`. In OpenAI's
+`response.done`, `input_token_details.cached_tokens` is a **SUBSET** of the tokens already counted in
+`audio_tokens`/`text_tokens`. Cached input is meant to be re-priced DOWN from $32/M to $0.40/M; this
+bills it at **$32.40/M — 80x the correct rate, and it makes the cached case cost MORE**, inverting
+the effect PRD §17 24b names as a **Large**-impact confound. Deleting the term outright leaves
+1927/1927 green.
+Also: `textIn: 4` / `textOut: 16` appear **nowhere in the PRD** (they match OpenAI's public card, but
+the repo cannot show that), and no test pins any absolute USD figure — only ratios.
+**052 now owns this**: its implementer is replacing this local meter with the shared `pricing.ts`
+module. The subset-aware formula is `audioIn * (audio_tokens - cached_audio_tokens) + cachedIn *
+cached_audio_tokens` (same for text) — **but the subset semantics must be confirmed against a real
+`response.done` before it is trusted.**
+
+### R2-4 (MINOR) — `speechEndSource: 'vad'` is now a FALSE CLAIM on every Live record
+`useSessionController.ts:490`, `orchestrator.ts:366`. PRD §7: *"`speech_end` is corpus ground truth in
+benchmark runs and VAD-derived in live sessions; the record marks which."* Option (c) deliberately
+never stamps `speech_end` in Live, yet every Live record still declares it VAD-sourced. No consumer
+reads it today — but it is a persisted, EXPORTED field asserting a mark that does not exist.
+**DECIDED:** add a third value (`'none'`) and reconcile PRD §7.
+
+### R2-5 (MINOR) — card and footer can disagree under one label
+`anchoredLatencyMs` prefers `speech_end`; the interval derivations never read it. A record carrying
+both marks renders card-total `audio_queued - vad_fired` and footer-p50 `audio_queued - speech_end`
+— two numbers, one label. `fixtureDeps.ts:148` emits exactly such records (card 0.55 s vs footer
+1.05 s); it does not bite only because fixture records fail `isRealRecord`.
+**DECIDED:** the view uses the same anchor `anchoredLatencyMs` chose.
+
+### R2-6 (MINOR) — `aggregates()` with no runId is now an anchor-mixing pool
+`ledger.ts:933`. Every in-app caller passes a runId and Replay's figures come from
+`runAggregates()`, so **nothing shipped moves** — but the no-arg form now pools corpus-anchored and
+endpointer-anchored samples into one p50. Document it, or refuse to mix.
+
+### R2-7 (MINOR) — Arm A's single bar is always 100% wide. Drop the bar column when `rows.length === 1`.
+
+### DEFERRED TO 052 (already its AC)
+The footer now sums metered dollars with unmeasured zeros, so `session $0.03` over five utterances
+can mean "three measured, two silently contributed nothing". 052 makes cost nullable and adds the
+`n of m metered` disclosure.
