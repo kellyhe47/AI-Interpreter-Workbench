@@ -126,19 +126,38 @@
  *   `finished`          RUN_COMPLETION_TIMEOUT_MS   FATAL — see the constant
  *   `transport.stop()`  TRANSPORT_CLOSE_TIMEOUT_MS  costs a leaked context (046)
  *   `runs.uploadAudio`  AUDIO_UPLOAD_TIMEOUT_MS     costs the artifact (045)
+ *   `runs.create`       RUN_POST_TIMEOUT_MS         costs the ROW (048 R3-1)
+ *
+ * THOSE FOUR SUM TO LESS THAN `startBatch`'s PER-RUN PATIENCE (77 s against
+ * browserDeps' 120 s), and that inequality is the load-bearing part rather than
+ * any single number: it means a run ALWAYS RETURNS before the sweep abandons it,
+ * so a retry can never be started beside an attempt whose POST is still in
+ * flight — which is the only way one repetition can reach an append-only ledger
+ * as two aggregatable Runs. There is a guard test on the sum; do not break it.
  *
  * THE REMAINING AWAITS ARE DELIBERATELY LEFT TO `runTimeoutMs`, not overlooked:
- * `recordings.get`, `recordings.getAudio`, `transport.start()` and the final
- * `runs.create`. Each is a SETUP or a STORE call whose failure has no run-level
- * verdict to record — a run that never got its audio has no measurement to keep
- * honest and no Run to write, so a fourth and fifth ad-hoc deadline here would
- * buy nothing that `startBatch`'s per-run budget does not already buy, and would
- * add two more numbers to keep ordered against it. ROUND 2 made that delegation
- * real in both directions: the budget now RACES the attempt rather than merely
- * aborting a signal, `runOnce` re-reads `signal` after every bounded wait so an
- * abandoned attempt stops writing and gives its transport back, and the batch
- * executor persists a FAILED stub for a rep abandoned before any Run existed so
- * the provenance denominator still counts it.
+ * `recordings.get` and `recordings.getAudio`. Both are SETUP calls whose failure
+ * has no run-level verdict to record — a run that never got its audio has no
+ * measurement to keep honest and no Run to write — so an ad-hoc deadline here
+ * would buy nothing the sweep's budget does not already buy, and would add
+ * another number to keep ordered against it. `transport.start()` is not bounded
+ * either, but it IS abort-aware (R3-3), which is what that wait actually needed:
+ * the transport already exists by then, so the cost of ignoring an abort there
+ * is a live AudioContext pair, not a hang.
+ *
+ * ROUND 2 made the delegation real in both directions: the budget now RACES the
+ * attempt rather than merely aborting a signal, `runOnce` re-reads `signal` after
+ * every bounded wait so an abandoned attempt stops writing and gives its
+ * transport back, and the batch executor persists a FAILED stub for a rep
+ * abandoned before any Run existed so the provenance denominator still counts it.
+ *
+ * ONE ACCEPTED COST, WRITTEN DOWN RATHER THAN LEFT SILENT (R3-4): an abort that
+ * lands while the output-audio upload is in flight leaves `runs/<id>.out.wav`
+ * stored for a Run that is then never POSTed. The bytes are orphaned — no ledger
+ * row references them, so no figure, no listing and no blind-compare pair can
+ * ever reach them. Chasing them would mean a DELETE against an append-only
+ * store, which is a worse property than a few unreferenced files in a sweep that
+ * was already going wrong.
  *
  * A LATE ABORT IS A CANCELLATION, NOT A TIMEOUT. `cancelled` is re-read at every
  * bounded wait rather than snapshotted once after pacing: an abort raised while
@@ -271,8 +290,8 @@ export const RUN_COMPLETION_TIMEOUT_MS = 30_000;
 export const RUN_COMPLETION_TIMED_OUT = 'run timed out waiting for utterance completion';
 
 /**
- * TICKET 048 ROUND 3 (R3-1, STUB — declared for the locked tests; NOT YET WIRED)
- * — how long a run waits for `runs.create` to acknowledge the POST.
+ * TICKET 048 ROUND 3 (R3-1) — how long a run waits for `runs.create` to
+ * acknowledge the POST.
  *
  * IT IS WHAT MAKES A SECOND SAMPLE OF ONE REP IMPOSSIBLE, and that is a stronger
  * claim than "the run does not hang". Every other wait in the tail is guarded by
@@ -298,8 +317,8 @@ export const RUN_COMPLETION_TIMED_OUT = 'run timed out waiting for utterance com
 export const RUN_POST_TIMEOUT_MS = 15_000;
 
 /**
- * TICKET 048 ROUND 3 (STUB) — the prefix of the line a run carries when the
- * ledger never acknowledged its POST.
+ * TICKET 048 ROUND 3 — the prefix of the line a run carries when the ledger
+ * never acknowledged its POST.
  */
 export const RUN_POST_TIMED_OUT = 'run record post failed: no response within';
 
@@ -450,21 +469,40 @@ async function withDeadline<T>(
  * after it — is what lets the run honour a late abort at its next await: the
  * caller recomputes `cancelled` once the wait returns, and that single re-read
  * covers the upload skip, the POST gate and the reported `cancelled` alike.
+ *
+ * ROUND 3 (R3-3) — `transport.start()` goes through here too. It is the WORST
+ * wait to leave bare: the transport already EXISTS by then, so an abort during
+ * the handshake leaves it live until a handshake that may never land resolves.
+ * Four abandoned attempts is four live transports — for Arm A eight
+ * AudioContexts — against Chrome's cap of roughly six, which is ticket 046's
+ * whole premise. Routing it through here needs no early-return branch: the pacer
+ * already takes `signal`, and `cancelled` is re-read straight after it, so the
+ * existing teardown path picks the run up.
+ *
+ * A FAILURE STILL PROPAGATES. Only the ABORT is turned into a resolution here:
+ * a `transport.start()` that rejects must still lose the run its stage exactly
+ * as it always did, so this is a race with the signal and not a swallow.
  */
-function untilSettledOrAborted(pending: Promise<unknown>, signal?: AbortSignal): Promise<true> {
-  if (signal === undefined) return pending.then(() => true as const);
-  if (signal.aborted) return Promise.resolve(true as const);
-  return new Promise<true>((resolve) => {
-    const onAbort = (): void => resolve(true);
+function untilSettledOrAborted<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
+  if (signal === undefined) return pending;
+  if (signal.aborted) {
+    // Already given up on: keep a handler so the orphan cannot leak.
+    void pending.catch(() => undefined);
+    return Promise.resolve(undefined);
+  }
+  return new Promise<T | undefined>((resolve, reject) => {
+    const onAbort = (): void => resolve(undefined);
     signal.addEventListener('abort', onAbort, { once: true });
-    void pending.then(
-      () => {
+    pending.then(
+      (value) => {
         signal.removeEventListener('abort', onAbort);
-        resolve(true);
+        resolve(value);
       },
-      () => {
+      (cause) => {
         signal.removeEventListener('abort', onAbort);
-        resolve(true);
+        // A no-op once the abort has already won, and the rejection is HANDLED
+        // either way — an abandoned handshake that fails later must not leak.
+        reject(cause);
       },
     );
   });
@@ -877,7 +915,13 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     targetLanguage: config.targetLanguage ?? '',
     providers: config.providers,
   };
-  await transport.start(transportConfig);
+  // TICKET 048 ROUND 3 (R3-3) — ABORT-AWARE. A handshake that never lands would
+  // otherwise hold a transport (Arm A: two AudioContexts) for as long as it takes
+  // — forever, in the case this exists for — after the sweep has abandoned the
+  // attempt. Nothing else changes: a rejecting `start()` still loses its stage,
+  // and on an abort the pacer below no-ops on the same signal, `cancelled` is
+  // re-read, and the run falls into the existing teardown.
+  await untilSettledOrAborted(transport.start(transportConfig), signal);
 
   // The clock anchor: epoch ms of frame 0. Every timing the run reports is
   // meaningful only relative to this.
@@ -941,7 +985,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // never a timeout: no named reason is recorded for it.
   if (!cancelled && !failed) {
     const completed = await withDeadline(
-      () => untilSettledOrAborted(finished, signal),
+      () => untilSettledOrAborted(finished.then(() => true as const), signal),
       RUN_COMPLETION_TIMEOUT_MS,
     );
     if (completed === DEADLINE) {
@@ -1123,7 +1167,30 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
 
   // A failure is real information and is stored like any other run (PRD §12).
   // A cancellation is not: see the header.
-  if (!cancelled) await deps.runs.create(run);
+  //
+  // TICKET 048 ROUND 3 (R3-1) — AND THE POST IS BOUNDED, which is a stronger
+  // claim than "the run does not hang". This is the one wait the abort re-read
+  // above cannot rescue: the re-read is immediately BEFORE this line, so an
+  // abort landing while the POST is in flight is too late to stop it, the sweep
+  // retries the attempt it abandoned, and BOTH rows reach the append-only ledger
+  // with `origin: 'sweep'` and the same `annotations.repIndex`. Bounding it
+  // REMOVES that window rather than policing it: every budget one run can spend
+  // sums to less than the sweep's per-run patience (asserted as a guard beside
+  // the constants), so the attempt always RETURNS before it can be abandoned,
+  // and an attempt that is never abandoned is never retried.
+  //
+  // A POST that goes unacknowledged costs the ROW, not the measurement — 045's
+  // verdict again, and for 045's reason: the pipeline did its job, the store did
+  // not, and every mark, transcript and cost figure is already in hand. A
+  // rejecting `create` still throws exactly as it always did.
+  if (!cancelled) {
+    const acknowledged = await withDeadline(() => deps.runs.create(run), RUN_POST_TIMEOUT_MS);
+    if (acknowledged === DEADLINE) {
+      // `errors` is the array `run.errors` already references, so the returned
+      // record carries the reason even though the body on the wire could not.
+      errors.push(`${RUN_POST_TIMED_OUT} ${RUN_POST_TIMEOUT_MS} ms`);
+    }
+  }
 
   return {
     run,
