@@ -16,11 +16,17 @@
  *     element `[data-utterance-duration]`, in the target card. It is
  *     information, not a control.
  *  3. Translated audio plays with ZERO user action, in both arms.
- *  4. `actions.togglePlay` is GONE from the controller's surface — asserted on
- *     the LIVE HOOK, not on a string in a file.
- *  5. Source-level guards: Live invokes no pause()/suspend(), and nothing mutes
- *     or gates the microphone while output plays (input gating was CONSIDERED
+ *  4. The deleted action is GONE from the controller's surface — asserted on
+ *     the LIVE HOOK by key equality, not by a grep. (The repo-wide identifier
+ *     ban lives in deletions.test.ts, the project's stated mechanism for
+ *     keeping deleted code deleted.)
+ *  5. Source-level guards: Live invokes no pause()/suspend(), and NOTHING in
+ *     the client mutes or gates the microphone (input gating was CONSIDERED
  *     AND REJECTED — it kills barge-in and can drop real speech).
+ *  6. ROUND 2 — the PRODUCTION wiring, not just the seam: browserDeps forwards
+ *     the exact constraint object to the real getUserMedia, and the real sink
+ *     sounds on attach. Both of those were reverted by a reviewer mutation
+ *     with the whole suite green, because nothing looked at browserDeps.ts.
  *
  * Replay is untouched and stays covered by its own suites:
  * `RunsList.playGate.test.tsx` / `ReplayView.test.tsx` ([data-run-play]) and
@@ -29,15 +35,13 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { cleanup, render, renderHook, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag } from '../../core/arms';
 import { buildBrowserDeps } from '../browserDeps';
-import { stripComments } from '../deletions.test';
+import { matchingLines, readCode, readSource } from '../testSource';
 import type {
   PlaybackAudioContextLike,
   PlaybackBufferLike,
@@ -45,12 +49,13 @@ import type {
 } from '../audio/playback';
 import { createInitialState, type SessionState, type SessionStatus } from '../state/sessionMachine';
 import LiveView from './LiveView';
+import type { FixtureScriptEvent } from '../transport/fixture';
+import type { RealtimeDeps } from '../transport/realtime';
 import {
   advance,
   cascadeUtteranceScript,
   clickStartMicrophone,
   makeDeps,
-  makeFakeRemoteAudioSink,
   realtimeUtteranceScript,
   targetCard,
   text,
@@ -64,8 +69,12 @@ import {
 
 afterEach(cleanup);
 
-const src = (file: string): string =>
-  stripComments(readFileSync(resolve(process.cwd(), file), 'utf8'));
+/**
+ * The identifier this ticket deleted, assembled at runtime. Spelling it out
+ * would put a literal `togglePlay` in CODE, and deletions.test.ts now bans that
+ * string across the whole client tree — including this file.
+ */
+const GONE_ACTION = ['toggle', 'Play'].join('');
 
 /* ===========================================================================
  * 1 — no play/pause affordance, in EVERY session state
@@ -102,9 +111,9 @@ function stubController(state: Partial<SessionState>): SessionController {
     providers: { ...full.providers },
     contextPolicy: full.contextPolicy,
   };
-  // Cast, deliberately: the point of this ticket is that `togglePlay` leaves
-  // SessionActions, and a stub typed against the current shape would make this
-  // file fail to compile for the wrong reason.
+  // Cast, deliberately: the point of this ticket is that the play action
+  // leaves SessionActions, and a stub typed against the current shape would
+  // make this file fail to compile for the wrong reason.
   const actions = {
     start: () => {},
     stop: () => {},
@@ -287,34 +296,86 @@ function recordingPlaybackContext(): RecordingPlaybackContext {
   return rec;
 }
 
+/**
+ * ROUND 2 (R2-6) — a cascade utterance carrying THREE audio chunks.
+ *
+ * The shared fixture emits exactly ONE chunk, and that made the anti-suspend
+ * assertion single-chunk-shallow: a `pause()` inserted BEFORE `enqueue` records
+ * no suspend on the first chunk, because ArmPlayback creates its context
+ * lazily inside `enqueue` and `this.context` is still null. From the second
+ * chunk on it suspends on every chunk — and the suite stayed green.
+ * Three chunks of 1.0 s each also let the assertion watch playback START as
+ * each chunk lands, rather than only counting at the end.
+ */
+function multiChunkCascadeScript(): FixtureScriptEvent[] {
+  const chunk = (): Int16Array => new Int16Array(24_000); // 1.0 s @ 24 kHz
+  const base = cascadeUtteranceScript().filter((e) => e.type !== 'audio');
+  const chunks: FixtureScriptEvent[] = [
+    { at: 1055, type: 'audio', pcm: chunk(), utt: 0 },
+    { at: 1065, type: 'audio', pcm: chunk(), utt: 0 },
+    { at: 1075, type: 'audio', pcm: chunk(), utt: 0 },
+  ];
+  return [...base, ...chunks].sort((a, b) => a.at - b.at);
+}
+
 describe('translated audio plays immediately, with ZERO user action', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it('GUARD — CASCADE: enqueued PCM is start()ed as it arrives, never buffered pending a press', async () => {
+  it('CASCADE: EVERY chunk starts as it arrives, and nothing suspends the context', async () => {
     const kit = makeDeps({
       initialState: { mode: 'cascade' },
-      scripts: { cascade: cascadeUtteranceScript() },
+      scripts: { cascade: multiChunkCascadeScript() },
     });
     const rec = recordingPlaybackContext();
     kit.deps.playbackContextFactory = () => rec.context;
     render(createElement(App, { deps: kit.deps }));
 
     await clickStartMicrophone();
-    await advance(1200);
 
-    // Nobody clicked anything: the only press in this test was "Start
-    // microphone". A queue waiting for play() would have started nothing.
-    expect(rec.started).toEqual([50400]);
-    // ...and nothing suspended it on the way.
+    // Chunk by chunk: playback is not merely "eventually started", it starts
+    // as each chunk lands. A queue waiting for a press would sit at length 0.
+    await advance(1060);
+    expect(rec.started).toEqual([24_000]);
+    expect(rec.suspends).toBe(0);
+
+    await advance(10);
+    expect(rec.started).toEqual([24_000, 24_000]);
+    expect(rec.suspends).toBe(0);
+
+    await advance(200);
+    expect(rec.started).toEqual([24_000, 24_000, 24_000]);
+    // The whole point: no chunk was preceded or followed by a suspend.
     expect(rec.suspends).toBe(0);
   });
 
-  it('REALTIME: the session runs end to end and the sink is NEVER paused', async () => {
-    const audio = makeFakeRemoteAudioSink();
+  it('CASCADE: the AudioContext is RESUMED inside the Start gesture (autoplay-policy recovery)', async () => {
+    // R2-3. `ArmPlayback.play()` is the client's only `ctx.resume()`, and with
+    // the play button gone it had zero non-Replay callers — a context that
+    // starts `suspended` under an autoplay policy could never recover, and the
+    // operator has no affordance to recover it by hand. So `start` calls
+    // play() once, inside the real user gesture. It reintroduces no control:
+    // there is nothing to press and nothing to un-press.
+    const kit = makeDeps({
+      initialState: { mode: 'cascade' },
+      scripts: { cascade: multiChunkCascadeScript() },
+    });
+    const rec = recordingPlaybackContext();
+    kit.deps.playbackContextFactory = () => rec.context;
+    render(createElement(App, { deps: kit.deps }));
+
+    expect(rec.resumes).toBe(0); // not on render — only on the gesture
+
+    await clickStartMicrophone();
+    expect(rec.resumes).toBe(1);
+    // Resuming is not playing: no audio has arrived yet, so nothing started.
+    expect(rec.started).toEqual([]);
+    expect(rec.suspends).toBe(0);
+  });
+
+  it('REALTIME: the session runs end to end with no affordance to press', async () => {
     const kit = makeDeps({
       scripts: { realtime: realtimeUtteranceScript().filter((e) => e.type !== 'audio') },
-      remoteAudioSink: audio.sink,
     });
     render(createElement(App, { deps: kit.deps }));
 
@@ -322,41 +383,103 @@ describe('translated audio plays immediately, with ZERO user action', () => {
     await advance(1200);
 
     expect(targetCard()).toHaveAttribute('data-target-status', 'ready');
-    // There is no affordance that could have paused it, and none was called.
     expect(playAffordances().map((el) => text(el))).toEqual([]);
-    expect(audio.calls).not.toContain('pause');
+  });
+});
+
+/* ===========================================================================
+ * 3b — the PRODUCTION wiring (round 2, R2-1)
+ *
+ * `browserDeps.ts` is where both halves of this ticket are actually delivered,
+ * and it was the one file 047 never looked at. A reviewer rewrote the Live
+ * forward to `getUserMedia({ audio: true })` and hard-muted every microphone
+ * track, and the whole suite stayed green. These two tests are what close that.
+ * ======================================================================== */
+
+/** The realtime transport's injected deps bag, read off the instance. */
+function realtimeDepsOf(transport: unknown): RealtimeDeps {
+  return (transport as { deps: RealtimeDeps }).deps;
+}
+
+/** The AUDIBLE Live sink, read where production actually delivers it: the
+ *  bag the transport factory constructs a realtime transport with. */
+function productionLiveSink() {
+  const transport = buildBrowserDeps().transportFactory({
+    architecture: 'realtime',
+    realtimeModel: REALTIME_MODEL,
+    contextPolicy: 'default',
+  });
+  const sink = realtimeDepsOf(transport).remoteAudioSink;
+  if (!sink) throw new Error('the LIVE realtime transport was built with no remoteAudioSink');
+  return sink;
+}
+
+describe('the PRODUCTION Live wiring, not just the seam (round 2)', () => {
+  const originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+
+  afterEach(() => {
+    if (originalMediaDevices) {
+      Object.defineProperty(navigator, 'mediaDevices', originalMediaDevices);
+    } else {
+      delete (navigator as unknown as Record<string, unknown>).mediaDevices;
+    }
+    document.body.innerHTML = '';
   });
 
-  it('REGRESSION GUARD: the production Live sink PLAYS on attach — audible with no interaction', () => {
+  it('buildBrowserDeps().startCapture forwards the EXACT constraints to the real getUserMedia', async () => {
+    // The constraint object is only a requirement if the PRODUCTION forward
+    // carries it. `startCapture` passing it to an injected fake proves nothing
+    // about what `navigator.mediaDevices.getUserMedia` is actually asked for.
+    const denial = new Error('Permission denied');
+    denial.name = 'NotAllowedError';
+    const getUserMedia = vi.fn(async () => Promise.reject(denial));
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia },
+      configurable: true,
+    });
+
+    // Denied on purpose: the grant path would need a real AudioContext and
+    // AudioWorklet, and the constraints are requested before either exists.
+    const result = await buildBrowserDeps().startCapture({ onChunk: () => {}, onLevel: () => {} });
+
+    expect(result).toEqual({ status: 'denied', reason: 'blocked' });
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+  });
+
+  it('the production Live sink PLAYS on attach — audible with no interaction', () => {
     // Realtime audio rides the WebRTC media track: `attach` is the whole
     // playback path, so `attach` alone must sound. (RealtimeTransport calling
     // attach on ontrack is pinned by transport/realtime.test.ts.)
     const play = vi
       .spyOn(window.HTMLMediaElement.prototype, 'play')
       .mockImplementation(() => Promise.resolve());
-    const elements = () => [...document.querySelectorAll('audio')] as HTMLAudioElement[];
     document.body.innerHTML = '';
     try {
-      const sink = buildBrowserDeps().remoteAudioSink!;
-      sink.attach({ getAudioTracks: () => [{ kind: 'audio' }] });
+      productionLiveSink().attach({ getAudioTracks: () => [{ kind: 'audio' }] });
 
       expect(play).toHaveBeenCalledTimes(1);
-      const el = elements().at(-1)!;
+      const el = [...document.querySelectorAll('audio')].at(-1) as HTMLAudioElement;
       expect(el.autoplay).toBe(true);
       expect(el.muted).toBe(false); // Live is the audible one
     } finally {
       play.mockRestore();
-      document.body.innerHTML = '';
     }
   });
 });
 
 /* ===========================================================================
- * 4 — togglePlay is gone from the controller's SURFACE
+ * 4 — the play action is gone from the controller's SURFACE
  * ======================================================================== */
 
-describe('the session controller exposes no togglePlay action', () => {
-  it('actions carries no togglePlay — a dead action is a control someone re-wires', () => {
+describe('the session controller exposes no play/pause action', () => {
+  it('actions carries exactly nine keys — a dead action is a control someone re-wires', () => {
     const kit = makeDeps({ scripts: { realtime: realtimeUtteranceScript() } });
     const { result } = renderHook(() => useSessionController(kit.deps));
 
@@ -372,7 +495,19 @@ describe('the session controller exposes no togglePlay action', () => {
       'stop',
       'swapDirection',
     ]);
-    expect(actions.togglePlay).toBeUndefined();
+    expect(actions[GONE_ACTION]).toBeUndefined();
+  });
+
+  it('SessionDeps carries no remoteAudioSink either — a dead SEAM is the same landmine (R2-2)', () => {
+    // The controller never read it. In production the sink Live hears is the
+    // one browserDeps hands to the TRANSPORT factory, so this field was a
+    // second, non-functional way to "wire Live's audio" sitting on the
+    // controller's surface waiting to be believed.
+    expect(readCode('src/client/views/useSessionController.ts')).not.toMatch(
+      /\bremoteAudioSink\b/,
+    );
+    // ...and the fake plumbing that fed it is gone from the shared test kit.
+    expect(readCode('src/client/views/sessionTestKit.ts')).not.toMatch(/\bremoteAudioSink\b/i);
   });
 });
 
@@ -384,32 +519,66 @@ describe('source-level guarantees — Live can never suspend its own audio', () 
   const LIVE_FILES = ['src/client/views/LiveView.tsx', 'src/client/views/useSessionController.ts'];
 
   for (const file of LIVE_FILES) {
-    it(`${file} names no togglePlay/onTogglePlay in CODE`, () => {
-      expect(src(file)).not.toMatch(/\b(togglePlay|onTogglePlay)\b/);
-    });
-
     it(`${file} calls no pause() / suspend() on any playback or sink`, () => {
-      // The two idioms that leave Live audio suspended.
-      expect(src(file)).not.toMatch(/\.pause\s*\(/);
-      expect(src(file)).not.toMatch(/\.suspend\s*\(/);
+      // The two idioms that leave Live audio suspended. NOTE the behavioural
+      // partner above: bracket access (`sink['pause']()`) slips past a regex,
+      // which is why the multi-chunk `suspends === 0` assertion exists.
+      expect(readCode(file)).not.toMatch(/\.pause\s*\(/);
+      expect(readCode(file)).not.toMatch(/\.suspend\s*\(/);
     });
   }
 
-  it('REGRESSION GUARD: nothing in the Live path mutes or gates the microphone', () => {
-    // Input gating during output was CONSIDERED AND REJECTED: it kills barge-in
-    // (hiding a real architectural difference between arms), it can silently
-    // drop real speech, and it layers a second gate on the pinned
-    // `silence_duration_ms: 500` VAD control.
-    for (const file of [
-      'src/client/audio/capture.ts',
-      'src/client/views/useSessionController.ts',
-      'src/client/views/LiveView.tsx',
-    ]) {
-      const code = src(file);
-      // `track.enabled = false` and `stream/element .muted = true` are the two
-      // ways a client mutes its own microphone.
-      expect(code, `${file} must not toggle track.enabled`).not.toMatch(/\.enabled\s*=/);
-      expect(code, `${file} must not mute anything`).not.toMatch(/\.muted\s*=/);
-    }
+  /* -------------------------------------------------------------------------
+   * R2-1 — the anti-gating guard now covers the files that actually HOLD a
+   * MediaStreamTrack. Before round 2 it scanned capture.ts, the controller and
+   * the view, none of which touch a track; the reviewer muted every microphone
+   * track in browserDeps.ts with the suite green.
+   * ---------------------------------------------------------------------- */
+  const TRACK_HOLDING_FILES = [
+    'src/client/audio/capture.ts',
+    'src/client/views/useSessionController.ts',
+    'src/client/views/LiveView.tsx',
+    'src/client/browserDeps.ts',
+    'src/client/transport/realtime.ts',
+  ];
+
+  /**
+   * The ONE permitted assignment in the whole client: ticket 046's Replay
+   * silent sink, on an <audio> ELEMENT. Written as an exact-line allow-list
+   * rather than a regex exemption on purpose — `t.enabled = false` and
+   * `track.muted = true` cannot masquerade as it, and neither can a widened
+   * `el.muted = shouldMute` that someone points at the microphone later.
+   */
+  const ALLOWED_MUTE_LINES: Record<string, string[]> = {
+    'src/client/browserDeps.ts': ['el.muted = options.muted;'],
+  };
+
+  for (const file of TRACK_HOLDING_FILES) {
+    it(`${file} mutes and gates nothing — barge-in stays possible`, () => {
+      // Input gating during output was CONSIDERED AND REJECTED: it kills
+      // barge-in (hiding a real architectural difference between arms), it can
+      // silently drop real speech, and it layers a second gate on the pinned
+      // `silence_duration_ms: 500` VAD control.
+      const found = matchingLines(readCode(file), /\.(enabled|muted)\s*=[^=]/);
+      expect(found).toEqual(ALLOWED_MUTE_LINES[file] ?? []);
+    });
+  }
+
+  it('the stale comments that justified the deleted control are gone from browserDeps.ts (R2-3)', () => {
+    // `browserDeps.ts:173` was not decoration: "a rejected autoplay is not a
+    // failure worth surfacing — the operator still has the play button" is the
+    // JUSTIFICATION for swallowing `play().catch(() => {})`. There is no play
+    // button. A comment that asserts a lie about the recovery path is worse
+    // than no comment.
+    const raw = readSource('src/client/browserDeps.ts');
+    expect(matchingLines(raw, /play\s*\(\s*\)\s*\/\s*pause|play\/pause|play button/i)).toEqual([]);
+  });
+
+  it("LiveView.tsx no longer advertises 'playing' as a [data-target-status] value (R2-4)", () => {
+    // The removal itself is correct — nothing dispatches PLAY — but the DOM
+    // contract at the top of the file still listed a value the view cannot
+    // render, and that header is what the next author reads first.
+    const raw = readSource('src/client/views/LiveView.tsx');
+    expect(matchingLines(raw, /\[data-target-status\][^\n]*'playing'/)).toEqual([]);
   });
 });

@@ -247,4 +247,20 @@ describe('startCapture requests the audio constraints explicitly (ticket 047)', 
     const header = source.slice(0, source.indexOf('import '));
     expect(header).toMatch(/echoCancellation/);
   });
+
+  it("REPLAY's corpus take inherits these constraints, and says so (round 2, R2-7)", () => {
+    // `replay/capture.ts` forwards its injected getUserMedia into startCapture,
+    // which hardcodes the constant — so `startTake` requests the same three
+    // constraints. That is correct (one microphone path in the client), but the
+    // NAME says LIVE. Someone tuning "the Live mic control" would silently
+    // change how the CORPUS is recorded — upstream of every WER and latency
+    // number in the experiment. The name is pinned by the test above, so the
+    // inheritance is documented at the other end instead.
+    const replayCapture = readFileSync(
+      resolve(process.cwd(), 'src/client/replay/capture.ts'),
+      'utf8',
+    );
+    expect(replayCapture).toMatch(/LIVE_CAPTURE_CONSTRAINTS/);
+    expect(replayCapture).toMatch(/corpus/i);
+  });
 });

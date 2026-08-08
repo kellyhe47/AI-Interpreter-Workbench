@@ -24,7 +24,6 @@ import {
   clickStartMicrophone,
   connLabel,
   elapsedLabel,
-  makeFakeRemoteAudioSink,
   realtimeUtteranceScript,
   renderApp,
   sessionFooter,
@@ -526,8 +525,12 @@ describe('the saved LiveSession records the context policy it ran under', () => 
 // stream reaching the sink, and Live sounding without anyone pressing anything —
 // is what is pinned here instead.
 //
-// The sink's attach → play() wiring is pinned in LiveView.autoplay.test.tsx
-// against the production sink; ontrack → attach in transport/realtime.test.ts.
+// ROUND 2 (R2-2): the controller no longer takes a `remoteAudioSink` at all —
+// it never read one. In production the sink Live hears is the one browserDeps
+// closes over and hands to the TRANSPORT factory, so a fake injected HERE could
+// only ever have caught a controller-originated pause. The real coverage is:
+// attach → play() on the PRODUCTION sink and the .enabled/.muted source guards
+// (LiveView.autoplay.test.tsx), and ontrack → attach (transport/realtime.test.ts).
 // ---------------------------------------------------------------------------
 
 /** A realtime utterance carrying NO audio events: the media-track case. */
@@ -535,43 +538,30 @@ function realtimeTrackOnlyScript(): FixtureScriptEvent[] {
   return realtimeUtteranceScript().filter((e) => e.type !== 'audio');
 }
 
-describe('Live never suspends the realtime audio path (ticket 040, amended by 047)', () => {
-  it('a realtime session completes with NO control to press and the sink never paused', async () => {
-    const audio = makeFakeRemoteAudioSink();
-    renderApp({
-      scripts: { realtime: realtimeTrackOnlyScript() },
-      remoteAudioSink: audio.sink,
-    });
+describe('Live never offers a way to suspend its audio (ticket 040, amended by 047)', () => {
+  it('a realtime session runs to ready with NO control to press', async () => {
+    renderApp({ scripts: { realtime: realtimeTrackOnlyScript() } });
     await clickStartMicrophone();
     await advance(1200); // the utterance completes → card is 'ready'
 
     const card = targetCard();
     expect(card).toHaveAttribute('data-target-status', 'ready');
     // Nothing was ever enqueued into ArmPlayback — the audio is on the track.
-
-    // There is no play/pause affordance anywhere in Live to press...
     expect(within(card).queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
-    // ...and the session never suspended the sink of its own accord.
-    expect(audio.calls).not.toContain('pause');
   });
 
-  it('stopping the session still never pauses the sink — a stopped feed is torn down, not suspended', async () => {
-    const audio = makeFakeRemoteAudioSink();
-    renderApp({
-      scripts: { realtime: realtimeTrackOnlyScript() },
-      remoteAudioSink: audio.sink,
-    });
+  it('stopping the session surfaces no control either — a stopped feed is torn down, not suspended', async () => {
+    renderApp({ scripts: { realtime: realtimeTrackOnlyScript() } });
     await clickStartMicrophone();
     await advance(1200);
     fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
     await advance(100);
 
-    expect(audio.calls).not.toContain('pause');
     expect(screen.queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
   });
 
-  it('CASCADE with no sink injected: the utterance is audible with no press at all', async () => {
+  it('CASCADE: the utterance is audible with no press at all', async () => {
     renderApp({
       initialState: CASCADE_SESSION,
       scripts: { cascade: cascadeUtteranceScript() },
