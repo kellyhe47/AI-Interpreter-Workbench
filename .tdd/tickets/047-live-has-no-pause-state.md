@@ -226,3 +226,79 @@ against the PRODUCTION `buildBrowserDeps()` sink, not a fake. Replay/BlindCompar
 leading-boundary-only matcher hits `play2.1 s` and correctly misses the `autoplay on` caption, and
 `readyTarget()` sets `hasData: true` so the table exercises the branch the button lived in (M1
 caught, 19 failures).
+
+---
+
+## ROUND 3 — final review: one MAJOR defect, introduced by R2-3 (my call)
+
+All eight R2 items landed; every round-1 mutation is now caught, including both halves of M6 and M7
+(`browserDeps` dropping the constraints -> CAUGHT; muting the mic tracks -> CAUGHT; bracket-access
+`pause()` before `enqueue` -> CAUGHT). R2-3's ordering claim was traced and is TRUE: the
+transport-start effect gates on `TRANSPORT_STATUSES`, which excludes `idle` and
+`requesting-permission`, so `attach` -> `play()` cannot run before the Start click AND the mic
+grant. Reconnects re-enter through `attach` and inherit document-lifetime sticky activation.
+
+### R3-1 (MAJOR, REGRESSION — introduced by R2-3) — a throwing `playbackContextFactory` wedges Live permanently
+`useSessionController.ts:674`:
+```
+store.playback.play();      // constructs the AudioContext, SYNCHRONOUSLY
+void requestCapture();      // never reached if the line above throws
+```
+`play()` -> `getContext()` -> `playbackContextFactory()` -> `new AudioContext()`, which **can
+throw**: Chrome throws at the per-document AudioContext limit, Safari under some policy states. It
+now runs BEFORE `requestCapture()`, in the same click handler, after `START` already dispatched.
+
+**Proven by probe, not theorised.** With `playbackContextFactory` throwing `NotSupportedError`:
+`startCapture` called **0** times, on the first click and every retry. React swallows the throw into
+a guarded callback. `micPermission` is `'requesting'`, not `'denied'`, so no denied card renders —
+no error, no recovery, no mic. `newSession`'s fallback `requestCapture` is unreachable from that
+state. **Live is silently dead.**
+
+It is more reachable than it looks: `browserDeps.ts`'s `playRun`/`playTake` construct a NEW
+`AudioContext` per press and never `close()` it. Replay QA over a dozen runs, then Live -> Start, is
+exactly Chrome's cap. R2-3 turned "cascade audio is silent" into "Live cannot start at all" — it
+breaks the very thing it was added to protect.
+
+**DECIDED:** keep the resume, make it best-effort and non-blocking. `void requestCapture()` FIRST
+(it returns synchronously, so `play()` still runs in the same handler tick and keeps the gesture),
+then `try { store.playback.play(); } catch { /* autoplay recovery is best-effort */ }`. Locked test:
+a throwing `playbackContextFactory` must not prevent `startCapture`.
+
+### R3-2 (MINOR) — the anti-gating guard is still bypassed by bracket access
+**Mutation M10 SLIPPED, 1169/1169 green:** `t['enabled'] = false` on every mic track in
+`browserDeps.ts`. Same evasion class as round 1's M7, which R2-6 closed on the PAUSE side but not
+here — and there is no behavioural partner, because nothing drives a real `MediaStream` through the
+Live capture path.
+**DECIDED:** extend the pattern to `/(\.|\[\s*['"])(enabled|muted)(['"]\s*\])?\s*=[^=]/`. The guard
+is a tripwire, not proof — say so in the test's own comment so nobody reads it as a guarantee.
+
+### R3-3 (MINOR) — the guard keys on a property NAME across whole files
+`realtime.ts` is ~750 lines; any future unrelated `this.enabled = false` trips a test whose message
+says *"mutes and gates nothing — barge-in stays possible"*, which is not what went wrong.
+**DECIDED:** constrain the receiver to something track-ish (plus the existing exact-line element
+allow-list), so the guard fails for the reason it claims.
+
+### R3-4 (MINOR) — the prose-scanning tests are fragile and have ALREADY distorted the source
+`browserDeps.ts:146` reads *"The seam still exposes `play` and `pause` because…"* — visibly worded
+to dodge a substring ban. `LiveView.autoplay.test.tsx:495` needs `['toggle','Play'].join('')` to
+avoid tripping the repo-wide deletions manifest on its own source.
+The ban is worth KEEPING for `browserDeps.ts:173`'s justification comment specifically — that line
+asserted a recovery path that did not exist, which is exactly the lie that misleads the next author.
+**DECIDED:** narrow each regex to the CLAIM rather than the vocabulary (e.g.
+`/still has the play button|operator (still )?has.*play/i`), so a future author can legitimately
+write "Replay's play/pause seam" without a red suite. Same for R2-4's `data-target-status` scan,
+which today would fail a comment saying the value USED to exist.
+
+### R3-5 (MINOR) — drop the redundant `!`
+`browserDeps.inboundTap.test.ts:233` still writes `deps.remoteAudioSink!`; the field is non-optional
+now. Harmless residue — remove it so non-optionality is visible at the call site. NOTE: that file is
+ticket 046's lock; 046 is finished, so it may be edited now, by the test-writer only.
+
+### ACCEPTED, NOT FIXED
+Live now constructs an AudioContext at Start even for realtime sessions (which never use it) and for
+sessions that end in permission denial. Verified NOT a leak: `useSessionController` mounts in `App`,
+not `LiveView`, so Live<->Replay navigation does not remount it, and `ArmPlayback.reset()`
+deliberately keeps `this.context` — exactly ONE context per app mount. One idle context is the price
+of the resume; it is also the input to R3-1, which is why R3-1 must land.
+Separately latent, NOT this ticket: `playRun`/`playTake` build a new `AudioContext` per press and
+never close it.
