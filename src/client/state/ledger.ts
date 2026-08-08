@@ -244,7 +244,12 @@ export interface RunUtterance {
   category: CorpusCategory;
   timings: Record<string, number | null>;
   transcripts: { source?: string; target?: string };
-  cost: number;
+  /**
+   * TICKET 052 — `null` is UNMEASURED, and it is NOT the same fact as `0`.
+   * A record nobody could price contributes nothing to an arm's total and is
+   * disclosed in the provenance line; a `0` would claim the utterance was free.
+   */
+  cost: number | null;
   status: 'complete' | 'failed';
   errors: string[];
 }
@@ -262,7 +267,8 @@ export interface Run {
   timings: Record<string, number | null>;
   transcripts: { source?: string; target?: string };
   outputAudioPath?: string;
-  cost: number;
+  /** TICKET 052 — `null` is UNMEASURED. Never rendered as `$0.00`. */
+  cost: number | null;
   errors: string[];
   createdAt: number;
   /**
@@ -281,7 +287,8 @@ export interface Run {
 export interface LiveSessionUtterance {
   id: string;
   timings: Record<string, number | null>;
-  costUsd: number;
+  /** TICKET 052 — `null` when the transport reported no usage to price. */
+  costUsd: number | null;
 }
 
 /**
@@ -317,7 +324,8 @@ export interface LiveSession {
   utterances: LiveSessionUtterance[];
   latency: { p50: number | null; p95: number | null; driftMinute1ToEnd: number | null };
   cost: {
-    totalUsd: number;
+    /** TICKET 052 — `null` when NO utterance in the session could be priced. */
+    totalUsd: number | null;
     perMinuteMinute1: number | null;
     perMinuteFinalMinute: number | null;
   };
@@ -335,7 +343,20 @@ export interface RunArmAggregate {
   n: number;
   p50Ms: number | null;
   p95Ms: number | null;
-  costUsd: number;
+  /**
+   * TICKET 052 — the sum of the MEASURED sample costs, or `null` when none of
+   * the arm's samples carried one. Never 0-for-absent: an unmeasured sample
+   * contributes nothing, and a total of 0 would understate the arm exactly as
+   * `$0.00` misstates a run.
+   */
+  costUsd: number | null;
+  /**
+   * How many of `n` samples carried a measured cost — the denominator the
+   * dollars cannot supply. Summing a missing cost as 0 and skipping it produce
+   * the SAME total, so only this number tells an honest aggregate from a
+   * dishonest one, and it is what the provenance line discloses.
+   */
+  measuredCostSamples: number;
 }
 
 export interface RunAggregates {
@@ -419,7 +440,10 @@ export interface ArmAggregate {
   count: number;
   p50Ms: number | null;
   p95Ms: number | null;
-  costUsd: number;
+  /** TICKET 052 — measured records only; `null` when none of them was priced. */
+  costUsd: number | null;
+  /** How many of `count` records carried a measured cost. */
+  measuredCostRecords: number;
 }
 
 export interface LedgerAggregates {
@@ -566,8 +590,8 @@ export interface RunSample {
   status: RunStatus;
   /** audio_queued − speech_end, both from the SAME level. Null when either is absent. */
   latencyMs: number | null;
-  /** The record's split of the Run cost, or the whole Run cost. */
-  cost: number;
+  /** The record's split of the Run cost, or the whole Run cost. Null = unmeasured. */
+  cost: number | null;
 }
 
 /**
@@ -776,14 +800,22 @@ export class RunLedger {
         const arm = sample.arm;
         let agg = perArm[arm];
         if (!agg) {
-          agg = { n: 0, p50Ms: null, p95Ms: null, costUsd: 0 };
+          agg = { n: 0, p50Ms: null, p95Ms: null, costUsd: null, measuredCostSamples: 0 };
           perArm[arm] = agg;
           latenciesByArm[arm] = [];
         }
         agg.n += 1;
         // A failed record contributes no cost, by analogy with a failed Run:
         // it is filtered out above before it reaches this line.
-        agg.costUsd += sample.cost;
+        //
+        // TICKET 052 — and an UNMEASURED cost contributes nothing either, which
+        // is a different thing from contributing a zero. `costUsd` stays null
+        // until the first measured sample, so an arm nobody priced reports
+        // `not measured` rather than `$0.00`.
+        if (sample.cost !== null) {
+          agg.costUsd = (agg.costUsd ?? 0) + sample.cost;
+          agg.measuredCostSamples += 1;
+        }
         if (sample.latencyMs !== null) latenciesByArm[arm]!.push(sample.latencyMs);
       }
     }
@@ -940,12 +972,17 @@ export class RunLedger {
       if (!isRealRecord(r)) continue;
       let agg = perArm[r.arm];
       if (!agg) {
-        agg = { count: 0, p50Ms: null, p95Ms: null, costUsd: 0 };
+        agg = { count: 0, p50Ms: null, p95Ms: null, costUsd: null, measuredCostRecords: 0 };
         perArm[r.arm] = agg;
         latenciesByArm[r.arm] = [];
       }
       agg.count += 1;
-      agg.costUsd += r.costUnits;
+      // TICKET 052 — measured records only. A record the transport reported no
+      // usage for carries `costUnits: null` and contributes NOTHING, not a zero.
+      if (r.costUnits !== null) {
+        agg.costUsd = (agg.costUsd ?? 0) + r.costUnits;
+        agg.measuredCostRecords += 1;
+      }
       // TICKET 051 — anchored per record: `speech_end` when the corpus supplied
       // it (REPLAY, unmoved), otherwise the endpointer's decision, which is the
       // only end-of-speech instant a LIVE record can carry. Records with

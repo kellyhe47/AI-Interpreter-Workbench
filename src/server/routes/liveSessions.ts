@@ -101,7 +101,10 @@ function isUtterance(value: unknown): boolean {
   if (!isNonEmptyString(value.id)) return false;
   if (!isObject(value.timings)) return false;
   if (!Object.values(value.timings).every(isNumberOrNull)) return false;
-  return isNumber(value.costUsd);
+  // TICKET 052 — `null` is a LEGAL costUsd: it says the utterance could not be
+  // metered. Rejecting it would force the client to post a 0, which is the
+  // `$0.00` lie one layer down.
+  return isNumberOrNull(value.costUsd);
 }
 
 /**
@@ -126,7 +129,7 @@ function rejectionReason(body: unknown): string | null {
   if (!isObject(body.modelSnapshots)) return 'modelSnapshots must be an object';
   if (!Array.isArray(body.utterances)) return 'utterances must be an array';
   if (!body.utterances.every(isUtterance)) {
-    return 'every utterance must carry an id, its timings and a numeric costUsd';
+    return 'every utterance must carry an id, its timings and a numeric-or-null costUsd';
   }
   if (
     !hasFields(body.latency, {
@@ -139,12 +142,13 @@ function rejectionReason(body: unknown): string | null {
   }
   if (
     !hasFields(body.cost, {
-      totalUsd: isNumber,
+      // TICKET 052 — `null` totalUsd means the session could not be priced.
+      totalUsd: isNumberOrNull,
       perMinuteMinute1: isNumberOrNull,
       perMinuteFinalMinute: isNumberOrNull,
     })
   ) {
-    return 'cost must give a numeric totalUsd and per-minute figures or null';
+    return 'cost must give a numeric-or-null totalUsd and per-minute figures or null';
   }
   if (
     !hasFields(body.stability, {

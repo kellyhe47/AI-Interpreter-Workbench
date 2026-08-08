@@ -1184,7 +1184,10 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
         </span>
         <span>
           session{' '}
-          <span style={{ fontFamily: 'var(--font-mono)' }}>{`$${footer.costUsd.toFixed(2)}`}</span>
+          {/* TICKET 052 — through the ONE formatter. `toFixed(2)` here was the
+              literal source of the `$0.00` that read as "this configuration is
+              free" for every session in the study. */}
+          <span style={{ fontFamily: 'var(--font-mono)' }}>{footer.costCell}</span>
         </span>
         {/* TICKET 051 — the anchor, named ONCE for the whole footer. These
             percentiles start at the endpointer's decision; Replay's start at

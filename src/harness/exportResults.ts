@@ -103,6 +103,12 @@ import path from 'node:path';
 
 import { deriveArmTag } from '../core/arms';
 import type { ArmTag } from '../core/arms';
+import {
+  PRICING_VERSION,
+  costFromStored,
+  formatCostUsd,
+  sumMeasuredCosts,
+} from '../core/pricing';
 import { latestWerScores } from '../core/wer';
 import type { WerScore } from '../core/wer';
 import { createStorage } from '../server/storage/index';
@@ -134,7 +140,19 @@ export interface ConfigurationSummary {
   recordings: string[];
   p50Ms: number | null;
   p95Ms: number | null;
-  costUsd: number;
+  /**
+   * TICKET 052 — the sum of the MEASURED run costs, or `null` when none of the
+   * configuration's runs carried one. Never `0` for absent: `run.cost ?? 0`
+   * folded an unpriced run in as a free one, which understates the arm in the
+   * committed bundle the write-up cites.
+   */
+  costUsd: number | null;
+  /** How many of `n` runs carried a measured cost — the honest denominator. */
+  measuredCostRuns: number;
+  /** Rendered through the ONE formatter: `not measured`, never `$0.00`. */
+  costCell: string;
+  /** The declared price source behind `costUsd` (PRD §8's provenance rule). */
+  pricingVersion: string;
 }
 
 export interface ExperimentSummary {
@@ -341,6 +359,11 @@ function summariseArm(arm: NamedArm, runs: readonly Run[], intendedReps: number)
     .filter((sample): sample is number => sample !== null)
     .sort((a, b) => a - b);
 
+  // TICKET 052 — MEASURED runs only. An unmeasured cost contributes nothing
+  // and is disclosed, rather than silently entering the total as a zero.
+  const summed = sumMeasuredCosts(aggregated.map((run) => costFromStored(run.cost)));
+  const cost = { costUsd: summed.usd, measuredCostRuns: summed.measured };
+
   return {
     configuration: arm,
     n: aggregated.length,
@@ -349,7 +372,9 @@ function summariseArm(arm: NamedArm, runs: readonly Run[], intendedReps: number)
     recordings,
     p50Ms: percentile(samples, 0.5),
     p95Ms: percentile(samples, 0.95),
-    costUsd: aggregated.reduce((total, run) => total + (run.cost ?? 0), 0),
+    ...cost,
+    costCell: formatCostUsd(cost.costUsd),
+    pricingVersion: PRICING_VERSION,
   };
 }
 

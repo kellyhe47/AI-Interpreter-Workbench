@@ -32,6 +32,7 @@
 
 import type { CSSProperties, ReactElement } from 'react';
 import { armLabel } from '../../../core/arms';
+import { COST_NOT_MEASURED_CELL, formatCostUsd } from '../../../core/pricing';
 import {
   deriveCascadeIntervals,
   deriveRealtimeIntervals,
@@ -75,10 +76,13 @@ const formatMs = (value: number | null): string => (value === null ? ABSENT : `$
  * one) there is no denominator, and an unnormalized figure would silently
  * compare a 30-second clip against a 60-second one.
  */
-function formatPerMinute(cost: number, recording: Recording | null): string {
+function formatPerMinute(cost: number | null, recording: Recording | null): string {
+  // TICKET 052 — an UNMEASURED cost is not a cheap run. `not measured` says so;
+  // `$0.000/min` would report the run as free.
+  if (cost === null) return COST_NOT_MEASURED_CELL;
   if (recording === null || recording.durationMs <= 0) return ABSENT;
   const minutes = recording.durationMs / MS_PER_MINUTE;
-  return `$${(cost / minutes).toFixed(3)}/min`;
+  return `${formatCostUsd(cost / minutes)}/min`;
 }
 
 /** run.timings stores absent marks as null; the interval helpers want gaps. */

@@ -759,7 +759,10 @@ function CategoryCard(props: { rows: CategoryGroupRow[]; werRows: WerCategoryRow
               {formatMs(row.p50Ms)}
             </div>
             <div style={cellStyle}>{formatMs(row.p95Ms)}</div>
-            <div style={cellStyle}>{formatUsd(row.costUsd)}</div>
+            {/* TICKET 052 — the derivation renders the cell; the view never
+                formats money by hand and so cannot invent a zero-dollar
+                figure for a cost nobody measured. */}
+            <div style={cellStyle}>{row.costCell}</div>
             <div data-category-wer="" style={cellStyle}>
               {werCell(row)}
             </div>
@@ -811,8 +814,10 @@ function RecordingCard(props: { rows: RecordingGroupRow[] }): ReactElement {
             <div style={cellStyle}>{formatMs(row.p95Ms)}</div>
             {/* n === 0 means nothing was measured, so there is no money to
                 report: a zero cost over zero samples reads as a measurement.
-                p50 / p95 already dash through formatMs's null. */}
-            <div style={cellStyle}>{formatUsd(row.n === 0 ? null : row.costUsd)}</div>
+                p50 / p95 already dash through formatMs's null.
+                TICKET 052 — and a row WITH samples but no priced one renders
+                `not measured` through the derivation's own cell. */}
+            <div style={cellStyle}>{row.n === 0 ? formatUsd(null) : row.costCell}</div>
             <div style={cellStyle}>
               {row.excludedFromExperiments ? (
                 <span style={{ color: 'var(--text-muted)' }}>

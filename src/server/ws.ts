@@ -189,6 +189,10 @@ export function attachCascadeWs(
           try {
             const events = createOrchestrator(audio.iterable, providers, {
               signal: ac.signal,
+              // TICKET 052 — the MODEL ids, forwarded so the cost model can
+              // pick the right rate card per stage. `provider.name` is a
+              // VENDOR name and cannot price anything.
+              models: msg.providers,
               session: {
                 languagePair: msg.languagePair,
                 direction: msg.direction,

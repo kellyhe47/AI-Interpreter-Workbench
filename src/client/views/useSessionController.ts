@@ -82,6 +82,13 @@ import {
   type ProviderTriple,
   type RunConfig,
 } from '../../core/arms';
+import {
+  COST_NOT_MEASURED_CELL,
+  costFromStored,
+  formatCostUsd,
+  priceRealtimeUsage,
+  sumMeasuredCosts,
+} from '../../core/pricing';
 import { anchoredLatencyMs } from '../../core/timing';
 import type { Mode, UtteranceRecord } from '../../core/timing';
 import type { CaptureHandle, CaptureResult } from '../audio/capture';
@@ -175,7 +182,10 @@ export interface SessionFooterData {
   utterances: number;
   p50Ms: number | null;
   p95Ms: number | null;
-  costUsd: number;
+  /** TICKET 052 — `null` is NOT MEASURED. The footer renders it as such. */
+  costUsd: number | null;
+  /** Pre-rendered through the ONE formatter, so no view can invent `$0.00`. */
+  costCell: string;
 }
 
 export interface SessionActions {
@@ -278,55 +288,16 @@ function emptyTarget(): TargetView {
 }
 
 // ---------------------------------------------------------------------------
-// TICKET 051 — Arm A's Live cost, METERED from `response.done`
+// TICKET 051 / 052 — Arm A's Live cost, METERED from `response.done`.
 //
-// SCOPE, deliberately narrow: this prices ONE thing — a Realtime utterance the
-// transport reported usage for. Cascade Live, Replay and the sweeps are priced
-// by ticket 052 (the cost model), which owns the general table; nothing here
-// pretends to be it.
-//
-// Audio and text are billed at DIFFERENT rates on each side, and collapsing
-// them would make the figure a fiction that happens to be non-zero. The rates
-// are OpenAI's published gpt-realtime prices, USD per 1M tokens.
+// The rate table, the input/output split, the text and cached sub-meters and
+// the "unmeasured is not zero" rule ALL live in src/core/pricing.ts now. This
+// file used to carry its own copy (`realtimeUsdFromUsage`), which is exactly
+// the two-pricing-paths problem ticket 052 exists to end: that copy added
+// cached tokens ON TOP of the audio tokens they are a subset of, billing cached
+// input at $32.40/M — dearer than uncached — and nothing else in the app could
+// have disagreed with it, because nothing else priced anything.
 // ---------------------------------------------------------------------------
-
-const REALTIME_USD_PER_MTOK = {
-  textIn: 4,
-  cachedIn: 0.4,
-  audioIn: 32,
-  textOut: 16,
-  audioOut: 64,
-} as const;
-
-interface RealtimeUsage {
-  input_token_details?: { audio_tokens?: number; text_tokens?: number; cached_tokens?: number };
-  output_token_details?: { audio_tokens?: number; text_tokens?: number };
-}
-
-function tokens(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-/**
- * USD for one Realtime utterance from the `response.done` usage block. An
- * utterance the transport reported NO usage for costs 0 — never an invented
- * figure, and never one derived from wall-clock instead of meter.
- */
-function realtimeUsdFromUsage(usage: unknown): number {
-  if (usage === null || typeof usage !== 'object') return 0;
-  const u = usage as RealtimeUsage;
-  const inDetails = u.input_token_details;
-  const outDetails = u.output_token_details;
-  if (inDetails === undefined && outDetails === undefined) return 0;
-  const r = REALTIME_USD_PER_MTOK;
-  const usd =
-    tokens(inDetails?.audio_tokens) * r.audioIn +
-    tokens(inDetails?.text_tokens) * r.textIn +
-    tokens(inDetails?.cached_tokens) * r.cachedIn +
-    tokens(outDetails?.audio_tokens) * r.audioOut +
-    tokens(outDetails?.text_tokens) * r.textOut;
-  return usd / 1_000_000;
-}
 
 /** Nearest-rank percentile, matching RunLedger's convention exactly. */
 function nearestRank(sorted: number[], p: number): number {
@@ -489,8 +460,12 @@ export function useSessionController(deps: SessionDeps): SessionController {
         timings: { ...target.timings } as UtteranceRecord['timings'],
         speechEndSource: 'vad',
         providers: { ...REALTIME_PROVIDERS },
-        // TICKET 051 — metered from what `response.done` reported, or 0.
-        costUnits: realtimeUsdFromUsage(completion.usage),
+        // TICKET 052 — metered through the ONE cost model. `null` when the
+        // transport reported no usage: NOT MEASURED, never a $0.00 turn.
+        costUnits: priceRealtimeUsage(
+          completion.usage,
+          runConfigRef.current.realtimeModel ?? REALTIME_MODEL,
+        ).usd,
         corpusId: 'live-mic',
         runId,
       };
@@ -664,7 +639,15 @@ export function useSessionController(deps: SessionDeps): SessionController {
         driftMinute1ToEnd: null,
       },
       cost: {
-        totalUsd: store.utterances.reduce((sum, u) => sum + u.costUsd, 0),
+        // TICKET 052 — measured utterances only, so a session whose utterances
+        // could not be priced reports `null` (not measured) rather than a free
+        // session. A session that produced NO UTTERANCE is a different fact and
+        // keeps ticket 041's 0: there was nothing to price, and the session is
+        // excluded from every figure by `isAggregatableLiveSession` anyway.
+        totalUsd:
+          store.utterances.length === 0
+            ? 0
+            : sumMeasuredCosts(store.utterances.map((u) => costFromStored(u.costUsd))).usd,
         perMinuteMinute1: null,
         perMinuteFinalMinute: null,
       },
@@ -700,7 +683,9 @@ export function useSessionController(deps: SessionDeps): SessionController {
 
     const startedAt = s.startedAt ?? now;
     const agg = depsRef.current.ledger.aggregates(store.runId ?? '');
-    const costUsd = Object.values(agg.perArm).reduce((sum, a) => sum + a.costUsd, 0);
+    const costUsd = sumMeasuredCosts(
+      Object.values(agg.perArm).map((a) => costFromStored(a.costUsd)),
+    ).usd;
     dispatch({
       type: 'FLUSH_DONE',
       summary: {
@@ -877,12 +862,16 @@ export function useSessionController(deps: SessionDeps): SessionController {
     utterances: state.utteranceCount,
     p50Ms: null,
     p95Ms: null,
-    costUsd: 0,
+    // TICKET 052 — null until a MEASURED cost arrives. `$0.00` on a live
+    // session reads as "this configuration is free", which is the one claim
+    // the footer must never make.
+    costUsd: null,
+    costCell: COST_NOT_MEASURED_CELL,
   };
   if (store.runId) {
     const agg = depsRef.current.ledger.aggregates(store.runId);
     for (const arm of Object.values(agg.perArm)) {
-      footer.costUsd += arm.costUsd;
+      if (arm.costUsd !== null) footer.costUsd = (footer.costUsd ?? 0) + arm.costUsd;
       if (arm.p50Ms !== null) {
         footer.p50Ms = footer.p50Ms === null ? arm.p50Ms : Math.max(footer.p50Ms, arm.p50Ms);
       }
@@ -891,6 +880,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
       }
     }
   }
+  footer.costCell = formatCostUsd(footer.costUsd);
 
   const elapsedMs =
     state.startedAt === null ? 0 : (state.stoppedAt ?? depsRef.current.now()) - state.startedAt;

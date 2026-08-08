@@ -187,7 +187,12 @@ export interface UtteranceRecord {
   timings: CascadeTimestamps | RealtimeTimestamps;
   speechEndSource: 'corpus' | 'vad';
   providers: { stt: string; mt: string; tts: string };
-  costUnits: number;
+  /**
+   * TICKET 052 — metered USD for this utterance, or `null` when it could NOT
+   * be metered. `null` is "not measured"; `0` is the claim that the utterance
+   * was free, and only one of those is ever true of a real turn.
+   */
+  costUnits: number | null;
   error?: string;
   corpusId: string;
   runId: string;

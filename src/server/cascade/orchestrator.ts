@@ -74,6 +74,8 @@ import { SAMPLE_RATE } from '../../core/protocol';
 import type { TimingMark, TimingSink } from '../../core/decorators/index';
 import { withRetry, withTimeout, withTiming } from '../../core/decorators/index';
 import { createMt, createStt, createTts } from '../../core/registry';
+import { priceCascade, rateFor, type StageUsage } from '../../core/pricing';
+import type { ProviderTriple } from '../../core/arms';
 
 export interface CascadeProviders {
   stt: SttProvider;
@@ -103,6 +105,17 @@ export interface CascadeSessionInfo {
 export interface RunCascadeOptions {
   signal?: AbortSignal;
   session?: CascadeSessionInfo;
+  /**
+   * TICKET 052 — the MODEL ids behind the three stages (`arms.ts` MENUS ids,
+   * exactly what `session.start` carries). The registry is keyed by VENDOR and
+   * `provider.name` is therefore a vendor name, which no rate card can price:
+   * `gpt-4o-mini-tts` and `eleven_flash_v2_5` are both "openai"/"elevenlabs"
+   * at that level and they bill on DIFFERENT METERS.
+   *
+   * Absent → every stage prices as `unknown-model`, i.e. NOT MEASURED. Never
+   * a zero: a cascade run nobody could price reports `not measured`.
+   */
+  models?: ProviderTriple;
   /**
    * Optional hook: when provided, per-utterance CascadeTimestamps are also
    * reported here right before utterance.complete (test/observability seam).
@@ -164,6 +177,63 @@ function stageErrorMessage(stage: CascadeStage, err: unknown): string {
 }
 
 /**
+ * TICKET 052 — the cascade's METERED spend for one utterance, in USD, or `null`
+ * when a stage could not be metered.
+ *
+ * THREE VENDORS, THREE RATE CARDS (PRD §5). What this pipeline can honestly
+ * meter today, and what it cannot:
+ *
+ *   STT  · per MINUTE of audio — metered exactly: the samples handed to the
+ *          provider, at SAMPLE_RATE.
+ *   TTS  · per CHARACTER, for a vendor that bills that way (ElevenLabs) —
+ *          metered as ONE REQUEST PER STREAMED CHUNK, which is precisely the
+ *          PRD §5 trap: the 1,000-char minimum applies per request, so twelve
+ *          100-char chunks cost twelve times a naive character count.
+ *   MT   · per TOKEN — NOT metered. `MtProvider.translate` yields text and
+ *          reports no usage, and there is no token count to be had without
+ *          widening the provider protocol. Estimating tokens from characters
+ *          would be an INVENTED number wearing a measured number's clothes.
+ *   TTS  · per TOKEN (gpt-4o-mini-tts) — NOT metered, for the same reason:
+ *          audio-out TOKENS are not derivable from PCM sample counts.
+ *
+ * So today this returns `null` for both cascade arms, and `null` renders as
+ * `not measured`. That is the POINT: a hole that says so is honest, and the
+ * `$0.00` it replaces was not. The per-stage attribution is already wired, so
+ * the moment a provider reports usage the stage prices with no further change.
+ */
+function cascadeCostUsd(
+  models: ProviderTriple | undefined,
+  sttSamples: number,
+  ttsChunks: readonly string[],
+): number | null {
+  if (models === undefined) return null;
+
+  const stt: StageUsage | undefined =
+    sttSamples > 0
+      ? { model: models.stt, shape: 'per-minute', audioMs: (sttSamples / SAMPLE_RATE) * 1000 }
+      : undefined;
+
+  // Only a per-CHARACTER vendor is metered from the chunk list. Handing a
+  // token-billed TTS model a character count would be a shape mismatch, which
+  // is a different (and less informative) way of saying "not metered".
+  const billedChunks = ttsChunks.filter((chunk) => chunk.length > 0);
+  const tts: StageUsage | undefined =
+    rateFor(models.tts)?.shape === 'per-character' && billedChunks.length > 0
+      ? {
+          model: models.tts,
+          shape: 'per-character',
+          // ONE ENTRY PER REQUEST, never a total — a total cannot express the
+          // difference the 1k-char floor makes.
+          requestCharCounts: billedChunks.map((chunk) => chunk.length),
+        }
+      : undefined;
+
+  // MT carries no usage today, so the TOTAL is `stage-unmeasured` and the
+  // per-stage figures that DID meter are simply not reported at record level.
+  return priceCascade({ stt, mt: undefined, tts }).total.usd;
+}
+
+/**
  * Run the cascade pipeline over `source` until the source is exhausted or
  * `opts.signal` aborts. See the module doc-comment for the full contract.
  */
@@ -190,11 +260,17 @@ export async function* runCascade(
     try {
       // ---- STT phase -----------------------------------------------------
       const peekedChunk = peeked.value;
+      // TICKET 052 — the STT stage bills PER MINUTE OF AUDIO, so the meter is
+      // the audio actually handed to it. Counted here, at the one place every
+      // sample of the turn passes through, rather than inferred from a
+      // wall-clock span that includes think time.
+      let sttSamples = peekedChunk.length;
       const turnAudio: AsyncGenerator<Int16Array, void, void> = (async function* () {
         yield peekedChunk;
         for (;;) {
           const r = await shared.next();
           if (r.done) return;
+          sttSamples += r.value.length;
           yield r.value;
         }
       })();
@@ -369,7 +445,7 @@ export async function* runCascade(
           mt: providers.mt.name,
           tts: providers.tts.name,
         },
-        costUnits: 0,
+        costUnits: cascadeCostUsd(opts?.models, sttSamples, targetPartials),
         corpusId: session?.corpusId ?? '',
         runId: session?.runId ?? '',
       };

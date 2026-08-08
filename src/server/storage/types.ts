@@ -91,7 +91,8 @@ export interface RunUtterance {
   category: CorpusCategory;
   timings: Record<string, number | null>;
   transcripts: { source?: string; target?: string };
-  cost: number;
+  /** TICKET 052 — `null` is UNMEASURED, and it is NOT the same fact as `0`. */
+  cost: number | null;
   status: 'complete' | 'failed';
   errors: string[];
 }
@@ -108,7 +109,8 @@ export interface Run {
   timings: Record<string, number | null>;
   transcripts: { source?: string; target?: string };
   outputAudioPath?: string;
-  cost: number;
+  /** TICKET 052 — `null` is UNMEASURED. Never reported as `$0.00`. */
+  cost: number | null;
   errors: string[];
   createdAt: number;
   /**
@@ -169,7 +171,8 @@ export interface BlindComparison {
 export interface LiveSessionUtterance {
   id: string;
   timings: Record<string, number | null>;
-  costUsd: number;
+  /** TICKET 052 — `null` when nothing metered this utterance. */
+  costUsd: number | null;
 }
 
 /** Realtime-only conversation-context policy; 'n/a' for cascade (PRD §17 21a). */
@@ -188,7 +191,8 @@ export interface LiveSession {
   utterances: LiveSessionUtterance[];
   latency: { p50: number | null; p95: number | null; driftMinute1ToEnd: number | null };
   cost: {
-    totalUsd: number;
+    /** TICKET 052 — `null` when NO utterance in the session could be priced. */
+    totalUsd: number | null;
     perMinuteMinute1: number | null;
     perMinuteFinalMinute: number | null;
   };

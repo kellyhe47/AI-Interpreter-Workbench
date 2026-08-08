@@ -125,6 +125,7 @@ import {
 // union in src/harness/corpus.ts is the pre-22a synthetic placeholder kept for
 // bench/soak — importing it here left two copies free to drift apart.
 import type { CorpusCategory } from '../../../core/corpus';
+import { costFromStored, formatCostUsd, sumMeasuredCosts } from '../../../core/pricing';
 import type { WerScore } from '../../../core/wer';
 import {
   isAggregatableLiveSession,
@@ -290,6 +291,16 @@ export interface Provenance {
    * "unrecorded" on a mixed aggregate, which is honest rather than wrong.
    */
   corpusVersion: string | null;
+  /**
+   * TICKET 052 — how many of the aggregate's samples carry a MEASURED cost.
+   *
+   * THE ASSERTION THE DOLLARS CANNOT MAKE. In JavaScript, summing a missing
+   * cost as 0 and skipping it produce the SAME total, so the money alone cannot
+   * tell an honest aggregate from a dishonest one. `$0.06 over 2 of 3 samples`
+   * and `$0.06 over 3 of 3` are different claims and only one is true — the
+   * same reason `completedReps` / `intendedReps` sit beside `n`.
+   */
+  measuredCostSamples: number;
   /** Rendered line. Exact wording is NOT locked — assert containment only. */
   line: string;
 }
@@ -300,7 +311,10 @@ export interface ExperimentArmAggregate {
   n: number;
   p50Ms: number | null;
   p95Ms: number | null;
-  costUsd: number;
+  /** TICKET 052 — measured samples only; `null` when none was priced. */
+  costUsd: number | null;
+  /** Rendered through the ONE formatter: `not measured`, never `$0.00`. */
+  costCell: string;
   /** Cost per audio minute, normalized by the source Recordings' duration. */
   costPerMinuteUsd: number | null;
   provenance: Provenance;
@@ -334,7 +348,10 @@ export interface RecordingGroupRow {
   n: number;
   p50Ms: number | null;
   p95Ms: number | null;
-  costUsd: number;
+  /** TICKET 052 — measured samples only; `null` when none was priced. */
+  costUsd: number | null;
+  /** `not measured`, never `$0.00` — the same rule one tab over. */
+  costCell: string;
   /** True when NO run in the group reaches the experiment aggregates. */
   excludedFromExperiments: boolean;
   /** Why, for the runs that are excluded. Empty when nothing is excluded. */
@@ -392,7 +409,10 @@ export interface CategoryGroupRow {
   n: number;
   p50Ms: number | null;
   p95Ms: number | null;
-  costUsd: number;
+  /** TICKET 052 — measured samples only; `null` when none was priced. */
+  costUsd: number | null;
+  /** `not measured`, never `$0.00`. */
+  costCell: string;
 }
 
 /** A head-to-head between two named arms, built from gate-passing Runs only. */
@@ -515,6 +535,16 @@ function distinct<T>(values: Array<T | undefined>): Set<T> {
   return set;
 }
 
+/**
+ * TICKET 052 — a row's cost, summed over MEASURED samples only and rendered
+ * through the one formatter. An unmeasured sample contributes nothing, and a
+ * row where nothing was measured reports `null` / `not measured` — never `$0.00`.
+ */
+function costOf(values: Array<number | null>): { costUsd: number | null; costCell: string } {
+  const sum = sumMeasuredCosts(values.map(costFromStored));
+  return { costUsd: sum.usd, costCell: formatCostUsd(sum.usd) };
+}
+
 function meanOf(values: number[]): number | null {
   if (values.length === 0) return null;
   return values.reduce((a, b) => a + b, 0) / values.length;
@@ -529,6 +559,7 @@ function buildProvenance(
   arm: ArmTag,
   gatePassing: AnnotatedRun[],
   attempted: AnnotatedRun[],
+  measuredCostSamples: number,
 ): Provenance {
   // TICKET 032 — the arm's ATTEMPTED atoms: every record of every gate-passing
   // Run, failed ones included, or the single Run-level sample when a Run
@@ -561,10 +592,19 @@ function buildProvenance(
   // gathered from two.
   const corpusVersion = corpusVersions.length === 1 ? corpusVersions[0]! : null;
 
+  // TICKET 052 — the cost denominator is DISCLOSED beside N and the reps, for
+  // the same reason those are: `$0.06 over 2 of 3 samples` and `$0.06 over
+  // 3 of 3` are different claims, and the dollars alone cannot tell them apart.
+  // It sits BEFORE the corpus clause so the line's tail stays stable.
+  const measuredSamples = gateSamples.filter((s) =>
+    isAggregatableUtterance(s.run, s.utterance),
+  ).length;
+
   const line =
     `${armLabel(arm)} · ${utteranceCount} utterances · ` +
     `${completedReps} of ${intendedReps} reps completed · ` +
     `endpointing pinned ${PINNED_ENDPOINTING_MS} ms · turn-final trigger · ` +
+    `cost measured on ${measuredCostSamples} of ${measuredSamples} samples · ` +
     `${corpusVersions.length === 0 ? 'corpus version unrecorded' : corpusVersions.join(', ')}`;
 
   return {
@@ -575,6 +615,7 @@ function buildProvenance(
     endpointingMs: PINNED_ENDPOINTING_MS,
     corpusVersions,
     corpusVersion,
+    measuredCostSamples,
     line,
   };
 }
@@ -623,9 +664,15 @@ export function deriveExperimentAggregates(ledger: RunLedger): ExperimentAggrega
       n: entry.n,
       p50Ms: entry.p50Ms,
       p95Ms: entry.p95Ms,
+      // TICKET 052 — VERBATIM from the ledger, holes included. `null` means
+      // nobody priced this arm; it is never softened to 0 on the way through.
       costUsd: entry.costUsd,
-      costPerMinuteUsd: audioMs === 0 ? null : (entry.costUsd * 60_000) / audioMs,
-      provenance: buildProvenance(tag, gatePassing, attempted),
+      costCell: formatCostUsd(entry.costUsd),
+      // DERIVED from the measured spend (PRD §8), so it cannot survive the
+      // total being absent and cannot drift from the figure it came from.
+      costPerMinuteUsd:
+        entry.costUsd === null || audioMs === 0 ? null : (entry.costUsd * 60_000) / audioMs,
+      provenance: buildProvenance(tag, gatePassing, attempted, entry.measuredCostSamples),
     };
   }
 
@@ -695,7 +742,9 @@ export function groupByRecording(ledger: RunLedger): RecordingGroupRow[] {
       failedCount: group.filter((run) => run.status === 'failed').length,
       n: measured.length,
       ...percentilesOf(samples),
-      costUsd: measured.reduce((sum, sample) => sum + sample.cost, 0),
+      // TICKET 052 — measured samples only. The same run that reports
+      // `not measured` in the aggregates cannot report `$0.00` one tab over.
+      ...costOf(measured.map((sample) => sample.cost)),
       excludedFromExperiments: !group.some(isAggregatableRun),
       exclusionReasons,
     };
@@ -748,7 +797,7 @@ export function groupByCategory(ledger: RunLedger): CategoryGroupRow[] {
       arm: first.sample.arm,
       n: group.length,
       ...percentilesOf(samples),
-      costUsd: group.reduce((sum, entry) => sum + entry.sample.cost, 0),
+      ...costOf(group.map((entry) => entry.sample.cost)),
     };
   });
 }

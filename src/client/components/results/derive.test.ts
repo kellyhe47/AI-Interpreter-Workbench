@@ -126,6 +126,8 @@ describe('deriveExperimentAggregates — the ticket-010 gate, not a second one',
         p50Ms: mine.p50Ms,
         p95Ms: mine.p95Ms,
         costUsd: mine.costUsd,
+        // TICKET 052 — the measured-cost denominator delegates too.
+        measuredCostSamples: mine.provenance.measuredCostSamples,
       }).toEqual(entry);
     }
   });
@@ -368,17 +370,24 @@ describe('one ledger under every view — no second source of truth', () => {
 
     const agg = deriveExperimentAggregates(ledger).perArm['B']!;
     const ledgerAgg = ledger.runAggregates().perArm['B']!;
-    expect({ n: agg.n, p50Ms: agg.p50Ms, p95Ms: agg.p95Ms, costUsd: agg.costUsd }).toEqual(
-      ledgerAgg,
-    );
+    // TICKET 052 — `measuredCostSamples` rides on the ledger aggregate beside
+    // `costUsd`, and the derivation reports it through provenance; both are
+    // compared so the delegation stays total.
+    expect({
+      n: agg.n,
+      p50Ms: agg.p50Ms,
+      p95Ms: agg.p95Ms,
+      costUsd: agg.costUsd,
+      measuredCostSamples: agg.provenance.measuredCostSamples,
+    }).toEqual(ledgerAgg);
 
     const byRecording = groupByRecording(ledger).filter((r) => !r.excludedFromExperiments);
     expect(byRecording.reduce((sum, r) => sum + r.n, 0)).toBe(agg.n);
-    expect(byRecording.reduce((sum, r) => sum + r.costUsd, 0)).toBeCloseTo(agg.costUsd, 10);
+    expect(byRecording.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)).toBeCloseTo(agg.costUsd!, 10);
 
     const byCategory = groupByCategory(ledger);
     expect(byCategory.reduce((sum, r) => sum + r.n, 0)).toBe(agg.n);
-    expect(byCategory.reduce((sum, r) => sum + r.costUsd, 0)).toBeCloseTo(agg.costUsd, 10);
+    expect(byCategory.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)).toBeCloseTo(agg.costUsd!, 10);
   });
 });
 
@@ -572,7 +581,7 @@ describe('no hardcoded figures — every number comes from the records', () => {
     const ledger = sweptLedger([700, 780, 900, 1000, 1200], 0.002);
     const arm = deriveExperimentAggregates(ledger).perArm['B']!;
     const minutes = (5 * RECORDING_DURATION_MS) / 60_000;
-    expect(arm.costPerMinuteUsd).toBeCloseTo(arm.costUsd / minutes, 10);
+    expect(arm.costPerMinuteUsd).toBeCloseTo(arm.costUsd! / minutes, 10);
     expect(arm.costPerMinuteUsd).toBeCloseTo(0.02, 10);
   });
 });

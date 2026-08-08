@@ -153,7 +153,8 @@ export interface SessionSummary {
   elapsedMs: number;
   utterances: number;
   dropped: number;
-  costUsd: number;
+  /** TICKET 052 — `null` is NOT MEASURED; it is not a session that cost $0. */
+  costUsd: number | null;
 }
 
 export interface SessionState {

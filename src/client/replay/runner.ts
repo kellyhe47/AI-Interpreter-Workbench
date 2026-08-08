@@ -571,7 +571,8 @@ export function abandonedRunStub(args: {
     status: 'failed',
     timings: {},
     transcripts: {},
-    cost: 0,
+    // TICKET 052 — an abandoned run measured NOTHING, cost included.
+    cost: null,
     errors: [args.reason],
     createdAt: args.createdAt,
   };
@@ -794,7 +795,9 @@ function attributeUtterances(args: {
         source: buckets.source.get(utt),
         target: buckets.targetFinal.get(utt) ?? (targetDelta.length > 0 ? targetDelta : undefined),
       },
-      cost: costPerMinUsd * (spanMs / 60_000),
+      // TICKET 052 — a transport that declares NO rate has not measured this
+      // utterance's cost. `null` says so; `0` would report it as free.
+      cost: costPerMinUsd > 0 ? costPerMinUsd * (spanMs / 60_000) : null,
       // An utterance with no output audio has no end-to-end number to report,
       // which is a fact about THAT utterance and not about the Run. Keyed on
       // the RESOLVED value (040): a track-carried utterance DID produce audio
@@ -1171,7 +1174,12 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       source: sourceTranscript,
       target: targetFinal ?? (targetTranscript.length > 0 ? targetTranscript : undefined),
     },
-    cost: transport.costPerMinUsd * (recording.durationMs / 60_000),
+    // TICKET 052 — same rule at Run level. No declared rate, no figure: Replay
+    // reports `not measured` rather than a `$0.00` that reads as a free run.
+    cost:
+      transport.costPerMinUsd > 0
+        ? transport.costPerMinUsd * (recording.durationMs / 60_000)
+        : null,
     utterances,
     errors,
     createdAt: deps.now(),

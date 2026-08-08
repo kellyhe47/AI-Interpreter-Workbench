@@ -146,7 +146,7 @@ describe('runSamples — a Run expands into its measured atoms', () => {
     // speech_end crossed with a record's audio_queued.
     expect(samples.map((s) => s.latencyMs)).toEqual([1, 2, 3, 4].map((k) => corpusLatencyMs(k, 1)));
     // The four splits sum back to the whole-clip Run cost EXACTLY.
-    expect(samples.reduce((sum, s) => sum + s.cost, 0)).toBeCloseTo(CORPUS_RUN_COST_USD, 10);
+    expect(samples.reduce((sum, s) => sum + (s.cost ?? 0), 0)).toBeCloseTo(CORPUS_RUN_COST_USD, 10);
     // The arm is the parent Run's derived tag on every record.
     expect(samples.every((s) => s.arm === 'B')).toBe(true);
   });
@@ -265,6 +265,8 @@ describe('deriveExperimentAggregates — 3 recordings × 4 utterances × 5 reps 
       p50Ms: derived.p50Ms,
       p95Ms: derived.p95Ms,
       costUsd: derived.costUsd,
+      // TICKET 052 — the measured-cost denominator delegates too.
+      measuredCostSamples: derived.provenance.measuredCostSamples,
     }).toEqual(fromLedger);
   });
 });
@@ -301,7 +303,7 @@ describe('groupByRecording — 20 samples across 5 Runs, and never 20 reps', () 
     expect(rows).toHaveLength(CORPUS_RECORDING_IDS.length);
     expect(arm.n).toBe(CORPUS_SAMPLES_PER_ARM);
     expect(rows.reduce((sum, r) => sum + r.n, 0)).toBe(arm.n);
-    expect(rows.reduce((sum, r) => sum + r.costUsd, 0)).toBeCloseTo(arm.costUsd, 10);
+    expect(rows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)).toBeCloseTo(arm.costUsd!, 10);
   });
 });
 
@@ -352,7 +354,7 @@ describe('groupByCategory — one row per (category × arm), non-empty at last',
     const arm = deriveExperimentAggregates(ledger).perArm['B']!;
     const rows = groupByCategory(ledger);
     expect(rows.reduce((sum, r) => sum + r.n, 0)).toBe(arm.n);
-    expect(rows.reduce((sum, r) => sum + r.costUsd, 0)).toBeCloseTo(arm.costUsd, 10);
+    expect(rows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)).toBeCloseTo(arm.costUsd!, 10);
   });
 });
 
@@ -386,7 +388,7 @@ describe('a record inside an excluded Run reaches no aggregate', () => {
     // The excluded records are loud on purpose: 5.00 s and $0.500 each.
     expect(polluted.some((r) => r.p50Ms === EXCLUDED_LATENCY_MS)).toBe(false);
     expect(polluted.some((r) => r.p95Ms === EXCLUDED_LATENCY_MS)).toBe(false);
-    expect(polluted.some((r) => r.costUsd > EXCLUDED_COST_USD)).toBe(false);
+    expect(polluted.some((r) => (r.costUsd ?? 0) > EXCLUDED_COST_USD)).toBe(false);
   });
 
   it.each(Object.entries(CORPUS_EXCLUSION_RECORDING_IDS))(
@@ -488,7 +490,11 @@ describe('provenance — utteranceCount is real, and reps are not utterances', (
     expect(p.line).toContain(`${CORPUS_REPS} of ${CORPUS_REPS} reps completed`);
     // 4 utterances × 5 reps must NEVER render as 20 reps — nor as 60.
     expect(p.line).not.toMatch(/\b20 (of |reps)/);
-    expect(p.line).not.toMatch(/\b60\b/);
+    // TICKET 052 — the line now legitimately names the SAMPLE count in its
+    // cost-denominator clause ('cost measured on 60 of 60 samples'), so the
+    // guard is narrowed to the thing it was written to catch: 60 being
+    // reported as a REP or an UTTERANCE count.
+    expect(p.line).not.toMatch(/\b60 (of \d+ )?(reps|utterances)/);
     expect(p.line).not.toMatch(/\b12 (of |reps)/);
   });
 

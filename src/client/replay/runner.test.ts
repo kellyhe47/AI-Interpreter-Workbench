@@ -286,8 +286,9 @@ describe('runOnce — the produced Run', () => {
     // A cascade run's snapshot is its triple — the ledger reads model ids here.
     expect(run.modelSnapshots).toMatchObject({ ...DEFAULT_CASCADE_TRIPLE });
     expect(run.transcripts).toEqual({ source: 'hello', target: 'hola' });
-    expect(typeof run.cost).toBe('number');
-    expect(run.cost).toBeGreaterThanOrEqual(0);
+    // TICKET 052 — the fixture transport declares no rate, so the run's cost is
+    // NOT MEASURED. `null`, never 0: a 0 would report the run as free.
+    expect(run.cost).toBeNull();
     expect(typeof run.createdAt).toBe('number');
     expect(run.errors).toEqual([]);
 
@@ -830,8 +831,8 @@ describe('runOnce — per-utterance cost (ticket 031)', () => {
     utterances.forEach((u, i) => expect(u.cost).toBeCloseTo(expected[i]!, 10));
 
     expect(run.cost).toBeCloseTo(1, 10);
-    const total = utterances.reduce((sum, u) => sum + u.cost, 0);
-    expect(total).toBeCloseTo(run.cost, 10);
+    const total = utterances.reduce((sum, u) => sum + (u.cost ?? 0), 0);
+    expect(total).toBeCloseTo(run.cost!, 10);
   });
 });
 
@@ -935,7 +936,7 @@ describe('runOnce — backward compatibility (ticket 031 REGRESSION GUARDS)', ()
     expect(utterances[0]!.timings.speech_end).toBe(t0 + 300);
     expect(utterances[0]!.timings.audio_queued).toBe(t0 + 130);
     // The whole clip is one span, so the split is the Run cost.
-    expect(utterances[0]!.cost).toBeCloseTo(run.cost, 10);
+    expect(utterances[0]!.cost).toBeCloseTo(run.cost!, 10);
     expect(run.status).toBe('complete');
   });
 
