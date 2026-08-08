@@ -663,16 +663,33 @@ export function useSessionController(deps: SessionDeps): SessionController {
       if (fresh) {
         store.runId = `session-${now}`;
         resetSessionStore();
+        // THE MICROPHONE COMES FIRST. `requestCapture()` returns synchronously
+        // (it kicks off a promise), so the resume below still runs in this same
+        // handler tick and keeps the user gesture — but nothing it does can
+        // stop the mic request from being issued.
+        void requestCapture();
         // TICKET 047 (round 2) — the ONLY `ctx.resume()` in the client. An
         // AudioContext built under an autoplay policy can start `suspended`,
         // and with Live's play control deleted there is no affordance left to
         // recover it by hand, so the resume happens HERE: inside the real user
-        // gesture that started the session, where the browser honours it.
-        // This is not a control — there is nothing to press and nothing to
-        // un-press — it only guarantees the context is running before the
-        // first chunk arrives. Autoplay stays unconditional.
-        store.playback.play();
-        void requestCapture();
+        // gesture that started the session, where the browser honours it. This
+        // is not a control — there is nothing to press and nothing to un-press.
+        //
+        // ROUND 3 — and it is BEST-EFFORT. `play()` constructs the AudioContext
+        // synchronously, and `new AudioContext()` throws for real: Chrome at
+        // its per-document context limit (reachable after a Replay QA pass —
+        // `playRun`/`playTake` build one per press and never close it), Safari
+        // under some policy states. Ordered first and unguarded, that throw
+        // escaped into a React event handler, `startCapture` was never called,
+        // and the session sat in 'requesting' forever with no denied card and
+        // no retry that could help: Live silently dead. A failed resume costs
+        // at worst silent cascade audio — the thing this line exists to make
+        // less likely — so it must never cost the microphone.
+        try {
+          store.playback.play();
+        } catch {
+          /* autoplay-policy recovery is best-effort; the session still runs */
+        }
       }
     },
     stop: () => stopRef.current(),

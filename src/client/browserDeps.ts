@@ -141,10 +141,10 @@ const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
  * Over WebRTC OpenAI sends the response audio on the media track only, so the
  * one conventional way to hear it is a hidden `<audio>` element carrying the
  * remote MediaStream as `srcObject`; there is no PCM to feed an AudioContext.
- * `autoplay` is the WHOLE playback path — TICKET 047 deleted Live's transport
- * control, so attaching the stream is what has to make it audible, with no
- * interaction of any kind. The seam still exposes `play` and `pause` because
- * Replay's muted sink is the same object; nothing in Live calls either.
+ * `autoplay` is the WHOLE playback path — TICKET 047 deleted the play/pause
+ * control from Live, so attaching the stream is what has to make it audible,
+ * with no interaction of any kind. It keeps its play()/pause() methods because
+ * Replay's muted sink is this same object; nothing in Live calls either one.
  *
  * The element is created lazily and reused across reconnects: attaching a new
  * stream to the same element is exactly the reconnect story, and one element
