@@ -218,3 +218,69 @@ every number.
   mattered) is fixed and rendered honestly, and the stub is findable by `(repIndex, arm)`. Follow-up.
 - The setup-await leak — inherent to abandoning rather than terminating; the stub makes the rep
   accounted for. Same follow-up.
+
+---
+
+## ROUND 4 — re-review of round 3
+
+R3-3 and R3-4 are complete and verified: `maxConcurrentTransports` fell 2 -> 1 by measurement, and
+the orphaned-artifact cost is recorded accurately. Round 2's three slips (the reason gate, the
+`wrote` guard, the `wrote` assignment) are now all CAUGHT. The `untilSettledOrAborted` generalisation
+was verified in all three clauses — no call site loses or gains an error, the `DEADLINE` symbol
+discrimination is sound even for a `T` that is `undefined`, and every path keeps a handler.
+
+R3-1 is architecturally right — bounding the POST is the correct move — but its correctness is
+**delegated to an inequality that is stated incompletely**, and it introduced a new way to reach the
+same wrong number.
+
+### R4-1 (MAJOR) — the budget guard omits the run's DOMINANT cost; the duplicate returns at real constants
+`runner.unboundedWaits.test.ts:544`, header at `runner.ts:129`. The guard asserts
+`30+2+30+15 = 77 < 120` and its comment enumerates the worst case as "park on `finished`, wedge the
+close, hang the upload, then hang the POST." **That omits PACING** — up to 45 s at 1x for a §9 take,
+the largest single cost in a run — and both unbounded setup awaits (`recordings.getAudio`,
+`transport.start()`). The guard's own slack is 43 s, **less than the maximum clip length**, before
+any setup latency at all.
+Reproduced at production constants (45 s clip, `getAudio` 10 s, `transport.start()` 25 s, hung
+upload, POST landing at 20 s): **2 aggregatable Runs for rep 1, n=2, "1 of 1 reps completed",
+`summary.failures = []`.** The exact R3-1 defect, with the header asserting it is impossible. A 25 s
+WebRTC handshake is not exotic on a bad link — and `transport.start()` is precisely the wait this
+round decided to leave unbounded.
+Structural mitigation that DOES hold: a run spending the full 30 s completion budget is `failed` by
+construction and can never be the duplicate, so the reachable worst case for a COMPLETE run is
+`clip + ~5 + 2 + 30 + 15` — setup must exceed ~23 s.
+**DECIDED — take BOTH fixes:**
+1. Arithmetic: put the clip maximum INTO the guard and raise `RUN_TIMEOUT_MS` to 180 s
+   (45 + 77 = 122; 180 leaves 58 s of headroom).
+2. Structural, and stronger than any arithmetic: `createRunOnceExecutor` already tracks `wrote`.
+   **Surface it, and never retry a cell whose attempt already POSTed.** That kills the duplicate
+   independently of timing, which is what we actually want — an inequality is a promise about
+   constants nobody will re-derive next time one is tuned.
+
+### R4-2 (MAJOR) — bounding the POST created a NEW way to delete a rep from the denominator
+`runner.ts:1170` and the executor's `create` wrapper. Probe: 3 reps, rep 2's POST never answers.
+```
+ledger rows: rep 1, rep 3     n = 2     line = "2 of 2 reps completed"
+summary.completedRuns = 3     summary.failures = []
+```
+**Three reps ran; two rows exist; provenance claims 2 of 2.** This is R2-3's failure mode —
+*"the denominator silently falls back to the numerator and every line reads a clean N of N"* — with
+a trigger CREATED BY R3-1: bounding the POST converts "the run hangs" into "the run returns
+`complete`, the batch counts it as completed, and no row exists". No stub is written, because the
+attempt was never abandoned so `onAbandoned` never fires, and `wrote` was set at call time anyway.
+The `run record post failed…` line rides the record that was never stored.
+**DECIDED:** a run whose POST went unacknowledged must NOT be reported as completed by the batch —
+surface it in `summary.failures` with the reason. That invents no ledger row and adds no duplicate
+risk. **Also file 050** for the robust fix (idempotent POST by run id, server-side), after which a
+retry is safe and the row is exactly-once; that is the only thing that can restore the denominator
+honestly, and it is a server change out of scope here.
+
+### R4-3 (MINOR) — the rejection-propagation decision has no DETERMINISTIC test
+Reverting `untilSettledOrAborted` to swallowing rejections was caught in only **2 of 6** full-suite
+runs, and only ever as a suite-level crash in an unrelated file — never as an assertion. **That will
+read as flake and be retried away.** The behaviour is correct; it needs a real test that a
+sweep-path `transport.start()` which REJECTS still loses the run its stage.
+
+### R4-4 (MINOR) — the already-aborted branch's `void pending.catch()` is unpinned
+Deleting it leaves 1858/1858 green. Unlike the R2-6 lines (covered by `Promise.race`), this one is
+the ONLY handler on that path, so it is load-bearing by construction. The other AC5 tests install a
+`process.on('unhandledRejection')` listener; extend that pattern here.
