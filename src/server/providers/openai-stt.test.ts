@@ -163,24 +163,35 @@ describe('OpenAiStt adapter specifics', () => {
     expect(appends[1]!.audio).toBe(int16ToBase64(chunk2));
   });
 
-  it('maps transcription deltas to accumulated partials and completed to ONE turn-final', async () => {
+  /**
+   * TICKET 051 — `input_audio_buffer.speech_stopped` was previously dropped
+   * with the other housekeeping events. It is the ONLY signal that says when
+   * the endpointer decided the speaker had stopped, and without it the cascade
+   * orchestrator has nothing to stamp `vad_fired` from but the closing
+   * transcript's own instant — making "detected end of speech -> transcript"
+   * identically zero on every Live utterance.
+   */
+  it('maps transcription deltas to accumulated partials, speech_stopped, and ONE turn-final', async () => {
     const { wsFactory } = makeSetup();
     const stt = new OpenAiStt({ apiKey: 'test-key' }, { wsFactory });
     const events = await collect(stt.transcribe(twoChunkAudio()));
 
-    // Deltas 'hel' + 'lo' -> accumulated partial texts; completed -> final.
-    expect(events.map((e) => e.type)).toEqual(['partial', 'partial', 'final']);
-    expect(events.map((e) => e.text)).toEqual(['hel', 'hello', 'hello world']);
+    // Deltas 'hel' + 'lo' -> accumulated partials; speech_stopped -> the
+    // endpointer's mark; completed -> the turn-final.
+    expect(events.map((e) => e.type)).toEqual(['partial', 'partial', 'speech_stopped', 'final']);
+    expect(events.map((e) => e.text)).toEqual(['hel', 'hello', '', 'hello world']);
     expect(events.filter((e) => e.type === 'final')).toHaveLength(1);
     expect(events[events.length - 1]!.type).toBe('final');
+    // It arrives BEFORE the transcript — that gap is the thing being measured.
+    const stopped = events.findIndex((e) => e.type === 'speech_stopped');
+    expect(stopped).toBeLessThan(events.length - 1);
   });
 
-  it('ignores speech_started/speech_stopped/committed/unknown event types', async () => {
+  it('ignores speech_started/committed/unknown event types', async () => {
     const { wsFactory } = makeSetup([
       { type: 'input_audio_buffer.speech_started' },
       { type: 'some.future.event', payload: 42 },
       { type: 'conversation.item.input_audio_transcription.delta', delta: 'hi' },
-      { type: 'input_audio_buffer.speech_stopped' },
       { type: 'input_audio_buffer.committed' },
       { type: 'conversation.item.input_audio_transcription.completed', transcript: 'hi' },
     ]);

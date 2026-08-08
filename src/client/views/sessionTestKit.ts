@@ -62,8 +62,13 @@ export const COPY = {
   realtimeFail: 'opaque failure — no stage attribution · session still running',
   ctxNoteDefault: 'full conversation replayed each turn — cost climbs with session length',
   ctxNoteTrimmed: 'history deleted after each response — flat cost, measured against default',
-  cascadeIntervals: '5 intervals · all visible',
-  realtimeIntervals: '3 intervals · 1 opaque',
+  // TICKET 051 — Live no longer renders `endpointing` (it needs corpus ground
+  // truth for when the human stopped, which Live has none of) and Arm A no
+  // longer renders a separate `queue` (over WebRTC there is no observable
+  // instant between "model produced audio" and "audio queued"). The note has
+  // to count what is actually on the card.
+  cascadeIntervals: '3 intervals · all visible',
+  realtimeIntervals: '1 interval · opaque',
   disconnectedBanner:
     'Disconnected — reconnect attempts exhausted (5 of 5) · transcript history intact',
 } as const;

@@ -44,11 +44,12 @@ afterEach(() => {
 const CASCADE_SESSION = { mode: 'cascade' as const };
 
 // ---------------------------------------------------------------------------
-// AC — labelled per-stage milliseconds: 5 for cascade, 3 for realtime
+// AC — span-labelled per-stage figures: 3 for cascade, 1 for realtime
+// (ticket 051; the exhaustive contract lives in LiveView.timings.test.tsx)
 // ---------------------------------------------------------------------------
 
 describe('the single target card', () => {
-  it('cascade: in-flight bar, then ready with text, duration readout, FIVE labelled stage ms', async () => {
+  it('cascade: in-flight bar, then ready with text, duration readout, THREE span-labelled stages', async () => {
     renderApp({
       initialState: CASCADE_SESSION,
       scripts: { cascade: cascadeUtteranceScript() },
@@ -75,29 +76,32 @@ describe('the single target card', () => {
     expect(card.querySelector('[data-utterance-duration]')).toHaveTextContent('2.1 s');
     expect(within(card).queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
 
-    // Numbers, not bars alone: every interval carries a LABEL and a value.
+    // TICKET 051 — numbers, not bars alone, and every row NAMES ITS SPAN.
+    // The old `endpointing` row is gone (Live cannot know when the human
+    // stopped, only when the endpointer decided they had) and `tts` + `queue`
+    // are one observable span: text in, audio ready.
+    // Marks: vad_fired 500 · stt_final 542 · mt_first_token 840 · audio_queued
+    // 1053 -> 0.04 / 0.30 / 0.21, total 0.55 s from the detected end of speech.
     const stages: Array<[string, string]> = [
-      ['endpointing', '500 ms'],
-      ['stt', '42 ms'],
-      ['mt', '298 ms'],
-      ['tts', '201 ms'],
-      ['queue', '12 ms'],
+      ['transcribe', '0.04 s'],
+      ['translate', '0.30 s'],
+      ['speak', '0.21 s'],
     ];
-    for (const [label, ms] of stages) {
+    for (const [label, s] of stages) {
       const row = stageRow(card, label);
       expect(row, `stage row ${label}`).not.toBeNull();
       expect(row).toHaveTextContent(label);
-      expect(row).toHaveTextContent(ms);
+      expect(row).toHaveTextContent(s);
     }
-    expect(card.querySelectorAll('[data-stage-row]')).toHaveLength(5);
+    expect(card.querySelectorAll('[data-stage-row]')).toHaveLength(3);
+    expect(stageRow(card, 'endpointing')).toBeNull();
 
-    expect(card).toHaveTextContent('total');
-    expect(card).toHaveTextContent('1053 ms');
+    expect(card.querySelector('[data-live-total]')).toHaveTextContent('0.55 s');
     expect(card).toHaveTextContent(COPY.cascadeIntervals);
     expect(card).not.toHaveTextContent(COPY.realtimeIntervals);
   });
 
-  it('realtime: THREE labelled rows with the model interval explicitly labelled opaque', async () => {
+  it('realtime: ONE labelled row — the model interval, explicitly labelled opaque', async () => {
     renderApp({ scripts: { realtime: realtimeUtteranceScript() } });
     await clickStartMicrophone();
     await advance(1100);
@@ -108,27 +112,23 @@ describe('the single target card', () => {
     expect(card.querySelector('[data-target-arch]')).toHaveTextContent('Realtime');
     expect(card.querySelector('[data-target-arch]')).toHaveTextContent(REALTIME_MODEL);
 
-    const stages: Array<[string, string]> = [
-      ['endpointing', '500 ms'],
-      ['model', '471 ms'],
-      ['queue', '9 ms'],
-    ];
-    for (const [label, ms] of stages) {
-      const row = stageRow(card, label);
-      expect(row, `stage row ${label}`).not.toBeNull();
-      expect(row).toHaveTextContent(label);
-      expect(row).toHaveTextContent(ms);
-    }
-    expect(card.querySelectorAll('[data-stage-row]')).toHaveLength(3);
-    // No cascade-only rows on a realtime card.
-    for (const label of ['stt', 'mt', 'tts']) {
+    // TICKET 051 — one row, because one model does everything and there is
+    // exactly ONE observable span: server_speech_stopped 500 -> audio_queued
+    // 980 = 0.48 s. This script also carries a `first_audio_delta` mark, which
+    // WebRTC never sends; the figure must ignore it (0.47 / 0.01 would betray
+    // an implementation reading it).
+    expect(card.querySelectorAll('[data-stage-row]')).toHaveLength(1);
+    const row = stageRow(card, 'model');
+    expect(row).not.toBeNull();
+    expect(row).toHaveTextContent('0.48 s');
+    expect(row).not.toHaveTextContent('0.47 s');
+    for (const label of ['endpointing', 'queue', 'stt', 'mt', 'tts', 'transcribe']) {
       expect(stageRow(card, label), `${label} row must not exist`).toBeNull();
     }
 
     // The model interval is labelled opaque — the asymmetry is the finding.
     expect(stageRow(card, 'model')).toHaveTextContent(/opaque/i);
-    expect(card).toHaveTextContent('total');
-    expect(card).toHaveTextContent('980 ms');
+    expect(card.querySelector('[data-live-total]')).toHaveTextContent('0.48 s');
     expect(card).toHaveTextContent(COPY.realtimeIntervals);
   });
 });
