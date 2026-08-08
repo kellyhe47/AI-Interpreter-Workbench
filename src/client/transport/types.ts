@@ -112,7 +112,17 @@ export interface InterpreterTransport {
   readonly label: string;
   readonly costPerMinUsd: number;
   start(config: TransportConfig): Promise<void>;
-  stop(): void;
+  /**
+   * Tear the session down.
+   *
+   * TICKET 046 ROUND 2 (R2-7) — MAY return a promise that settles once the
+   * transport's audio contexts are really closed. A realtime Replay run builds
+   * TWO AudioContexts and Chrome caps concurrent ones (~6), so a 60-run sweep
+   * that never waits for a close can make a later construction throw and kill a
+   * run. `runOnce` AWAITS this; Live's router does not need to (one session at a
+   * time), and every transport that closes nothing keeps returning void.
+   */
+  stop(): void | Promise<void>;
   /** 24 kHz mono PCM16 mic chunk. No-op for realtime (mic rides WebRTC media). */
   sendAudio(pcm: Int16Array): void;
   setHandlers(handlers: TransportHandlers): void;

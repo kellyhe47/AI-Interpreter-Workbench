@@ -201,10 +201,31 @@ export interface OutboundAudioSink {
 export interface InboundAudioTap {
   /** Begin capturing the model's inbound media stream. */
   attach(stream: RtcMediaStreamLike): void;
+  /**
+   * ROUND 2 (R2-4) — OPEN the capture gate: the model has started speaking
+   * (`output_audio_buffer.started`). Frames that arrive while the gate is shut
+   * are DROPPED, never buffered, so an Arm A file is the model's speech and not
+   * the whole ~45 s run. Multiple windows CONCATENATE into one recording.
+   */
+  startWindow(): void;
+  /**
+   * ROUND 2 (R2-4) — CLOSE the capture gate (`output_audio_buffer.stopped`),
+   * after a tail grace of `INBOUND_TAIL_GRACE_MS` so the last syllable — still
+   * in flight when the event lands — is not clipped.
+   */
+  endWindow(): void;
   /** Everything captured so far, 24 kHz mono PCM16, in arrival order. */
   take(): Int16Array;
-  /** Release the tap (close the context). Idempotent; captured audio survives. */
-  close(): void;
+  /**
+   * Release the tap (close the context). Idempotent; captured audio survives.
+   *
+   * ROUND 2 (R2-7) — returns a promise that settles when the context is really
+   * closed. A realtime Replay run builds TWO AudioContexts and Chrome caps
+   * concurrent ones (~6), so across a 60-run sweep a fire-and-forget close can
+   * make a later construction throw and kill a run. It never REJECTS: a context
+   * that failed to close is not something a run can act on.
+   */
+  close(): void | Promise<void>;
 }
 
 export interface RtcPeerConnectionLike {

@@ -48,6 +48,22 @@ import type { InboundAudioTap } from '../transport/realtime';
 /** The tap's context rate. Derived from the wire rate, never re-literalled. */
 export const INBOUND_SAMPLE_RATE = SAMPLE_RATE;
 
+/**
+ * ROUND 2 (R2-4) — how long capture continues past `output_audio_buffer.stopped`.
+ *
+ * The event marks the end of the model's OUTPUT BUFFER, not the end of the sound
+ * arriving over RTP: the last syllable is still in flight when it lands. 250 ms
+ * is a syllable's worth of tail — enough that nothing audible is clipped, short
+ * enough that the inter-utterance silence which would unblind blind compare is
+ * still dropped.
+ */
+export const INBOUND_TAIL_GRACE_MS = 250;
+
+/** The grace expressed in SAMPLES — the only unit the capture node counts in. */
+export const INBOUND_TAIL_GRACE_SAMPLES = Math.round(
+  (INBOUND_TAIL_GRACE_MS * INBOUND_SAMPLE_RATE) / 1000,
+);
+
 export interface InboundAudioProcessEventLike {
   inputBuffer: { getChannelData(channel: number): Float32Array };
 }
@@ -181,6 +197,9 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
       processor = nextProcessor;
       gain = nextGain;
     },
+    // STUB (test-writer, round 2) — the capture gate. Implement R2-4 here.
+    startWindow(): void {},
+    endWindow(): void {},
     take(): Int16Array {
       // NON-DESTRUCTIVE: the runner reads this AFTER stop() has closed the tap,
       // and a second read (upload, then playback) must see the same recording.

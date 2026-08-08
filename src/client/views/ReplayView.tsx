@@ -141,6 +141,7 @@ import type {
 import type { CaptureDenied, RecordedTake, TakeRecorder } from '../replay/capture';
 import type { SegmentedUtterance } from '../replay/segment';
 import type { RunOnceConfig, RunOnceResult } from '../replay/runner';
+import type { InterpreterTransport } from '../transport/types';
 import type { BlindComparison, Recording, Run } from '../state/ledger';
 
 /** One manual run request, as the view asks for it. */
@@ -208,6 +209,20 @@ export interface ReplayDeps {
    * therefore owns where a judgement lands.
    */
   blindComparisons?: BlindComparisonsClient;
+
+  /**
+   * TICKET 046 ROUND 2 (R2-1) — the transport factory `runOnce` is bound to.
+   *
+   * OPTIONAL and NOT consumed by this view, for exactly the reason
+   * `blindComparisons` above is not: it is a HOST fact. It exists because the
+   * Replay transport wiring (the outbound sink, the inbound tap, the muted
+   * remote sink) is the part of this ticket that lives in the product and
+   * nowhere else, and a wiring assertion that reads the module's SOURCE TEXT is
+   * satisfied by an import line — the property can be deleted outright and every
+   * test stays green. A production bag MUST set this to the very function it
+   * hands `runOnce`, so the wiring is assertable on the CONSTRUCTED object.
+   */
+  createTransport?: (config: RunOnceConfig) => InterpreterTransport;
 
   /* --- ticket 036: the record-a-corpus-take seams (PRD §7 step 1) --- */
 
