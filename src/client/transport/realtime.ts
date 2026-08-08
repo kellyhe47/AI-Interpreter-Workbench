@@ -180,6 +180,33 @@ export interface OutboundAudioSink {
   close(): void;
 }
 
+/**
+ * TICKET 046 — where the INBOUND remote stream is CAPTURED (not played).
+ *
+ * The exact mirror of `OutboundAudioSink`, one direction round: over WebRTC the
+ * model's audio exists ONLY on the media track, so `onAudio` never fires and an
+ * Arm A run has nothing to upload and nothing blind compare can play. A tap on
+ * the same stream `RemoteAudioSink` receives turns that track back into the
+ * 24 kHz mono PCM16 the cascade path produces.
+ *
+ * An INJECTABLE seam, for the same reason its two siblings are: jsdom has no
+ * `AudioContext` and no `MediaStream`. Production builds one with
+ * `createInboundAudioTap` (audio/inboundAudio.ts); tests inject a recorder.
+ *
+ * CAPTURE IS NOT PLAYBACK and it is not measurement: the tap never sounds
+ * anything (Replay autoplays nothing, PRD §7) and its samples never reach
+ * `onAudio`, because `onAudio` is what stamps `audio_queued` in the runner and
+ * Arm A's `audio_queued` must keep coming from `output_audio_buffer.started`.
+ */
+export interface InboundAudioTap {
+  /** Begin capturing the model's inbound media stream. */
+  attach(stream: RtcMediaStreamLike): void;
+  /** Everything captured so far, 24 kHz mono PCM16, in arrival order. */
+  take(): Int16Array;
+  /** Release the tap (close the context). Idempotent; captured audio survives. */
+  close(): void;
+}
+
 export interface RtcPeerConnectionLike {
   createDataChannel(label: string): RtcDataChannelLike;
   createOffer(): Promise<RtcSessionDescriptionLike>;
@@ -232,6 +259,16 @@ export interface RealtimeDeps {
    * and a second synthesized track would compete with it.
    */
   createOutboundAudioSink?: () => OutboundAudioSink;
+  /**
+   * TICKET 046 (OPTIONAL) — builds the INBOUND tap that captures the model's
+   * media-track audio. A FACTORY for the same reason its outbound twin is one:
+   * the tap owns an AudioContext, so nothing may be constructed until an audio
+   * track actually arrives, and a bag built in jsdom must stay harmless.
+   *
+   * REPLAY ONLY. Live persists no audio at all (§17 19h), so its bag never
+   * wires this and a Live session captures nothing.
+   */
+  createInboundAudioTap?: () => InboundAudioTap;
 }
 
 export interface RealtimeTransportOptions {
@@ -558,5 +595,12 @@ export class RealtimeTransport implements InterpreterTransport {
 
   setHandlers(handlers: TransportHandlers): void {
     this.handlers = handlers;
+  }
+
+  /**
+   * TICKET 046 — STUB. The captured inbound audio, 24 kHz mono PCM16.
+   */
+  takeOutputAudio(): Int16Array {
+    return new Int16Array(0);
   }
 }

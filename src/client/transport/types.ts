@@ -116,4 +116,19 @@ export interface InterpreterTransport {
   /** 24 kHz mono PCM16 mic chunk. No-op for realtime (mic rides WebRTC media). */
   sendAudio(pcm: Int16Array): void;
   setHandlers(handlers: TransportHandlers): void;
+  /**
+   * TICKET 046 (OPTIONAL) — the transport's OWN captured output audio, as
+   * 24 kHz mono PCM16, for transports whose output audio never reaches
+   * `onAudio`. Over WebRTC the model's audio rides the media track only, so
+   * Arm A has nothing to hand the `onAudio` path; a transport that taps that
+   * track reports the samples here instead.
+   *
+   * DELIBERATELY NOT `onAudio`: `onAudio` is what stamps `audio_queued` in the
+   * runner, and Arm A's `audio_queued` must keep coming from
+   * `output_audio_buffer.started`. Capturing must not move the measurement.
+   *
+   * Readable AFTER `stop()`. Transports without a capture path omit it, and
+   * every existing fake keeps working untouched.
+   */
+  takeOutputAudio?(): Int16Array;
 }
