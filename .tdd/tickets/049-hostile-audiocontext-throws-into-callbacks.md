@@ -61,3 +61,17 @@ condition.
   (`playbackContextFactory` already is).
 - Do NOT make this a reason to reintroduce a play/pause control in Live — ticket 047 removed it
   deliberately and its source guards forbid it.
+
+## Also folded in — a comment nit from 047's final review
+
+`browserDeps.ts:144` reads: *"It keeps its play()/pause() methods because Replay's muted sink is this
+same object; nothing in Live calls either one."*
+
+The load-bearing half is exactly right. The stated REASON is not: the reviewer grepped every
+non-test caller of the sink and found the only one anywhere in the client is
+`realtime.ts:434 this.deps.remoteAudioSink?.attach(stream)`. **Replay does not call `play()` or
+`pause()` either** — the sole callers are `browserDeps.inboundTap.test.ts` (ticket 046's lock,
+asserting they do not throw). The methods survive because they sit on the shared `RemoteAudioSink`
+interface and ticket 047 explicitly permitted them on the seam, not because Replay drives them.
+
+One clause: *"because the seam is shared with Replay's muted sink"*.
