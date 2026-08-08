@@ -1,12 +1,12 @@
 ---
 id: 046
 title: Arm A produces no capturable output audio — its audio is a live media track, so nothing can be saved or replayed
-status: pending
+status: tests-locked
 source: qa-live
 depends_on: [045]
 touches: [src/client/transport/realtime.ts, src/client/replay/runner.ts, src/client/browserDeps.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/audio/inboundAudio.test.ts, src/client/browserDeps.inboundTap.test.ts, src/client/replay/replayArmA.test.ts, src/client/transport/realtime.test.ts, src/client/components/replay/RunsList.playGate.test.tsx, src/client/replay/runner.outputAudio.test.ts, src/client/replay/runner.test.ts]
 branch: ""
 ---
 
