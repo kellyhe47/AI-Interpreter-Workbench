@@ -56,6 +56,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_CASCADE_TRIPLE } from '../../core/arms';
 import { SAMPLE_RATE } from '../../core/protocol';
 import { writeWav } from '../../harness/wav';
+import { RUN_TIMEOUT_MS } from '../browserDeps';
 import { isAggregatableRun, type Recording, type Run } from '../state/ledger';
 import { FixtureTransport, type FixtureScriptEvent } from '../transport/fixture';
 import { FRAME_SAMPLES } from './pacer';
@@ -329,11 +330,17 @@ describe('runOnce — the output-audio upload is BOUNDED (ticket 048, AC1)', () 
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('AC5: an abandoned upload that rejects LATE raises no unhandled rejection', async () => {
-    // The bounded path abandons the in-flight `fetch` promise. If the runner
-    // races it without attaching a handler, the eventual network error becomes an
-    // unhandled rejection long after the run was recorded — in a 60-run sweep,
-    // 60 of them.
+  it('AC5: the RACE SHAPE keeps a handler on the abandoned upload, so a late failure is not unhandled', async () => {
+    // The bounded path abandons the in-flight `fetch` promise, and that promise
+    // typically fails on its own long afterwards. What keeps that from becoming an
+    // unhandled rejection is the SHAPE of the wait: the abandoned promise must
+    // still be an operand of the `Promise.race` (or otherwise carry a rejection
+    // handler). ROUND 2 (R2-6): a bare `void pending.catch(() => undefined)` line
+    // beside a race is DEAD — the race already attached one — so deleting it
+    // changes nothing and this test is not what pins it. What this test does pin
+    // is that the runner never abandons the promise through a fulfilment-only
+    // handler (`pending.then(resolve)`), which is the shape that really leaks:
+    // in a 60-run sweep, 60 unhandled rejections.
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason);
@@ -493,12 +500,129 @@ describe('the deadlines relate to the ones already in place (ticket 048, guard)'
     // with its own NAMED segmentation reason rather than being pre-empted by this
     // blunter one...
     expect(RUN_COMPLETION_TIMEOUT_MS).toBeGreaterThan(SEGMENTATION_IDLE_MS);
-    // ...and far shorter than browserDeps' RUN_TIMEOUT_MS (120 s), so runOnce
-    // names the reason before `startBatch`'s blunt abort fires.
-    expect(RUN_COMPLETION_TIMEOUT_MS).toBeLessThan(120_000);
-    expect(AUDIO_UPLOAD_TIMEOUT_MS).toBeLessThan(120_000);
+    // ...and strictly inside `startBatch`'s per-run patience, so runOnce names the
+    // reason before the blunt abort fires.
+    //
+    // ROUND 2 (R2-8) — IMPORTED, not hardcoded. This guard read a literal 120_000
+    // while the real number lived unexported in browserDeps, so the day it moves
+    // the ordering it protects would silently stop being checked.
+    expect(RUN_COMPLETION_TIMEOUT_MS).toBeLessThan(RUN_TIMEOUT_MS);
+    expect(AUDIO_UPLOAD_TIMEOUT_MS).toBeLessThan(RUN_TIMEOUT_MS);
     // The close budget stays the smallest of the three — it is the only one that
     // costs a leak rather than a measurement or an artifact.
     expect(TRANSPORT_CLOSE_TIMEOUT_MS).toBeLessThan(AUDIO_UPLOAD_TIMEOUT_MS);
+  });
+
+  it('ROUND 2 (R2-4): the upload budget is sized for a real link, not for localhost', () => {
+    // The output WAV is 24 kHz mono PCM16 — 48 kB/s, so a 45 s PRD §9 take is
+    // ~2.2 MB. Clearing that inside 10 s demands ~1.7 Mbps SUSTAINED, which is
+    // free on localhost and marginal on the planned EC2 deploy: the budget would
+    // have started expiring on healthy uploads over a real link.
+    //
+    // AND WHAT IT COSTS IS NOT "the bytes". A run with no stored output audio is
+    // ineligible for BLIND COMPARE, which is playback-only — so an upload budget
+    // tuned too tight silently shrinks the pool the pairwise judgements can draw
+    // from, which is a PRD §8 deliverable and not a cache.
+    expect(AUDIO_UPLOAD_TIMEOUT_MS).toBe(30_000);
+    // Still comfortably inside the sweep's per-run patience.
+    expect(AUDIO_UPLOAD_TIMEOUT_MS).toBeLessThan(RUN_TIMEOUT_MS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ROUND 2 (R2-1) — A LATE ABORT MUST STOP THE RUN WRITING.
+//
+// `runOnce` reads `signal` exactly ONCE, immediately after pacing, and every
+// decision downstream keys on that SNAPSHOT. An abort raised later — which is
+// precisely what `startBatch`'s budget now raises when it abandons an attempt —
+// is therefore invisible: the run finishes on its own schedule, uploads its
+// audio and POSTs a Run the sweep has already written off. In a sweep that Run
+// carries `origin: 'sweep'` and the rep's `repIndex`, so the retry's Run and the
+// abandoned one BOTH pass `isAggregatableRun` for the same rep: p50/p95 and `n`
+// are pooled over two samples of one repetition while `derive.ts` counts
+// DISTINCT rep indices and reports "1 of 1 reps completed". Silent
+// double-weighting, and the provenance line says everything is fine.
+//
+// The gate is therefore the signal AT THAT INSTANT, never the pacing-time
+// snapshot.
+// ---------------------------------------------------------------------------
+
+describe('runOnce — an abort that lands AFTER pacing still stops the write (ticket 048, R2-1)', () => {
+  it('a run aborted while waiting on `finished` uploads nothing and POSTs nothing', async () => {
+    const h = makeHarness({ script: neverCompletesScript() });
+    const controller = new AbortController();
+    let resolvedAt: number | null = null;
+    const done = runOnce({
+      recordingId: RECORDING.id,
+      config: CASCADE_CONFIG,
+      deps: h.deps,
+      signal: controller.signal,
+    });
+    void done.then(() => {
+      resolvedAt = Date.now();
+    });
+
+    // Pacing (100 ms) is long over; the run is parked on `finished`.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.calls).toEqual([]);
+    controller.abort();
+
+    // Let the completion budget expire and the run unwind.
+    await vi.advanceTimersByTimeAsync(RUN_COMPLETION_TIMEOUT_MS * 2);
+    expect(resolvedAt).not.toBeNull();
+
+    // THE criterion: nothing was written. A Run POSTed here is a Run the caller
+    // has already written off, and in a sweep it is a duplicate sample of a rep.
+    expect(h.calls).toEqual([]);
+    expect(h.posted).toEqual([]);
+
+    const result = await done;
+    // ...and it says so, rather than reporting a measurement nobody asked for.
+    expect(result.cancelled).toBe(true);
+  });
+
+  it('a run aborted while its upload is in flight does not go on to POST the Run', async () => {
+    // The other half: the abort lands when the measurement IS complete and the
+    // upload is the only thing outstanding. The run must not treat "I already
+    // have the numbers" as licence to write — the caller stopped waiting, and the
+    // retry it started is the run that owns this rep now.
+    const h = makeHarness({ upload: 'hang' });
+    const controller = new AbortController();
+    let resolvedAt: number | null = null;
+    const done = runOnce({
+      recordingId: RECORDING.id,
+      config: CASCADE_CONFIG,
+      deps: h.deps,
+      signal: controller.signal,
+    });
+    void done.then(() => {
+      resolvedAt = Date.now();
+    });
+
+    // Far enough in that the upload has been entered but the budget has not run.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.calls).toEqual(['uploadAudio']);
+    controller.abort();
+
+    await vi.advanceTimersByTimeAsync(AUDIO_UPLOAD_TIMEOUT_MS * 2);
+    expect(resolvedAt).not.toBeNull();
+
+    // The upload was already in flight and is not the point; the POST is.
+    expect(h.calls).toEqual(['uploadAudio']);
+    expect(h.posted).toEqual([]);
+    expect((await done).cancelled).toBe(true);
+  });
+
+  it('CONTROL: with no abort at all, the same run uploads and POSTs exactly as before (guard)', async () => {
+    // Without this, a runner that simply stopped POSTing would pass both tests
+    // above. It is also the 045 ordering contract, restated at the new gate.
+    const h = makeHarness();
+    const started = launch(h);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const { run } = await started.done;
+
+    expect(h.calls).toEqual(['uploadAudio', 'create']);
+    expect(h.posted).toHaveLength(1);
+    expect(run.status).toBe('complete');
   });
 });
