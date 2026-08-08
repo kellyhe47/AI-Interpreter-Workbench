@@ -188,3 +188,76 @@ close can make construction throw and kill a run. Await it, or state why not.
   comes back short.
 - AC1 is not fully provable in vitest. It stays unproven until a real Arm A Replay run in Chrome
   returns audible speech from `GET /api/runs/:id/audio` — an operator smoke test, not a unit test.
+
+---
+
+## ROUND 3 — re-review of `905907a..6f23b64`
+
+All seven R2 items verified genuinely fixed AND genuinely pinned: every round-1 mutation now fails,
+plus 14 new ones (gate always open -> 4 fail; tail grace 0 -> 3; gate opened before the
+`audio_queued` stamp -> 4; un-awaited stop -> 1; and so on). AC3 was re-traced and mutation-proven
+to survive the gate. The R2-1 and R2-2 holes that made the whole ticket deletable are closed.
+
+One blocker and five cheap follow-ons.
+
+### R3-1 (BLOCKER) — `await transport.stop()` is an UNBOUNDED wait
+`runner.ts:572` -> `realtime.ts:649` -> `inboundAudio.ts:254`. Nothing races it. `startBatch`'s
+`runTimeoutMs` only calls `controller.abort()` (`batch/runner.ts:302`); it does NOT race
+`await deps.execute(...)`, and `runOnce` observes the abort signal nowhere after `await
+pacer.start()`. So if Chrome wedges an AudioContext — device change or removal is the classic cause
+— and its `close()` never settles: the run sits "running" forever, the SWEEP STOPS ADVANCING, no Run
+is stored, no error is reported, and `runTimeoutMs` never fires. **Round 2 traded a bounded leak for
+an unbounded stall of the whole experiment.**
+The code's own comment refuses this trade for *rejection* ("a wedged context is not something a run
+can act on, and failing the run over it would lose the measurement") — but it is the WAIT, not the
+rejection, that loses the measurement.
+**DECIDED:** bound it. `TRANSPORT_CLOSE_TIMEOUT_MS = 2000`, a named exported constant;
+`await Promise.race([transport.stop(), delay(TRANSPORT_CLOSE_TIMEOUT_MS)])`. The existing
+`holdClose` harness pins it: hold the close, advance past the budget, assert the run resolves and
+still uploads. Today's test resolves the close by hand — "never resolved" is untested.
+
+### R3-2 (MAJOR in effect) — the 250 ms tail grace is shorter than the receiver's jitter buffer
+`inboundAudio.ts:61`. `output_audio_buffer.stopped` rides the DATA CHANNEL, which has no jitter
+buffer; the audio it refers to is still in NetEq. The grace must cover the END-TO-END AUDIO DELAY,
+not "a syllable" — Chrome's NetEq target delay is commonly 60-150 ms and expands to several hundred
+on a jittery link. Exceeded, the last word of EVERY Arm A utterance is clipped silently, and a blind
+evaluator hears that as a defect of the ARM — the exact attribution error this project exists to
+prevent. R2-4's unblinding concern is about multi-second gaps, so being generous is nearly free.
+**DECIDED:** raise to `INBOUND_TAIL_GRACE_MS = 750`. The operator smoke test must confirm the final
+syllable survives.
+Worth stating explicitly in the header: the ONSET side is safe — the gate opens on an event that
+LEADS its audio, so a window can only admit extra leading silence, never clip an onset.
+
+### R3-3 — "the gate never opened" is indistinguishable from "the model never spoke"
+`inboundAudio.ts:148`: `admit()` drops frames without counting them. Capture now depends on a
+data-channel event; if `output_audio_buffer.started` ever stops arriving, Arm A stores nothing and
+the artifact looks exactly like a mute model. AC1 is explicitly deferred to an operator smoke test,
+and that smoke test currently CANNOT TELL THE TWO APART.
+**DECIDED:** count dropped samples and expose them, so a smoke run can report "12 s of track seen,
+0 admitted". This is what makes the one unprovable AC diagnosable.
+
+### R3-4 — `outputWindowOpen` bookkeeping is untested in both directions
+`realtime.ts:585` and `:636`. Verified: removing `this.outputWindowOpen = false` from the `.stopped`
+branch, OR from `stop()`, each leaves 1758/1758 green. The first is a real bug if it regresses — a
+reconnect after the model finished would `startWindow()` on attach and record the inter-utterance
+gap, precisely the unblinding R2-4 exists to prevent.
+**DECIDED:** pin it. `.started`, `.stopped`, then a reconnect track event; assert `windows()` gains
+no third `start`.
+
+### R3-5 — the R2-1 seam pins the PUBLISHED factory, not the one `runOnce` is bound to
+`browserDeps.ts:296`, `ReplayView.tsx:224`. Verified: publishing the correctly-wired
+`createTransport` while binding `runnerDeps.createTransport` to a second, UNWIRED factory leaves
+1758/1758 green. Today they are the same const so production is correct, but the guarantee is weaker
+than the docstring claims.
+**DECIDED:** extend the source-text belt to pin the BINDING, e.g.
+`expect(REPLAY_DEPS_SOURCE).toMatch(/const runnerDeps: RunnerDeps = \{[^}]*\bcreateTransport,/s)`,
+and label the seam in its docstring as partly test-shaped.
+
+### R3-6 — R2-7's rationale is half-implemented; `outboundAudio.ts` is a genuine leftover
+`outboundAudio.ts:121` is still `close(): void { void ctx.close(); }` and `realtime.ts:646` calls
+`sink?.close()` un-awaited — so a realtime Replay run still leaves one of its TWO contexts closing
+unobserved, while `runner.ts:566` explains the await by saying the run holds two.
+**DECIDED:** fix it here rather than deferring — it is the same defect, and a comment claiming
+protection the code does not give is worse than either. Mirror the awaited close in the outbound
+sink and have `stop()` await both via `Promise.all`, under the SAME `TRANSPORT_CLOSE_TIMEOUT_MS`
+bound from R3-1. `outboundAudio.test.ts` is ticket 043's lock — the test-writer updates it.
