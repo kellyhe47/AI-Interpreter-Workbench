@@ -311,6 +311,38 @@ async function uploadOutputAudio(args: {
 }
 
 /**
+ * TICKET 046 ROUND 3 (R3-1) — waits for the transport's audio contexts, but
+ * NEVER LONGER THAN THE BUDGET.
+ *
+ * The wait itself is the transport's (it knows how many contexts it holds); the
+ * DEADLINE is the runner's, because the runner is the only layer that owns a
+ * run's lifetime. Nothing else races this: `startBatch`'s `runTimeoutMs` only
+ * aborts the signal, and `runOnce` reads that signal nowhere after pacing. So an
+ * unbounded await turns one wedged AudioContext into a frozen run, a sweep that
+ * stops advancing, no stored Run and no reported error — strictly worse than the
+ * leaked context it was protecting against.
+ *
+ * THE TIMER IS CLEARED ON THE WINNING PATH. A `Promise.race` that leaves its
+ * handle armed costs one live 2 s timer per run, which is 60 of them in a sweep
+ * and a fake-timer teardown that lies about what is still pending.
+ */
+async function closeTransport(closing: void | Promise<void>, timeoutMs: number): Promise<void> {
+  // Nothing to wait for: a transport that closes no context (cascade, every
+  // fixture) must not pay a microtask, let alone arm a timer.
+  if (closing === undefined) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    // A close that rejects is not something a run can act on; giving up on the
+    // context must never lose the measurement.
+    Promise.resolve(closing).catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+}
+
+/**
  * Decodes the fetched WAV. A clip whose bytes will not decode is unplayable in
  * exactly the same way as one whose bytes are missing, so it gets the same
  * code — the caller has one condition to handle, not two.
@@ -603,12 +635,15 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   disarm();
 
   // TICKET 046 ROUND 2 (R2-7) — AWAITED. A realtime run holds two AudioContexts
-  // (the outbound sink and the inbound tap) and Chrome caps concurrent ones at
-  // roughly six, so a sweep that starts the next run before this one's contexts
-  // are really gone eventually makes a construction throw and kills a run. Every
-  // transport that closes nothing still returns void, and awaiting void costs a
-  // microtask.
-  await transport.stop();
+  // (the outbound sink and the inbound tap, both awaited since R3-6) and Chrome
+  // caps concurrent ones at roughly six, so a sweep that starts the next run
+  // before this one's contexts are really gone eventually makes a construction
+  // throw and kills a run. Every transport that closes nothing still returns
+  // void, and that path costs nothing at all.
+  //
+  // ROUND 3 (R3-1) — and BOUNDED. See closeTransport: a wedged context must cost
+  // a leak, never the run.
+  await closeTransport(transport.stop(), TRANSPORT_CLOSE_TIMEOUT_MS);
 
   // TICKET 046 — the transport's OWN captured output audio, for the arm whose
   // audio never reaches `onAudio` at all: over WebRTC the model's voice rides
@@ -623,6 +658,33 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   if (audioChunks.length === 0) {
     const captured = transport.takeOutputAudio?.();
     if (captured !== undefined && captured.length > 0) audioChunks.push(captured);
+  }
+
+  // TICKET 046 ROUND 3 (R3-7) — THE CAPTURE PATH DIAGNOSES ITSELF.
+  //
+  // Capture hangs off `output_audio_buffer.started`, so a gate that never opened
+  // stores an artifact byte-identical to a model that never spoke. AC1 is the
+  // one criterion vitest cannot prove and is conceded to an operator smoke test
+  // in real Chrome; a smoke test that cannot separate those two does not confirm
+  // AC1, it only fails to contradict it.
+  //
+  // The condition is `saw samples AND admitted none`, never "produced no audio":
+  // `{ 0, 0 }` is a DEAD TRACK (an honest, silent run) and `undefined` is a
+  // transport with no capture path at all — cascade, and every fixture. Reading
+  // an absent seam as "saw a track, admitted nothing" would stamp this on every
+  // cascade run that happened to fall silent.
+  //
+  // IT IS A DIAGNOSTIC, NOT A VERDICT. It rides `errors` exactly as 045's upload
+  // failure does and leaves `status` alone: aggregation (exportResults,
+  // results/derive, the batch runner, ReplayView) gates on `status === 'complete'`
+  // and never on `errors`, so a diagnostic that flipped the status would silently
+  // disqualify runs from every figure — far worse than the blind spot it closes.
+  const captureStats = transport.outputAudioStats?.();
+  if (captureStats !== undefined && captureStats.dropped > 0 && captureStats.admitted === 0) {
+    errors.push(
+      `${CAPTURE_GATE_NEVER_OPENED}: saw ${captureStats.dropped} samples on the track, ` +
+        `admitted ${captureStats.admitted}`,
+    );
   }
 
   const outputAudio = concatPcm(audioChunks);

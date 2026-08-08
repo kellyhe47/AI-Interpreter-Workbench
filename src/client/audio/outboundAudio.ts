@@ -94,6 +94,8 @@ export function createOutboundAudioSink(options: OutboundAudioSinkOptions): Outb
    */
   let nextStartTime = 0;
   let closed = false;
+  /** The single in-flight (or settled) context close. Null until close(). */
+  let closing: Promise<void> | null = null;
 
   return {
     track,
@@ -118,10 +120,28 @@ export function createOutboundAudioSink(options: OutboundAudioSinkOptions): Outb
       source.connect(destination);
       source.start(when);
     },
-    close(): void {
-      if (closed) return;
+    /**
+     * TICKET 046 ROUND 3 (R3-6) — the exact mirror of the inbound tap's close.
+     *
+     * A realtime Replay run holds TWO AudioContexts (this sink and the tap) and
+     * Chrome caps concurrent hardware contexts at roughly six, so across a
+     * 60-run sweep a close nobody waits for is what eventually makes a
+     * construction throw and kills a run. Round 2 sequenced only the tap while
+     * the runner's comment claimed both — a comment promising protection the
+     * code does not give is worse than either half alone.
+     *
+     * Idempotent AND still awaitable: a second caller gets the SAME close. It
+     * never REJECTS — a wedged context is not something a run can act on, and a
+     * rejection here would surface as an unhandled rejection mid-sweep.
+     */
+    close(): Promise<void> {
+      if (closing !== null) return closing;
       closed = true;
-      void ctx.close();
+      closing = Promise.resolve(ctx.close()).then(
+        () => undefined,
+        () => undefined,
+      );
+      return closing;
     },
   };
 }

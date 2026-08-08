@@ -472,7 +472,10 @@ export class RealtimeTransport implements InterpreterTransport {
           // Build AND release: each connect needs a track for ITS peer
           // connection, so without this close every reconnect would leak the
           // abandoned AudioContext.
-          this.outboundSink?.close();
+          // Un-awaited, and bounded: connects are serialized, so at most ONE
+          // abandoned close is ever in flight. `stop()` is where a caller can
+          // wait; a reconnect must not stall on the context it is replacing.
+          void this.outboundSink?.close();
           this.outboundSink = sink;
           if (typeof pc.addTrack === 'function') {
             pc.addTrack(sink.track);
@@ -510,7 +513,7 @@ export class RealtimeTransport implements InterpreterTransport {
         // from leaking one. Nulling first makes the release single-shot.
         const abandoned = this.outboundSink;
         this.outboundSink = null;
-        abandoned?.close();
+        void abandoned?.close();
         return false;
       }
 
@@ -676,21 +679,34 @@ export class RealtimeTransport implements InterpreterTransport {
     // the top of stop() is not the only thing making this single-shot.
     const sink = this.outboundSink;
     this.outboundSink = null;
-    sink?.close();
     // TICKET 046 — release the inbound context too. Closed EXACTLY ONCE (the
     // `stopped` guard above makes stop() single-shot) and NOT nulled: the
     // runner reads the captured audio after this returns.
     //
-    // ROUND 2 (R2-7) — and the close is HANDED BACK, so `runOnce` can wait for
-    // the AudioContext to really go away before the next run builds two more.
-    // A transport with no tap has nothing to wait for and still returns void,
-    // which is what keeps Live's un-awaited `stop()` calls unchanged.
-    const closing = this.inboundTap?.close();
-    if (closing === undefined) return undefined;
-    this.closing = Promise.resolve(closing).then(
-      () => undefined,
-      () => undefined,
+    // BOTH ARE ASKED AT ONCE, and neither waits on the other: they are two
+    // independent hardware contexts, and serializing them would double the
+    // worst case a run has to sit through for no benefit.
+    const closings = [sink?.close(), this.inboundTap?.close()].filter(
+      (c): c is Promise<void> | void => c !== undefined,
     );
+    // ROUND 2 (R2-7) / ROUND 3 (R3-6) — and the close is HANDED BACK, so
+    // `runOnce` can wait for BOTH AudioContexts to really go away before the
+    // next run builds two more. A transport that closes nothing still returns
+    // void, which is what keeps Live's un-awaited `stop()` calls unchanged.
+    //
+    // The wait handed back is UNBOUNDED on purpose: the transport reports when
+    // its contexts are gone, and the RUNNER decides how long that is worth
+    // waiting for (R3-1's TRANSPORT_CLOSE_TIMEOUT_MS). Two deadlines for one
+    // wait would be redundant, and the inner one untestable.
+    if (closings.length === 0) return undefined;
+    this.closing = Promise.all(
+      closings.map((c) =>
+        Promise.resolve(c).then(
+          () => undefined,
+          () => undefined,
+        ),
+      ),
+    ).then(() => undefined);
     return this.closing;
   }
 
@@ -727,5 +743,24 @@ export class RealtimeTransport implements InterpreterTransport {
    */
   takeOutputAudio(): Int16Array {
     return this.inboundTap?.take() ?? new Int16Array(0);
+  }
+
+  /**
+   * TICKET 046 ROUND 3 (R3-7) — what the capture gate SAW, published where a
+   * run can report it.
+   *
+   * `stats()` sitting on the tap is reachable only from a debugger, and AC1 (an
+   * Arm A run returns audible speech) is the one criterion vitest cannot prove —
+   * it is conceded to an operator smoke test in real Chrome. Since capture hangs
+   * off `output_audio_buffer.started`, a gate that never opened stores an
+   * artifact byte-identical to a model that never spoke, and a smoke test that
+   * cannot separate those does not confirm AC1.
+   *
+   * UNDEFINED WITHOUT A TAP, never `{ 0, 0 }`. Live and cascade have no capture
+   * path at all; reporting zeros there would make every Live session look like a
+   * dead track. Absent is not a symptom.
+   */
+  outputAudioStats(): OutputAudioStats | undefined {
+    return this.inboundTap?.stats();
   }
 }

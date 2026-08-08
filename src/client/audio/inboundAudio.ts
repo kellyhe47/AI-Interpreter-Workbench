@@ -38,7 +38,24 @@
  *     closed the tap.
  *   - `close()` closes the context and is idempotent; frames that land after
  *     close are dropped rather than throwing, and the audio captured before it
- *     is still readable.
+ *     is still readable. It is AWAITABLE (R2-7): a run holds two AudioContexts
+ *     and Chrome caps concurrent ones, so a caller must be able to wait.
+ *   - `startWindow()` / `endWindow()` are THE CAPTURE GATE (R2-4). It is SHUT by
+ *     default and frames outside a window are DROPPED, never buffered, so an Arm
+ *     A file is the model's speech rather than the whole ~45 s run. Capture
+ *     continues INBOUND_TAIL_GRACE_MS past `endWindow()`, as a SAMPLE BUDGET.
+ *
+ *     THE GATE IS ASYMMETRIC ON PURPOSE (R3-2). The tail needs the grace because
+ *     `output_audio_buffer.stopped` rides the data channel while the sound it
+ *     refers to is still in the receiver's jitter buffer — at 250 ms the last
+ *     word of every utterance was clipped, so the grace is 750 ms. The ONSET
+ *     side needs nothing: the same lead means an early window admits extra
+ *     leading silence and can never clip an onset.
+ *   - `stats()` reports what the gate SAW (R3-3): `admitted` (always
+ *     `take().length`) and `dropped`. Capture hangs off a data-channel event, so
+ *     without this a gate that never opened is byte-identical to a model that
+ *     never spoke — and AC1 is conceded to an operator smoke test that would
+ *     then be unable to tell them apart.
  * ==========================================================================
  */
 
@@ -52,13 +69,25 @@ export const INBOUND_SAMPLE_RATE = SAMPLE_RATE;
 /**
  * ROUND 2 (R2-4) — how long capture continues past `output_audio_buffer.stopped`.
  *
- * The event marks the end of the model's OUTPUT BUFFER, not the end of the sound
- * arriving over RTP: the last syllable is still in flight when it lands. 250 ms
- * is a syllable's worth of tail — enough that nothing audible is clipped, short
- * enough that the inter-utterance silence which would unblind blind compare is
- * still dropped.
+ * ROUND 3 (R3-2) — AND IT IS SIZED BY THE RECEIVER'S JITTER BUFFER, not by a
+ * syllable. `output_audio_buffer.stopped` rides the DATA CHANNEL, which has no
+ * jitter buffer at all; the audio the event refers to is still sitting in NetEq.
+ * So the grace has to cover the END-TO-END AUDIO DELAY — Chrome's NetEq target
+ * is commonly 60-150 ms and expands to several hundred on a jittery link. The
+ * original 250 ms was inside that range, which means the last word of EVERY Arm
+ * A utterance was clipped, silently, and a blind evaluator would hear the
+ * clipping as a defect of the ARM: precisely the attribution error this project
+ * exists to prevent.
+ *
+ * Being generous costs almost nothing, because the unblinding R2-4 guards
+ * against is about MULTI-SECOND gaps, not fractions of one.
+ *
+ * THE ONSET SIDE NEEDS NO EQUIVALENT. The gate opens on an event that LEADS the
+ * audio it announces (the event is on the data channel; the sound is still in
+ * the jitter buffer), so a window can only ever admit extra leading silence — it
+ * can never clip an onset. The asymmetry is deliberate.
  */
-export const INBOUND_TAIL_GRACE_MS = 250;
+export const INBOUND_TAIL_GRACE_MS = 750;
 
 /** The grace expressed in SAMPLES — the only unit the capture node counts in. */
 export const INBOUND_TAIL_GRACE_SAMPLES = Math.round(
@@ -143,13 +172,21 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
    */
   let capturing = false;
   let graceRemaining = 0;
+  /**
+   * ROUND 3 (R3-3) — samples the gate REFUSED, counted in the same pass that
+   * refuses them. Without this, "the gate never opened" and "the model never
+   * spoke" produce identical artifacts and identical silence, and the operator
+   * smoke test AC1 is conceded to cannot tell which one it is looking at. The
+   * truncated remainder of an overrunning frame counts here too — it was seen
+   * and refused like any other sample.
+   */
+  let dropped = 0;
 
   /** How many leading samples of this frame the gate lets through. */
   const admit = (length: number): number => {
-    if (capturing) return length;
-    if (graceRemaining <= 0) return 0;
-    const kept = Math.min(length, graceRemaining);
-    graceRemaining -= kept;
+    const kept = capturing ? length : Math.min(length, Math.max(graceRemaining, 0));
+    if (!capturing) graceRemaining -= kept;
+    dropped += length - kept;
     return kept;
   };
 
@@ -224,9 +261,13 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
       capturing = false;
       graceRemaining = INBOUND_TAIL_GRACE_SAMPLES;
     },
-    // STUB (test-writer, round 3) — R3-3's gate accounting. Implement here.
     stats() {
-      return { admitted: 0, dropped: 0 };
+      // `admitted` IS the recording's length rather than a parallel counter: a
+      // diagnostic that can disagree with the artifact is a second thing that
+      // can be wrong. Both counts cover only frames this tap actually SAW —
+      // nothing before `attach`, nothing after `close` (the handler is detached
+      // there), so a healthy run is never reported as a lossy one.
+      return { admitted: captured, dropped };
     },
     take(): Int16Array {
       // NON-DESTRUCTIVE: the runner reads this AFTER stop() has closed the tap,
