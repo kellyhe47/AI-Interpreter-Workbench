@@ -55,6 +55,8 @@ const SUBLINE = 'identical input — directly comparable';
 const EMPTY = 'No Runs of this Recording yet.';
 
 const PLAY = 'play';
+/** What a card says in place of a play control it could not honour. */
+const NO_AUDIO = 'no output audio stored';
 
 /** The tail every failed card ends with, whatever stage was lost. */
 const FAILURE_TAIL = '— run saved as failed, excluded from every aggregate';
@@ -266,6 +268,8 @@ export default function RunsList(props: RunsListProps): ReactElement {
       {props.runs.map((run) => {
         const tag = runArmTag(run);
         const failed = run.status === 'failed';
+        // TICKET 045 — stored audio, not status, decides the play control.
+        const hasAudio = run.outputAudioPath !== undefined;
         const { cells, total } = stagesOf(run);
         const failure = failed ? failureOf(run) : null;
 
@@ -296,17 +300,22 @@ export default function RunsList(props: RunsListProps): ReactElement {
               </span>
             </div>
 
-            {failure === null ? (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 'var(--space-4)',
-                  flexWrap: 'wrap',
-                  fontSize: 'var(--text-sm)',
-                  color: 'var(--text-secondary)',
-                }}
-              >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-4)',
+                flexWrap: 'wrap',
+                fontSize: 'var(--text-sm)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              {/*
+                The gate is STORED AUDIO, not status (ticket 045). Absent, not
+                disabled — and the card says why, rather than leaving a silent
+                gap where a control used to be.
+              */}
+              {hasAudio ? (
                 <button
                   type="button"
                   data-run-play=""
@@ -316,28 +325,38 @@ export default function RunsList(props: RunsListProps): ReactElement {
                   <PlayGlyph />
                   {PLAY}
                 </button>
-
-                <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
-                  {cells.map((cell) => (
-                    <span key={cell.label} data-run-stage={cell.label}>
-                      {`${cell.label} `}
-                      <b style={figureStyle}>{formatMs(cell.ms)}</b>
-                    </span>
-                  ))}
-                </div>
-
-                <span style={{ marginLeft: 'auto' }}>
-                  <span data-run-total="">
-                    {'total '}
-                    <b style={figureStyle}>{formatMs(total)}</b>
-                  </span>
-                  {' · '}
-                  <span data-run-cost="" style={{ fontFamily: 'var(--font-mono)' }}>
-                    {formatPerMinute(run.cost, props.recording)}
-                  </span>
+              ) : (
+                <span data-run-no-audio="" style={{ color: 'var(--text-muted)' }}>
+                  {NO_AUDIO}
                 </span>
-              </div>
-            ) : (
+              )}
+
+              {failure === null ? (
+                <>
+                  <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+                    {cells.map((cell) => (
+                      <span key={cell.label} data-run-stage={cell.label}>
+                        {`${cell.label} `}
+                        <b style={figureStyle}>{formatMs(cell.ms)}</b>
+                      </span>
+                    ))}
+                  </div>
+
+                  <span style={{ marginLeft: 'auto' }}>
+                    <span data-run-total="">
+                      {'total '}
+                      <b style={figureStyle}>{formatMs(total)}</b>
+                    </span>
+                    {' · '}
+                    <span data-run-cost="" style={{ fontFamily: 'var(--font-mono)' }}>
+                      {formatPerMinute(run.cost, props.recording)}
+                    </span>
+                  </span>
+                </>
+              ) : null}
+            </div>
+
+            {failure === null ? null : (
               <div data-run-failure="" data-failed-stage={failure.stage} style={failureStyle}>
                 {failure.text}
               </div>

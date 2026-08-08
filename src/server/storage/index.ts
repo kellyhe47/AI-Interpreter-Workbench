@@ -244,6 +244,19 @@ async function writeJson(file: string, value: unknown): Promise<void> {
   await fs.writeFile(file, `${JSON.stringify(value)}\n`, 'utf8');
 }
 
+/**
+ * TICKET 045 — the STORE-RELATIVE location of a run's output WAV, the value
+ * that becomes `Run.outputAudioPath`.
+ *
+ * It lives here, beside the layout it describes, and is exported so the runs
+ * router can REPORT the path it wrote without re-spelling the PRD §7 layout.
+ * The client never composes it: a Run must not claim a path the client
+ * invented.
+ */
+export function runAudioStorePath(runId: string): string {
+  return `runs/${runId}.out.wav`;
+}
+
 export function createStorage(baseDir: string): Storage {
   const recordingsDir = path.join(baseDir, 'recordings');
   const runsDir = path.join(baseDir, 'runs');
@@ -258,7 +271,7 @@ export function createStorage(baseDir: string): Storage {
   const recordingJson = (id: string) => path.join(recordingsDir, `${id}.json`);
   const recordingWav = (id: string) => path.join(recordingsDir, `${id}.wav`);
   const runJson = (id: string) => path.join(runsDir, `${id}.json`);
-  const runWav = (id: string) => path.join(runsDir, `${id}.out.wav`);
+  const runWav = (id: string) => path.join(baseDir, runAudioStorePath(id));
 
   async function getRecording(id: string): Promise<Recording | undefined> {
     return readJson<Recording>(recordingJson(id));

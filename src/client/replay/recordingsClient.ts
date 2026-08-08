@@ -21,6 +21,7 @@
  * ==========================================================================
  */
 
+import { bytesToBase64 } from '../audio/pcm';
 import type { CorpusUtterance } from '../../core/corpus';
 import type { WerScore } from '../../core/wer';
 import type { BlindComparison, LiveSession, Recording, Run } from '../state/ledger';
@@ -378,8 +379,16 @@ export function createRunsClient(deps: ApiClientDeps): RunsClient {
         fallback: 'run-audio-missing',
       }),
 
-    // TICKET 045 — STUB. Implementation belongs to the ticket's green phase.
-    uploadAudio: () =>
-      Promise.reject(new Error('RunsClient.uploadAudio: not implemented (ticket 045)')),
+    // TICKET 045 — the WAV rides as base64 in a JSON body (the POST
+    // /api/recordings precedent) to the run's OWN endpoint. NO per-endpoint
+    // fallback code: `invalid-run-audio` is a request-shape complaint, not one
+    // of the states a caller branches on, so it surfaces as 'http-error'
+    // carrying the server's own message — the same decision the
+    // blind-comparisons, live-sessions and wer-scores clients made.
+    uploadAudio: (id, wavBytes) =>
+      http.json<RunAudioUpload>(`/api/runs/${encodeURIComponent(id)}/audio`, {
+        method: 'POST',
+        body: { audioBase64: bytesToBase64(wavBytes) },
+      }),
   };
 }

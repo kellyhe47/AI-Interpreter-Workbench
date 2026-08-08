@@ -24,6 +24,14 @@
  *   neither, the value stays null.
  * - A run that loses a stage is saved with status 'failed' plus the failing
  *   stage, is still POSTed, and runOnce RESOLVES rather than throwing.
+ * - TICKET 045: the buffered output audio is UPLOADED to the run's own audio
+ *   endpoint FIRST, and the Run is POSTed SECOND carrying the
+ *   `outputAudioPath` the upload REPORTED. The ledger is append-only with no
+ *   PATCH, so the reverse order could never correct a Run that promised audio a
+ *   failed upload never wrote. A failed run uploads its partial audio (PRD §12,
+ *   it is diagnostic); a cancelled run and a run that produced no samples
+ *   upload nothing; an upload failure does NOT fail the run — it rides the
+ *   run's own `errors` and leaves `outputAudioPath` unset.
  *
  * WHAT IDENTIFIES A RUN LIVES ONLY IN THE Run RECORD. The transport is handed
  * nothing but its ordinary TransportConfig — no run id, no arm tag. The wire
@@ -114,7 +122,8 @@
 
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag, type ArmTag, type RunConfig } from '../../core/arms';
 import type { CorpusUtterance } from '../../core/corpus';
-import { readWav } from '../../harness/wav';
+import { readWav, writeWav } from '../../harness/wav';
+import { SAMPLE_RATE } from '../../core/protocol';
 import type { InterpreterTransport, TransportConfig } from '../transport/types';
 import type { Recording, Run, RunUtterance } from '../state/ledger';
 import { ApiError } from './recordingsClient';
@@ -222,6 +231,44 @@ function concatPcm(chunks: Int16Array[]): Int16Array {
     offset += chunk.length;
   }
   return out;
+}
+
+/**
+ * TICKET 045 — stores the run's output audio and reports where it landed.
+ *
+ * ORDER IS LOAD-BEARING: this runs BEFORE the Run is POSTed. The ledger is
+ * append-only with no PATCH, so a Run written first could never be corrected
+ * when the upload failed — it would sit in the history claiming audio nobody
+ * ever wrote, and the play control (gated on exactly that field) would offer a
+ * button that 404s.
+ *
+ * NOTHING IS UPLOADED FOR A RUN THAT PRODUCED NO SAMPLES. An empty
+ * runs/<id>.out.wav would make GET /audio answer 200-with-silence instead of
+ * the honest 404 — and that is today's Arm A, whose audio rides the WebRTC
+ * media track and never reaches `onAudio` (ticket 046).
+ *
+ * A FAILED UPLOAD DOES NOT FAIL THE RUN. The measurement is the valuable
+ * artifact and it is already in hand; the store losing the bytes is surfaced as
+ * one of the run's own `errors` — which ride the same append-only ledger line —
+ * and the run claims no path.
+ */
+async function uploadOutputAudio(args: {
+  runs: RunsClient;
+  id: string;
+  outputAudio: Int16Array;
+  skip: boolean;
+  errors: string[];
+}): Promise<string | undefined> {
+  if (args.skip || args.outputAudio.length === 0) return undefined;
+  try {
+    const uploaded = await args.runs.uploadAudio(args.id, writeWav(args.outputAudio, SAMPLE_RATE));
+    return uploaded.outputAudioPath;
+  } catch (cause) {
+    args.errors.push(
+      `output audio upload failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    return undefined;
+  }
 }
 
 /**
@@ -549,8 +596,21 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
           costPerMinUsd: transport.costPerMinUsd,
         });
 
+  // TICKET 045 — THE AUDIO IS UPLOADED BEFORE THE RUN IS POSTED, so the id has
+  // to be minted first: the upload is addressed by it.
+  const id = deps.newId();
+  const outputAudioPath = await uploadOutputAudio({
+    runs: deps.runs,
+    id,
+    outputAudio,
+    // A cancelled run is not POSTed, so it stores nothing either — there is no
+    // record for the bytes to belong to.
+    skip: cancelled,
+    errors,
+  });
+
   const run: Run = {
-    id: deps.newId(),
+    id,
     recordingId: recording.id,
     architecture: config.architecture,
     providerTriple: config.providers,
@@ -570,6 +630,10 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     errors,
     createdAt: deps.now(),
   };
+
+  // Only ever the path the SERVER reported, and only when it really reported
+  // one: `outputAudioPath` is a report of bytes on disk, never a promise.
+  if (outputAudioPath !== undefined) run.outputAudioPath = outputAudioPath;
 
   // TICKET 033 — the corpus version travels with the measurement. Only when the
   // Recording declares one: an absent version stays absent rather than becoming
