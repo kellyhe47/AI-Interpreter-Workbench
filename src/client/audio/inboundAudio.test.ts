@@ -31,6 +31,14 @@
  *        AC2's wording met, its PURPOSE defeated. Frames outside a window are
  *        DROPPED, not buffered, and a named tail grace keeps the last syllable.
  *
+ *        ROUND 3 — the gate is ASYMMETRIC, and deliberately so. The ONSET side
+ *        is safe for free: `output_audio_buffer.started` LEADS the audio it
+ *        announces (the event is on the data channel; the sound is still in the
+ *        receiver's jitter buffer), so opening a window early can only admit
+ *        extra leading silence — it can never clip an onset. The TAIL side has
+ *        the mirror-image problem and no free protection, which is what
+ *        INBOUND_TAIL_GRACE_MS buys and why R3-2 raised it to 750 ms.
+ *
  *  R2-5  ONE PCM16 CONVENTION. This module reimplemented pcm.ts's `floatTo16`
  *        with a DIFFERENT scale (`v * 32768` clamped, vs pcm.ts's asymmetric
  *        `v < 0 ? v * 32768 : v * 32767`), so the client's two capture paths
@@ -409,10 +417,23 @@ describe('createInboundAudioTap — capture is SILENT (ticket 046, PRD §7)', ()
  * ======================================================================== */
 
 describe('createInboundAudioTap — the capture gate (round 2, R2-4)', () => {
-  it('the tail grace is a NAMED constant, 250 ms, expressed in samples at the wire rate', () => {
-    expect(INBOUND_TAIL_GRACE_MS).toBe(250);
+  it('the tail grace covers the RECEIVER’S JITTER BUFFER, not a syllable (round 3, R3-2)', () => {
+    // `output_audio_buffer.stopped` rides the DATA CHANNEL, which has no jitter
+    // buffer. The audio the event refers to is still in NetEq: Chrome's target
+    // delay is commonly 60-150 ms and expands to several hundred on a jittery
+    // link. A grace shorter than that clips the last word of EVERY Arm A
+    // utterance, silently — and a blind evaluator hears the clipping as a defect
+    // of the ARM, which is the exact attribution error this project exists to
+    // prevent. R2-4's unblinding concern is about MULTI-SECOND gaps, so being
+    // generous here is nearly free.
+    expect(INBOUND_TAIL_GRACE_MS).toBe(750);
+    // Still DERIVED from the wire rate, never a second literal.
     expect(INBOUND_TAIL_GRACE_SAMPLES).toBe((INBOUND_TAIL_GRACE_MS * INBOUND_SAMPLE_RATE) / 1000);
-    expect(INBOUND_TAIL_GRACE_SAMPLES).toBe(6_000);
+    expect(INBOUND_TAIL_GRACE_SAMPLES).toBe(18_000);
+    // Comfortably past Chrome's expanded NetEq target, and nowhere near the
+    // inter-utterance silence the gate exists to drop.
+    expect(INBOUND_TAIL_GRACE_MS).toBeGreaterThanOrEqual(500);
+    expect(INBOUND_TAIL_GRACE_MS).toBeLessThan(2_000);
   });
 
   it('DROPS everything before the first window — the run’s leading silence is not the model', () => {
@@ -531,6 +552,74 @@ describe('createInboundAudioTap — the capture gate (round 2, R2-4)', () => {
     expect(() => tap.startWindow()).not.toThrow();
     fake.emit(f32(0.25));
     expect(Array.from(tap.take())).toEqual([16384]);
+  });
+});
+
+/* ===========================================================================
+ * R3-3 — the gate KEEPS ACCOUNTS.
+ *
+ * Capture now depends on a data-channel event. If `output_audio_buffer.started`
+ * ever stops arriving, Arm A stores nothing — and the artifact is byte-identical
+ * to a model that never spoke. AC1 is explicitly deferred to an operator smoke
+ * test, and without an account of what the gate SAW that smoke test cannot tell
+ * "the gate never opened" from "the track was dead".
+ * ======================================================================== */
+
+describe('createInboundAudioTap — the gate reports what it dropped (round 3, R3-3)', () => {
+  it('a full track with NO window opened: zero admitted, non-zero dropped', () => {
+    // THE diagnostic case. Today this is indistinguishable from a mute model.
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('remote'));
+
+    fake.emit(new Float32Array(2_048));
+    fake.emit(new Float32Array(2_048));
+
+    expect(tap.take()).toHaveLength(0);
+    expect(tap.stats()).toEqual({ admitted: 0, dropped: 4_096 });
+  });
+
+  it('a DEAD track is distinguishable from a shut gate: both counts are zero', () => {
+    // The other half of the diagnosis. "0 seen" is a track problem; "seen but
+    // 0 admitted" is a gate problem, and a smoke run must be able to say which.
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('remote'));
+    tap.startWindow();
+
+    expect(tap.stats()).toEqual({ admitted: 0, dropped: 0 });
+  });
+
+  it('admitted always equals take().length, and the two counts add up to the whole track', () => {
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('remote'));
+
+    fake.emit(new Float32Array(100)); // before the window: dropped
+    tap.startWindow();
+    fake.emit(new Float32Array(40)); // speech: admitted
+    tap.endWindow();
+    fake.emit(new Float32Array(INBOUND_TAIL_GRACE_SAMPLES + 25)); // grace, then dropped
+
+    const stats = tap.stats();
+    expect(stats.admitted).toBe(tap.take().length);
+    expect(stats.admitted).toBe(40 + INBOUND_TAIL_GRACE_SAMPLES);
+    expect(stats.dropped).toBe(125);
+    expect(stats.admitted + stats.dropped).toBe(100 + 40 + INBOUND_TAIL_GRACE_SAMPLES + 25);
+  });
+
+  it('counts nothing before attach and nothing after close — the tap only accounts for its own track', () => {
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    expect(tap.stats()).toEqual({ admitted: 0, dropped: 0 });
+
+    tap.attach(fakeStream('remote'));
+    fake.emit(new Float32Array(10));
+    void tap.close();
+    fake.emit(new Float32Array(999));
+    // The 999 landed after the tap was released: it was never seen, so counting
+    // it would misreport a healthy run as a lossy one.
+    expect(tap.stats()).toEqual({ admitted: 0, dropped: 10 });
   });
 });
 

@@ -29,13 +29,35 @@ interface StartedSource {
   data: Float32Array;
 }
 
-function makeFakeContext() {
+/** A promise whose settlement a test controls — R3-6's close sequencing. */
+function makeGate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+interface FakeContextOptions {
+  /** Make `ctx.close()` reject, as a wedged hardware context can. */
+  closeRejects?: boolean;
+}
+
+function makeFakeContext(options: FakeContextOptions = {}) {
   const buffers: { channels: number; length: number; sampleRate: number; data: Float32Array }[] = [];
   const sources: StartedSource[] = [];
   const factoryArgs: { sampleRate: number }[] = [];
   const destinations: OutboundDestinationLike[] = [];
   const track = { kind: 'audio', tag: 'outbound-track' };
   const state = { closes: 0 };
+  /**
+   * TICKET 046 ROUND 3 (R3-6) — a real `AudioContext.close()` is asynchronous,
+   * and this gate is what lets a test hold it open. Round 2 made the INBOUND
+   * tap's close awaitable because a realtime Replay run holds TWO contexts
+   * against Chrome's ~6-context cap; this sink is the other one, and it was
+   * left fire-and-forget while `runner.ts`'s comment claimed both were covered.
+   */
+  const closeGate = makeGate();
 
   const ctx: OutboundAudioContextLike = {
     currentTime: 0,
@@ -75,6 +97,8 @@ function makeFakeContext() {
     },
     close: () => {
       state.closes += 1;
+      if (options.closeRejects === true) return Promise.reject(new Error('context wedged'));
+      return closeGate.promise;
     },
   };
 
@@ -83,7 +107,17 @@ function makeFakeContext() {
     return ctx;
   };
 
-  return { ctx, buffers, sources, factoryArgs, destinations, track, state, audioContextFactory };
+  return {
+    ctx,
+    buffers,
+    sources,
+    factoryArgs,
+    destinations,
+    track,
+    state,
+    closeGate,
+    audioContextFactory,
+  };
 }
 
 describe('createOutboundAudioSink — 24 kHz, never 16 kHz (ticket 043)', () => {
@@ -171,13 +205,72 @@ describe('createOutboundAudioSink — close() (ticket 043)', () => {
     const sink = createOutboundAudioSink({ audioContextFactory: fake.audioContextFactory });
 
     sink.write(new Int16Array(480));
-    sink.close();
-    sink.close();
+    void sink.close();
+    void sink.close();
     expect(fake.state.closes).toBe(1);
 
     // A paced frame that lands after stop() must not throw: it would fail a run
     // that had already produced every measurement it was going to.
     expect(() => sink.write(new Int16Array(480))).not.toThrow();
     expect(fake.sources).toHaveLength(1);
+  });
+});
+
+/* ===========================================================================
+ * TICKET 046 ROUND 3 (R3-6) — the context close is SEQUENCED, not fired and
+ * forgotten. The exact mirror of `inboundAudio.ts`'s R2-7 close.
+ *
+ * A realtime Replay run holds TWO AudioContexts: this sink and the inbound tap.
+ * Chrome caps concurrent hardware contexts at roughly six, so across a 60-run
+ * sweep a lagging close is what eventually makes a construction throw and kills
+ * a run. Round 2 fixed the tap and left this one — while `runner.ts`'s comment
+ * explained the await by saying the run holds two. A comment claiming protection
+ * the code does not give is worse than either half alone.
+ * ======================================================================== */
+
+describe('createOutboundAudioSink — close() awaits the context (round 3, R3-6)', () => {
+  it('returns a promise that settles only once ctx.close() has settled', async () => {
+    const fake = makeFakeContext();
+    const sink = createOutboundAudioSink({ audioContextFactory: fake.audioContextFactory });
+    sink.write(new Int16Array(480));
+
+    const order: string[] = [];
+    const closed = Promise.resolve(sink.close()).then(() => order.push('sink.close resolved'));
+
+    // Idempotent AND still awaitable: a second caller gets the same close, not a
+    // second `ctx.close()` and not a promise that resolves early.
+    expect(sink.close()).toBeInstanceOf(Promise);
+    expect(fake.state.closes).toBe(1);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).toEqual([]);
+
+    order.push('ctx.close settled');
+    fake.closeGate.resolve();
+    await closed;
+    expect(order).toEqual(['ctx.close settled', 'sink.close resolved']);
+  });
+
+  it('a context that FAILS to close does not reject the caller — nothing can act on it', async () => {
+    // Same rule as the inbound tap: a wedged context is not something a run can
+    // act on, and rejecting here would surface as an unhandled rejection in the
+    // middle of a sweep.
+    const fake = makeFakeContext({ closeRejects: true });
+    const sink = createOutboundAudioSink({ audioContextFactory: fake.audioContextFactory });
+    await expect(Promise.resolve(sink.close())).resolves.toBeUndefined();
+  });
+
+  it('writes after the close has settled are still inert', async () => {
+    const fake = makeFakeContext();
+    const sink = createOutboundAudioSink({ audioContextFactory: fake.audioContextFactory });
+
+    const closed = Promise.resolve(sink.close());
+    fake.closeGate.resolve();
+    await closed;
+
+    expect(() => sink.write(new Int16Array(480))).not.toThrow();
+    expect(fake.sources).toHaveLength(0);
   });
 });

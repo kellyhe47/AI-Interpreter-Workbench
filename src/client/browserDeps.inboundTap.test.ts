@@ -146,6 +146,29 @@ describe('browserDeps — the inbound tap is REPLAY ONLY (ticket 046)', () => {
     expect(SOURCE.includes("from './audio/inboundAudio'")).toBe(true);
   });
 
+  it('the PUBLISHED factory is the one runOnce is BOUND to (round 3, R3-5)', () => {
+    // R2-1 pins the factory the bag PUBLISHES. It cannot pin that `runOnce` uses
+    // that same factory: verified, publishing the correctly-wired one while
+    // binding `runnerDeps.createTransport` to a second, UNWIRED factory left the
+    // whole suite green. Nothing observable distinguishes them from outside —
+    // `runOnce` builds a real transport and would need a real network — so this
+    // is a SOURCE-TEXT assertion by necessity, and is labelled as such.
+    //
+    // Both sites must reference the ONE `const createTransport`, by shorthand:
+    // a second arrow function at either site fails this.
+    expect(REPLAY_DEPS_SOURCE).toMatch(
+      /const runnerDeps: RunnerDeps = \{[^}]*\bcreateTransport,/s,
+    );
+    // ...and the bag publishes the same binding, not a copy of the wiring.
+    expect(REPLAY_DEPS_SOURCE).toMatch(/const createTransport = \(config: RunOnceConfig\)/);
+    // Exactly ONE transport factory is declared in this function.
+    expect(REPLAY_DEPS_SOURCE.match(/const createTransport\b/g)).toHaveLength(1);
+    // `startBatch` runs through the SAME runnerDeps, so a sweep and a single run
+    // cannot end up on different wiring.
+    expect(REPLAY_DEPS_SOURCE).toMatch(/createRunOnceExecutor\(runnerDeps\)/);
+    expect(REPLAY_DEPS_SOURCE).toMatch(/deps: runnerDeps/);
+  });
+
   it('REGRESSION GUARD: the LIVE transport factory wires NO tap — Live persists no audio at all', () => {
     const liveHalf = SOURCE.split('export function buildBrowserDeps')[1]!;
     expect(liveHalf.includes('createInboundAudioTap')).toBe(false);

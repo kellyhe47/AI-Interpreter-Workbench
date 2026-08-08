@@ -36,7 +36,12 @@ import type { Recording, Run } from '../state/ledger';
 import { FixtureTransport, type FixtureScriptEvent } from '../transport/fixture';
 import { FRAME_SAMPLES } from './pacer';
 import type { RecordingsClient, RunAudioUpload, RunsClient } from './recordingsClient';
-import { runOnce, type RunOnceConfig, type RunnerDeps } from './runner';
+import {
+  CAPTURE_GATE_NEVER_OPENED,
+  runOnce,
+  type RunOnceConfig,
+  type RunnerDeps,
+} from './runner';
 
 const ramp = (n: number): Int16Array =>
   Int16Array.from({ length: n }, (_, i) => ((i * 7919) % 65536) - 32768);
@@ -282,6 +287,13 @@ describe('runOnce — the output audio is UPLOADED, not merely returned', () => 
     expect(h.uploads).toEqual([]);
     expect(h.posted[0]!.outputAudioPath).toBeUndefined();
     expect(result.run.outputAudioPath).toBeUndefined();
+
+    // ROUND 3 (R3-7) — and NO capture diagnostic. Cascade has no capture path at
+    // all, so `outputAudioStats()` is absent rather than `{ 0, 0 }`: ABSENT is
+    // not a symptom. A runner that read a missing seam as "saw a track, admitted
+    // nothing" would stamp this line on every cascade run that fell silent.
+    expect(result.run.errors.some((e) => e.startsWith(CAPTURE_GATE_NEVER_OPENED))).toBe(false);
+    expect(result.run.errors).toEqual([]);
   });
 
   it('a DECODED sample always wins: a transport with both routes uploads only onAudio (R2-6)', async () => {

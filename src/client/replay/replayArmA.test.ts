@@ -37,7 +37,13 @@ import {
 import type { InterpreterTransport } from '../transport/types';
 import { FRAME_MS, FRAME_SAMPLES } from './pacer';
 import type { RecordingsClient, RunsClient } from './recordingsClient';
-import { runOnce, type RunOnceConfig, type RunnerDeps } from './runner';
+import {
+  CAPTURE_GATE_NEVER_OPENED,
+  TRANSPORT_CLOSE_TIMEOUT_MS,
+  runOnce,
+  type RunOnceConfig,
+  type RunnerDeps,
+} from './runner';
 
 /** Four utterances, one per second of a 4 s clip — a PRD §9 corpus take. */
 const MANIFEST: CorpusUtterance[] = [
@@ -183,6 +189,16 @@ interface ArmAHarnessOptions {
    */
   mute?: boolean;
   /**
+   * ROUND 3 (R3-7) — THE GATE NEVER OPENS, while the track keeps delivering.
+   *
+   * This is the failure mode capture acquired by hanging off a data-channel
+   * event: if `output_audio_buffer.started` stops arriving (or the gate wiring
+   * regresses), Arm A stores nothing and the stored artifact is byte-identical
+   * to `mute` above. The two MUST be distinguishable, or the operator smoke test
+   * AC1 is deferred to cannot confirm AC1 — only fail to contradict it.
+   */
+  gateStuck?: boolean;
+  /**
    * ROUND 2 (R2-7) — hold the tap's context close open, so a run that does not
    * WAIT for it is visible. Two AudioContexts per realtime run against Chrome's
    * ~6-context cap is a 60-run sweep that dies part-way through.
@@ -227,6 +243,8 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
   const closeGate = new Promise<void>((res) => {
     releaseClose = res;
   });
+  /** R3-1 — the virtual clock at which the run ASKED the tap to close. */
+  const closedAt: number[] = [];
   /** Clock at each `output_audio_buffer.started` the model sent. */
   const queuedAt: number[] = [];
   /** What `uploadAudio` was given, by run id. */
@@ -343,17 +361,30 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
                   attach: (stream: unknown) => entry.attached.push(stream),
                   startWindow: () => {
                     windows.push('start');
+                    // R3-7 — a gate that is asked to open and does not. The
+                    // track still runs; nothing is admitted.
+                    if (opts.gateStuck === true) return;
                     gate.capturing = true;
                     gate.grace = 0;
                   },
                   endWindow: () => {
                     windows.push('end');
+                    // Inert without an open window — a stray `.stopped` must not
+                    // hand the gap a grace it never earned (pinned in
+                    // inboundAudio.test.ts, and what makes `gateStuck` admit
+                    // NOTHING rather than one grace per utterance).
+                    if (!gate.capturing) return;
                     gate.capturing = false;
                     gate.grace = INBOUND_TAIL_GRACE_SAMPLES;
                   },
+                  stats: () => ({
+                    admitted: trackAudio.length,
+                    dropped: delivered.length - trackAudio.length,
+                  }),
                   take: () => Int16Array.from(trackAudio),
                   close: (): void | Promise<void> => {
                     entry.closed += 1;
+                    closedAt.push(Date.now());
                     return opts.holdClose === true ? closeGate : undefined;
                   },
                 };
@@ -381,6 +412,7 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
     delivered,
     trackAudio,
     windows,
+    closedAt,
     releaseClose: (): void => releaseClose(),
     queuedAt,
     uploads,
@@ -665,10 +697,14 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
         return r;
       },
     );
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    // Just past the close request (~4.2 s) and WELL INSIDE R3-1's budget, so
+    // this test is about the wait and the next one is about its bound.
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 500);
 
     // The transport asked the tap to close, and the run is WAITING on it.
+    expect(h.closedAt).toHaveLength(1);
     expect(h.taps[0]!.closed).toBe(1);
+    expect(Date.now() - h.closedAt[0]!).toBeLessThan(TRANSPORT_CLOSE_TIMEOUT_MS);
     expect(settled).toBe(false);
     // Nothing was uploaded ahead of the close either — the run really stopped.
     expect(h.uploads).toEqual([]);
@@ -678,8 +714,147 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     const result = await done;
 
     expect(settled).toBe(true);
+    // A HEALTHY close costs the run nothing: it resumed the moment the context
+    // was gone, not at the end of the budget.
+    expect(Date.now() - h.closedAt[0]!).toBeLessThan(TRANSPORT_CLOSE_TIMEOUT_MS);
     expect(result.outputAudio.length).toBeGreaterThan(0);
     expect(h.uploads).toHaveLength(1);
+    // ...and R3-1's deadline is CLEARED when it is not needed. A race that
+    // leaves its timer armed keeps a 2 s handle alive per run, and in a 60-run
+    // sweep that is 60 of them plus a `vi.useFakeTimers` teardown that lies.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('BOUNDS the close wait: a WEDGED context costs a leak, never the run (round 3, R3-1)', async () => {
+    // Round 2 made the wait unbounded and nothing races it: `startBatch`'s
+    // `runTimeoutMs` only calls `controller.abort()`, and `runOnce` reads the
+    // signal nowhere after pacing. So an AudioContext whose `close()` never
+    // settles — a device change or removal is the classic cause — freezes the
+    // run "running" forever: the sweep stops advancing, no Run is stored and no
+    // error is reported. That is a WORSE trade than the leak it replaced.
+    const h = makeArmAHarness({ holdClose: true });
+    let resolvedAt: number | null = null;
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps }).then(
+      (r) => {
+        resolvedAt = Date.now();
+        return r;
+      },
+    );
+
+    // The close is NEVER released. Advance far past the budget.
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 30_000);
+    expect(h.taps[0]!.closed).toBe(1);
+
+    // THE criterion: the run finished anyway.
+    expect(resolvedAt).not.toBeNull();
+    const waited = resolvedAt! - h.closedAt[0]!;
+    // It really waited the budget (a run that skipped the await entirely would
+    // show ~0 here and R2-7 above would be meaningless)...
+    expect(waited).toBeGreaterThanOrEqual(TRANSPORT_CLOSE_TIMEOUT_MS);
+    // ...and no longer than it.
+    expect(waited).toBeLessThanOrEqual(TRANSPORT_CLOSE_TIMEOUT_MS + FRAME_MS);
+
+    // ...AND the measurement survived: giving up on the context must not give
+    // up on the run, which is the whole point of bounding rather than removing.
+    const result = await done;
+    expect(result.run.status).toBe('complete');
+    expect(result.run.timings.audio_queued).not.toBeNull();
+    expect(result.outputAudio.length).toBeGreaterThan(0);
+    expect(h.uploads).toHaveLength(1);
+    expect(result.run.outputAudioPath).toBe(`runs/${result.run.id}.out.wav`);
+  });
+
+  it('A GATE THAT NEVER OPENED IS DIAGNOSED, not silently stored as silence (round 3, R3-7)', async () => {
+    // The whole point. AC1 — an Arm A run returns audible speech from
+    // GET /api/runs/:id/audio — is the one criterion no vitest run can prove,
+    // and the ticket concedes it to an operator smoke test in a real Chrome.
+    // Since capture hangs off `output_audio_buffer.started`, a gate that never
+    // opened stores an artifact BYTE-IDENTICAL to a model that never spoke. A
+    // smoke test that cannot tell those apart does not confirm AC1.
+    const h = makeArmAHarness({ gateStuck: true });
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    // The track really ran and the gate really refused all of it.
+    expect(h.delivered.length).toBeGreaterThan(0);
+    expect(h.trackAudio).toEqual([]);
+    expect(result.outputAudio).toHaveLength(0);
+
+    // THE criterion: the run SAYS SO, in the place the operator already reads.
+    const line = result.run.errors.find((e) => e.startsWith(CAPTURE_GATE_NEVER_OPENED));
+    expect(line).toBeDefined();
+    // ...naming BOTH numbers, because "seen 288000, admitted 0" is the whole
+    // diagnosis and "capture failed" is not.
+    expect(line).toContain(String(h.delivered.length));
+    expect(line).toContain('0');
+    // The line survives into the append-only ledger, not just the return value.
+    expect(h.posted[0]!.errors).toEqual(result.run.errors);
+  });
+
+  it('the diagnostic does NOT fail the run — it stays complete and aggregatable (round 3, R3-7)', async () => {
+    // Exactly the 045 upload-failure contract: `errors` carries the symptom and
+    // `status` carries the verdict. Aggregation (exportResults, results/derive)
+    // gates on `status === 'complete'` and never on `errors`, so a diagnostic
+    // that flipped the status would silently disqualify runs from every figure —
+    // far worse than the blind spot it replaces.
+    const h = makeArmAHarness({ gateStuck: true });
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    expect(result.run.status).toBe('complete');
+    expect(result.cancelled).toBeFalsy();
+    // Every measurement is untouched: this run is still evidence.
+    expect(result.run.timings.audio_queued).toBe(h.queuedAt.at(-1));
+    expect(result.run.timings.audio_queued).not.toBeNull();
+    expect(result.run.utterances).toHaveLength(MANIFEST.length);
+    for (const u of result.run.utterances ?? []) {
+      expect(u.status).toBe('complete');
+      expect(u.timings.audio_queued).not.toBeNull();
+    }
+    // Segmentation still agreed — the diagnostic is the ONLY line.
+    expect(result.run.errors).toHaveLength(1);
+    // ...and it honestly claims no audio, so the play control stays absent
+    // rather than offering a button that 404s.
+    expect(result.audioReady).toBe(false);
+    expect(h.uploads).toEqual([]);
+    expect(result.run.outputAudioPath).toBeUndefined();
+  });
+
+  it('A HEALTHY run carries NO diagnostic, and neither does a genuinely mute model (round 3, R3-7)', async () => {
+    // Both halves of the negative. Without them the assertion above is vacuous:
+    // a runner that stamped the line unconditionally would pass it.
+    const healthy = makeArmAHarness();
+    const healthyDone = runOnce({
+      recordingId: RECORDING.id,
+      config: REALTIME_CONFIG,
+      deps: healthy.deps,
+    });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const withAudio = await healthyDone;
+
+    expect(withAudio.outputAudio.length).toBeGreaterThan(0);
+    expect(withAudio.run.errors).toEqual([]);
+
+    // A model that answered on the data channel and put NOTHING on the track:
+    // the gate opened and closed as it should, and there was simply no audio.
+    // `{ admitted: 0, dropped: 0 }` is a DEAD TRACK, not a broken gate — and
+    // this is precisely the run the diagnostic must NOT claim.
+    vi.setSystemTime(0);
+    const silent = makeArmAHarness({ mute: true });
+    const silentDone = runOnce({
+      recordingId: RECORDING.id,
+      config: REALTIME_CONFIG,
+      deps: silent.deps,
+    });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const noAudio = await silentDone;
+
+    expect(silent.delivered).toEqual([]);
+    expect(noAudio.outputAudio).toHaveLength(0);
+    expect(noAudio.run.errors.some((e) => e.startsWith(CAPTURE_GATE_NEVER_OPENED))).toBe(false);
+    expect(noAudio.run.status).toBe('complete');
   });
 
   it('NOTHING AUTOPLAYS, and the run ends up judgeable in blind compare', async () => {
