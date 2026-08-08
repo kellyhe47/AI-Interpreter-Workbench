@@ -64,13 +64,16 @@ function providers(announces: boolean): CascadeProviders {
   };
 }
 
-async function timingsOfOneUtterance(announces: boolean): Promise<CascadeTimestamps> {
+async function recordOfOneUtterance(announces: boolean) {
   const events: CascadeEvent[] = [];
   for await (const e of runCascade(oneTurn(), providers(announces))) events.push(e);
   const complete = events.find((e) => e.type === 'utterance.complete');
   expect(complete, 'expected one completed utterance').toBeDefined();
-  return (complete as Extract<CascadeEvent, { type: 'utterance.complete' }>).record
-    .timings as CascadeTimestamps;
+  return (complete as Extract<CascadeEvent, { type: 'utterance.complete' }>).record;
+}
+
+async function timingsOfOneUtterance(announces: boolean): Promise<CascadeTimestamps> {
+  return (await recordOfOneUtterance(announces)).timings as CascadeTimestamps;
 }
 
 describe('cascade vad_fired', () => {
@@ -101,5 +104,35 @@ describe('cascade vad_fired', () => {
     const finals = events.filter((e) => e.type === 'stt.final');
     expect(finals).toHaveLength(1);
     expect((finals[0] as Extract<CascadeEvent, { type: 'stt.final' }>).text).toBe('hello world');
+  });
+});
+
+/**
+ * TICKET 051 ROUND 2 (R2-4) — and the record must not CLAIM a mark it lacks.
+ *
+ * PRD §7: "`speech_end` is corpus ground truth in benchmark runs and
+ * VAD-derived in live sessions; the record marks which." The server stamps no
+ * `speech_end` at all — option (c) is precisely the decision not to
+ * back-derive one — yet every record it emits declared `speechEndSource:
+ * 'vad'`. Nothing reads that field today, which is exactly why it could go
+ * false unnoticed: it is PERSISTED and EXPORTED, so it outlives the session
+ * that wrote it and lands in the bundle as an assertion about a measurement
+ * that was never taken.
+ */
+describe('speechEndSource never claims a mark the record does not carry', () => {
+  it("a cascade record with no speech_end declares 'none', not 'vad'", async () => {
+    const record = await recordOfOneUtterance(true);
+    const timings = record.timings as CascadeTimestamps;
+
+    expect(timings.speech_end).toBeUndefined();
+    expect(record.speechEndSource).toBe('none');
+    // 'vad' would mean "this speech_end came from the endpointer", and there
+    // is no speech_end on this record at all.
+    expect(record.speechEndSource).not.toBe('vad');
+  });
+
+  it('GUARD: the endpointer mark itself is still stamped — only the CLAIM changed', async () => {
+    const record = await recordOfOneUtterance(true);
+    expect((record.timings as CascadeTimestamps).vad_fired).toBeTypeOf('number');
   });
 });

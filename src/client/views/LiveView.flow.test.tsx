@@ -49,7 +49,7 @@ const CASCADE_SESSION = { mode: 'cascade' as const };
 // ---------------------------------------------------------------------------
 
 describe('the single target card', () => {
-  it('cascade: in-flight bar, then ready with text, duration readout, THREE span-labelled stages', async () => {
+  it('cascade: in-flight bar, then ready with text, duration readout, FOUR span-labelled stages', async () => {
     renderApp({
       initialState: CASCADE_SESSION,
       scripts: { cascade: cascadeUtteranceScript() },
@@ -76,16 +76,16 @@ describe('the single target card', () => {
     expect(card.querySelector('[data-utterance-duration]')).toHaveTextContent('2.1 s');
     expect(within(card).queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
 
-    // TICKET 051 — numbers, not bars alone, and every row NAMES ITS SPAN.
-    // The old `endpointing` row is gone (Live cannot know when the human
-    // stopped, only when the endpointer decided they had) and `tts` + `queue`
-    // are one observable span: text in, audio ready.
-    // Marks: vad_fired 500 · stt_final 542 · mt_first_token 840 · audio_queued
-    // 1053 -> 0.04 / 0.30 / 0.21, total 0.55 s from the detected end of speech.
+    // TICKET 051 — numbers, not bars alone, and every row NAMES ITS SPAN. The
+    // old `endpointing` row is gone: Live cannot know when the human stopped,
+    // only when the endpointer decided they had.
+    // Marks: vad_fired 500 · stt_final 542 · mt_first_token 840 ·
+    // tts_first_byte 1041 · audio_queued 1053 -> 0.04 / 0.30 / 0.20 / 0.01.
     const stages: Array<[string, string]> = [
       ['transcribe', '0.04 s'],
       ['translate', '0.30 s'],
-      ['speak', '0.21 s'],
+      ['synthesize', '0.20 s'],
+      ['deliver', '0.01 s'],
     ];
     for (const [label, s] of stages) {
       const row = stageRow(card, label);
@@ -93,10 +93,13 @@ describe('the single target card', () => {
       expect(row).toHaveTextContent(label);
       expect(row).toHaveTextContent(s);
     }
-    expect(card.querySelectorAll('[data-stage-row]')).toHaveLength(3);
+    expect(card.querySelectorAll('[data-stage-row]')).toHaveLength(4);
     expect(stageRow(card, 'endpointing')).toBeNull();
 
-    expect(card.querySelector('[data-live-total]')).toHaveTextContent('0.55 s');
+    // This SCRIPT is fixture-shaped and carries a corpus-style `speech_end`,
+    // which still wins as the start (Replay's rule, unmoved). The end is the
+    // first synthesized byte either way: 1041 − 0.
+    expect(card.querySelector('[data-live-total]')).toHaveTextContent('1.04 s');
     expect(card).toHaveTextContent(COPY.cascadeIntervals);
     expect(card).not.toHaveTextContent(COPY.realtimeIntervals);
   });
@@ -128,7 +131,9 @@ describe('the single target card', () => {
 
     // The model interval is labelled opaque — the asymmetry is the finding.
     expect(stageRow(card, 'model')).toHaveTextContent(/opaque/i);
-    expect(card.querySelector('[data-live-total]')).toHaveTextContent('0.48 s');
+    // The script's fixture-shaped `speech_end` still wins as the start, and
+    // realtime has no synthesis mark, so the headline is 980 − 0.
+    expect(card.querySelector('[data-live-total]')).toHaveTextContent('0.98 s');
     expect(card).toHaveTextContent(COPY.realtimeIntervals);
   });
 });
@@ -367,8 +372,11 @@ describe('stopping the session', () => {
     expect(footer).toHaveTextContent('2 utterances');
     expect(footer).toHaveTextContent('p50');
     expect(footer).toHaveTextContent('p95');
-    // audio_queued − speech_end = 1053 ms for both records → 1.05 s.
-    expect(footer).toHaveTextContent('1.05 s');
+    // ROUND 2 — the sample ends at the FIRST synthesized byte, so
+    // tts_first_byte 1041 − speech_end 0 for both records → 1.04 s. (It ended
+    // at `audio_queued` 1053 before; that mark is the LAST chunk of synthesis
+    // and it is not the quantity Arm A can produce.)
+    expect(footer).toHaveTextContent('1.04 s');
     // session cost = 2 × $0.005 = $0.01.
     expect(footer).toHaveTextContent('session');
     expect(footer).toHaveTextContent('$0.01');
@@ -416,8 +424,8 @@ describe('stopping the session', () => {
     expect(session.utterances).toHaveLength(2);
     expect(session.stability.utterancesCompleted).toBe(2);
     expect(session.stability.disconnects).toBe(0);
-    expect(session.latency.p50).toBe(1053);
-    expect(session.latency.p95).toBe(1053);
+    expect(session.latency.p50).toBe(1041);
+    expect(session.latency.p95).toBe(1041);
     expect(session.cost.totalUsd).toBeCloseTo(0.01, 6);
 
     // Free conversation has no reference transcript.

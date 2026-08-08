@@ -67,7 +67,11 @@ export const COPY = {
   // longer renders a separate `queue` (over WebRTC there is no observable
   // instant between "model produced audio" and "audio queued"). The note has
   // to count what is actually on the card.
-  cascadeIntervals: '3 intervals · all visible',
+  //
+  // ROUND 2 — and cascade renders FOUR, because `tts_first_byte` came back as a
+  // boundary: it is the only mark from which cascade's time-to-first-audio (the
+  // quantity Arm A can also produce) can be recovered.
+  cascadeIntervals: '4 intervals · all visible',
   realtimeIntervals: '1 interval · opaque',
   disconnectedBanner:
     'Disconnected — reconnect attempts exhausted (5 of 5) · transcript history intact',

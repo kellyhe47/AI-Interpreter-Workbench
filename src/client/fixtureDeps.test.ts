@@ -132,7 +132,7 @@ describe('buildFixtureDeps — SessionDeps shape App accepts', () => {
 });
 
 describe('buildFixtureDeps — scripted utterances', () => {
-  it('cascade arm: transcripts flow and completions carry fixture providers + 5-stage timings', async () => {
+  it('cascade arm: transcripts flow and completions carry fixture providers + Live-shaped timings', async () => {
     const { events } = await runArm(buildFixtureDeps(), CASCADE);
 
     expect(events.source.some((e) => e.kind === 'partial')).toBe(true);
@@ -144,8 +144,18 @@ describe('buildFixtureDeps — scripted utterances', () => {
     expect(record.providers).toEqual({ stt: 'fixture', mt: 'fixture', tts: 'fixture' });
     expect(isRealRecord(record)).toBe(false);
 
-    const iv = deriveCascadeIntervals(record.timings as CascadeTimestamps);
-    expect(iv.endpointing).not.toBeNull();
+    // TICKET 051 ROUND 2 — FIXTURE LIVE MODELS REAL LIVE. `?fixture=1` is the
+    // manual-QA path onto the very surface this ticket rebuilt, so a fixture
+    // that emits a mark no live transport can produce makes QA sign off on a
+    // card the product cannot render. `speech_end` is corpus ground truth and
+    // Live never has it — and a record carrying both anchors renders a total
+    // anchored on one while its rows are anchored on the other.
+    const marks = record.timings as CascadeTimestamps;
+    expect(marks.speech_end).toBeUndefined();
+    const iv = deriveCascadeIntervals(marks);
+    // The corpus-only interval is therefore absent, exactly as in Live...
+    expect(iv.endpointing).toBeNull();
+    // ...and every interval Live can actually observe is present.
     expect(iv.stt).not.toBeNull();
     expect(iv.mt).not.toBeNull();
     expect(iv.tts).not.toBeNull();
@@ -161,8 +171,13 @@ describe('buildFixtureDeps — scripted utterances', () => {
     expect(record.providers).toEqual({ stt: 'fixture', mt: 'fixture', tts: 'fixture' });
     expect(isRealRecord(record)).toBe(false);
 
-    const iv = deriveRealtimeIntervals(record.timings as RealtimeTimestamps);
-    expect(iv.endpointing).not.toBeNull();
+    const marks = record.timings as RealtimeTimestamps;
+    // Same rule on the realtime side (ticket 051 round 2).
+    expect(marks.speech_end).toBeUndefined();
+    const iv = deriveRealtimeIntervals(marks);
+    expect(iv.endpointing).toBeNull();
+    // `first_audio_delta` is kept: the fixture may script marks the WebRTC
+    // transport lacks, so long as nothing DERIVES a Live figure from them.
     expect(iv.model).not.toBeNull();
     expect(iv.queue).not.toBeNull();
   });

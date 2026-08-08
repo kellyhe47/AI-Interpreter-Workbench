@@ -58,6 +58,8 @@ afterEach(() => {
 
 /** The span both architectures anchor on, in the operator's words. */
 const DETECTED_END = 'detected end of speech';
+/** ...and the instant both architectures END on. See section 2b. */
+const FIRST_AUDIO = 'audio starts';
 
 /* ------------------------------------------------------------------ scripts */
 
@@ -102,14 +104,31 @@ function liveRealtimeScript(opts: RealtimeOpts = {}): FixtureScriptEvent[] {
   return events;
 }
 
-/** Cascade marks: NO speech_end — the server has no ground truth either. */
+/**
+ * Cascade marks: NO speech_end — the server has no ground truth either.
+ *
+ * ROUND 2 — the gap between `tts_first_byte` and `audio_queued` is DELIBERATELY
+ * enormous here (2.76 s). Cascade's `audio_queued` is re-stamped on every TTS
+ * chunk (`orchestrator.ts:309`, "last chunk wins"), so it is the moment the
+ * LAST byte of synthesis was queued and it grows with the length of the
+ * utterance. Arm A's `audio_queued` comes from `output_audio_buffer.started` —
+ * the FIRST audio. Anything that renders the two under one label is comparing
+ * time-to-first-audio against time-to-last-audio, and the wider this gap is the
+ * louder such an implementation fails.
+ *
+ *   transcribe  810 − 500  = 310 ms
+ *   translate  1030 − 810  = 220 ms
+ *   synthesize 1740 − 1030 = 710 ms   <- ends at the FIRST synthesized byte
+ *   deliver    4500 − 1740 = 2760 ms  <- real information, never the headline
+ *   HEADLINE   1740 − 500  = 1240 ms  == Arm A's headline, by construction
+ */
 function cascadeMarks(base: number) {
   return {
     vad_fired: base + 500,
     stt_final: base + 810,
     mt_first_token: base + 1_030,
-    tts_first_byte: base + 1_300,
-    audio_queued: base + 1_510,
+    tts_first_byte: base + 1_740,
+    audio_queued: base + 4_500,
   };
 }
 
@@ -149,10 +168,20 @@ function liveTotal(): HTMLElement {
   return el as HTMLElement;
 }
 
+/** Start a Live session of one architecture and run it to `ready`. */
+async function runOneUtterance(
+  mode: 'realtime' | 'cascade',
+  script: FixtureScriptEvent[],
+): Promise<void> {
+  renderApp({ initialState: { mode }, scripts: { [mode]: script } });
+  await clickStartMicrophone();
+  await advance(200);
+}
+
 /* =========================================================== 1 — Arm A rows */
 
 describe('Live · Arm A renders ONE row, from the only span WebRTC can observe', () => {
-  it('one row spanning detected end of speech -> audio ready, with its figure', async () => {
+  it('one row spanning detected end of speech -> audio starts, with its figure', async () => {
     renderApp({ scripts: { realtime: liveRealtimeScript() } });
     await clickStartMicrophone();
     await advance(200);
@@ -164,10 +193,12 @@ describe('Live · Arm A renders ONE row, from the only span WebRTC can observe',
     expect(stageRowLabels()).toEqual(['model']);
 
     const row = stageRow(card, 'model')!;
-    // audio_queued − server_speech_stopped = 1240 ms.
+    // audio_queued − server_speech_stopped = 1240 ms. Arm A's `audio_queued`
+    // is stamped ONCE from `output_audio_buffer.started` (realtime.ts:599), so
+    // this is time-to-FIRST-audio — which is what the span must say.
     expect(text(row)).toContain('1.24 s');
     // It NAMES ITS SPAN — no glossary, no jargon standing alone.
-    expect(text(row)).toContain(`${DETECTED_END} → audio ready`);
+    expect(text(row)).toContain(`${DETECTED_END} → ${FIRST_AUDIO}`);
     // The opacity note is still true and still there: one model does
     // recognition, translation and voice, so no finer split is observable.
     expect(text(row)).toMatch(/opaque/i);
@@ -206,22 +237,23 @@ describe('Live · Arm A renders ONE row, from the only span WebRTC can observe',
 
 /* ========================================================= 2 — Cascade rows */
 
-describe('Live · Cascade renders the three stages it CAN see, from real marks', () => {
-  it('transcribe / translate / speak, each naming its span, each carrying a figure', async () => {
-    renderApp({
-      initialState: { mode: 'cascade' as const },
-      scripts: { cascade: liveCascadeScript() },
-    });
-    await clickStartMicrophone();
-    await advance(200);
+describe('Live · Cascade renders the four stages it CAN see, from real marks', () => {
+  it('transcribe / translate / synthesize / deliver, each naming its span and figure', async () => {
+    await runOneUtterance('cascade', liveCascadeScript());
 
-    expect(stageRowLabels()).toEqual(['transcribe', 'translate', 'speak']);
+    expect(stageRowLabels()).toEqual(['transcribe', 'translate', 'synthesize', 'deliver']);
 
     const expected: Array<[string, string, string]> = [
       // label, span, figure
       ['transcribe', `${DETECTED_END} → transcript`, '0.31 s'],
       ['translate', 'transcript → translated text', '0.22 s'],
-      ['speak', 'translated text → audio ready', '0.48 s'],
+      // ROUND 2 — `tts_first_byte` is a mark the server DOES stamp
+      // (orchestrator.ts:307) and it is the only one from which cascade's
+      // time-to-first-audio can be recovered. Folding it into one `speak` row
+      // deleted the one boundary that makes the two arms comparable, and cost
+      // an observable interval against PRD §8's auditability count.
+      ['synthesize', `translated text → ${FIRST_AUDIO}`, '0.71 s'],
+      ['deliver', `${FIRST_AUDIO} → audio complete`, '2.76 s'],
     ];
     for (const [label, span, figure] of expected) {
       const row = stageRow(targetCard(), label);
@@ -230,9 +262,22 @@ describe('Live · Cascade renders the three stages it CAN see, from real marks',
       expect(text(row!), `${label} figure`).toContain(figure);
       expect(text(row!)).not.toContain('—');
     }
+  });
 
-    // audio_queued − vad_fired = 1010 ms, and it is the sum of the three.
-    expect(text(liveTotal())).toContain('1.01 s');
+  it('the headline is time-to-FIRST-audio: tts_first_byte − vad_fired, not audio_queued', async () => {
+    await runOneUtterance('cascade', liveCascadeScript());
+
+    const total = text(liveTotal());
+    // 1740 − 500. It is the sum of the first THREE rows (0.31 + 0.22 + 0.71),
+    // and `deliver` — the tail of synthesis, which scales with how long the
+    // sentence is — is deliberately outside it.
+    expect(total).toContain('1.24 s');
+    // audio_queued − vad_fired would be 4.00 s: time-to-LAST-audio, the figure
+    // that made a long cascade utterance look 4× slower than a short Arm A one.
+    expect(total).not.toContain('4.00 s');
+    // ...but `deliver` is still ON the card. It is real information; it is just
+    // not the headline.
+    expect(text(stageRow(targetCard(), 'deliver')!)).toContain('2.76 s');
   });
 
   it('the marks are read off the completion record — the server sends no stage.timing', async () => {
@@ -241,26 +286,62 @@ describe('Live · Cascade renders the three stages it CAN see, from real marks',
     // an onTiming-only path that production never exercises.
     expect(liveCascadeScript().filter((e) => e.type === 'timing')).toHaveLength(0);
 
-    renderApp({
-      initialState: { mode: 'cascade' as const },
-      scripts: { cascade: liveCascadeScript() },
-    });
-    await clickStartMicrophone();
-    await advance(200);
-
+    await runOneUtterance('cascade', liveCascadeScript());
     expect(text(stageRow(targetCard(), 'transcribe')!)).toContain('0.31 s');
   });
 
   it('renders NO endpointing row on cascade either', async () => {
-    renderApp({
-      initialState: { mode: 'cascade' as const },
-      scripts: { cascade: liveCascadeScript() },
-    });
-    await clickStartMicrophone();
-    await advance(200);
+    await runOneUtterance('cascade', liveCascadeScript());
 
     expect(stageRow(targetCard(), 'endpointing')).toBeNull();
     expect(document.body.textContent).not.toMatch(/endpointing/i);
+  });
+});
+
+/* ============================================ 2b — THE COMMENSURABILITY PIN */
+
+/**
+ * ROUND 2, R2-1 — the two arms' headlines must measure THE SAME QUANTITY.
+ *
+ * `audio_queued` means different things in the two transports:
+ *   cascade  — re-stamped per TTS chunk, last chunk wins  -> LAST audio
+ *   realtime — stamped once at output_audio_buffer.started -> FIRST audio
+ * The fixtures below are built so both arms' audio STARTS 1240 ms after the
+ * detected end of speech, while cascade's audio finishes 2760 ms later still.
+ * Any implementation anchored on the wrong end of the audio separates them.
+ */
+describe('both arms report time-to-first-audio, so their headlines are comparable', () => {
+  it('identical first-audio latency renders as an identical figure on both arms', async () => {
+    await runOneUtterance('realtime', liveRealtimeScript({ spanMs: 1_240 }));
+    const realtimeTotal = text(liveTotal());
+    const realtimeFooter = text(sessionFooter());
+    cleanup();
+
+    await runOneUtterance('cascade', liveCascadeScript());
+    const cascadeTotal = text(liveTotal());
+    const cascadeFooter = text(sessionFooter());
+
+    // Same figure, and the SAME LABEL — one quantity, one name.
+    expect(cascadeTotal).toBe(realtimeTotal);
+    expect(cascadeTotal).toContain('1.24 s');
+    // The session-level figures agree too, so a p50 pooled across a mixed
+    // ledger is not comparing playout duration against response time.
+    expect(cascadeFooter).toContain('1.24 s');
+    expect(realtimeFooter).toContain('1.24 s');
+    expect(cascadeFooter).not.toContain('4.00 s');
+  });
+
+  it('the total label names the same two events on both arms', async () => {
+    await runOneUtterance('realtime', liveRealtimeScript());
+    const realtimeLabel = text(liveTotal()).replace(/[\d.]+ s/, '').trim();
+    cleanup();
+
+    await runOneUtterance('cascade', liveCascadeScript());
+    const cascadeLabel = text(liveTotal()).replace(/[\d.]+ s/, '').trim();
+
+    expect(cascadeLabel).toBe(realtimeLabel);
+    expect(cascadeLabel).toContain(DETECTED_END);
+    expect(cascadeLabel).toContain(FIRST_AUDIO);
   });
 });
 
@@ -315,15 +396,13 @@ describe('the session footer populates from real Live utterances', () => {
     expect(footer).not.toMatch(/p95\s+—/);
   });
 
-  it('a cascade Live session populates p50 from vad_fired -> audio_queued', async () => {
-    renderApp({
-      initialState: { mode: 'cascade' as const },
-      scripts: { cascade: liveCascadeScript() },
-    });
-    await clickStartMicrophone();
-    await advance(200);
+  it('a cascade Live session populates p50 from vad_fired -> tts_first_byte', async () => {
+    await runOneUtterance('cascade', liveCascadeScript());
 
-    expect(text(sessionFooter())).toContain('1.01 s');
+    const footer = text(sessionFooter());
+    expect(footer).toContain('1.24 s');
+    // Not the last-audio figure, which is what `audio_queued` means here.
+    expect(footer).not.toContain('4.00 s');
   });
 
   it('the saved LiveSession carries the same anchored latency, not null', async () => {
@@ -358,7 +437,10 @@ function usage(inputAudioTokens: number, outputAudioTokens: number): unknown {
 
 describe('per-utterance cost is visible as the utterance completes', () => {
   /** Three utterances whose metered usage differs; costs read off the ledger. */
-  async function costsOfThreeUtterances(): Promise<{ costs: number[]; footer: string }> {
+  async function costsOfThreeUtterances(): Promise<{
+    costs: Array<number | null>;
+    footer: string;
+  }> {
     const kit = renderApp({
       scripts: {
         realtime: [
@@ -394,10 +476,107 @@ describe('per-utterance cost is visible as the utterance completes', () => {
     expect(costs[2]!).toBeGreaterThan(costs[0]!);
   });
 
-  it('an utterance the transport reported no usage for costs nothing (never invented)', async () => {
+  it('GUARD: an utterance the transport reported no usage for is NOT METERED, never $0', async () => {
+    // TICKET 052 owns the nullable-cost rule; this is the Live end of it. `0`
+    // is the claim that a turn was free, which is never true of a real one.
     const kit = renderApp({ scripts: { realtime: liveRealtimeScript({ usage: undefined }) } });
     await clickStartMicrophone();
     await advance(200);
-    expect(kit.ledger.getRecords()[0]!.costUnits).toBe(0);
+    expect(kit.ledger.getRecords()[0]!.costUnits).toBeNull();
+  });
+});
+
+/* ============================== 6 — one card, one anchor (R2-5 / R2-4 / R2-7) */
+
+/**
+ * ROUND 2, R2-5 — the card and the footer must never disagree under one label.
+ *
+ * `anchoredLatencyMs` prefers `speech_end` when a record carries it; the card's
+ * own derivation never looked at that mark, so a record carrying BOTH rendered
+ * one number on the card and a different one in the footer, both labelled
+ * "from detected end of speech". `fixtureDeps.ts:148` emits exactly such
+ * records — it escapes notice today only because fixture records fail
+ * `isRealRecord` and never reach the footer at all.
+ *
+ * The marks below are the fixture shape: a corpus-style `speech_end` 500 ms
+ * ahead of the endpointer's `vad_fired`. Whichever anchor wins, ONE of them
+ * must win everywhere.
+ */
+function bothAnchorsCascadeScript(): FixtureScriptEvent[] {
+  const marks = { speech_end: 0, ...cascadeMarks(0) };
+  return [
+    { at: 10, type: 'sourceText', kind: 'partial', text: SRC_PARTIAL_1, utt: 0 },
+    { at: 30, type: 'sourceText', kind: 'final', text: SRC_FINAL, utt: 0 },
+    { at: 40, type: 'targetText', kind: 'final', text: TGT_FINAL, utt: 0 },
+    { at: 50, type: 'audio', pcm: audioChunk(), utt: 0 },
+    {
+      at: 60,
+      type: 'utteranceComplete',
+      record: makeRecord({ id: 'utt-0', timings: marks, costUnits: 0.01 }),
+    },
+  ];
+}
+
+describe('a record carrying BOTH anchors renders ONE number, not two', () => {
+  it('the card total and the footer p50 agree', async () => {
+    await runOneUtterance('cascade', bothAnchorsCascadeScript());
+
+    // `speech_end` wins as the START (it always has — that is what keeps every
+    // Replay figure still), and the END is the first audio, as everywhere else:
+    // tts_first_byte 1740 − speech_end 0.
+    const total = text(liveTotal());
+    const footer = text(sessionFooter());
+    expect(total).toContain('1.74 s');
+    expect(footer).toContain('1.74 s');
+    // The two numbers that used to appear under one label.
+    expect(footer).not.toContain('1.24 s');
+    expect(total).not.toContain('4.50 s');
+  });
+});
+
+describe('R2-7 — a single row has no proportion to show', () => {
+  it('Arm A renders no bar; cascade, with four rows, does', async () => {
+    await runOneUtterance('realtime', liveRealtimeScript());
+    expect(stageRow(targetCard(), 'model')!.querySelector('[data-stage-bar]')).toBeNull();
+    cleanup();
+
+    await runOneUtterance('cascade', liveCascadeScript());
+    for (const label of ['transcribe', 'translate', 'synthesize', 'deliver']) {
+      expect(
+        stageRow(targetCard(), label)!.querySelector('[data-stage-bar]'),
+        `${label} bar`,
+      ).not.toBeNull();
+    }
+  });
+});
+
+describe('R2-4 — a Live record does not claim a speech_end source it has none of', () => {
+  it("realtime: speechEndSource is 'none', and no speech_end mark exists", async () => {
+    const kit = renderApp({ scripts: { realtime: liveRealtimeScript() } });
+    await clickStartMicrophone();
+    await advance(200);
+
+    const record = kit.ledger.getRecords()[0]!;
+    // Option (c) deliberately never stamps speech_end in Live. Declaring it
+    // VAD-derived is a false claim in a PERSISTED, EXPORTED field.
+    expect((record.timings as Record<string, unknown>).speech_end).toBeUndefined();
+    expect(record.speechEndSource).toBe('none');
+  });
+
+  it("GUARD: a record the controller assembles WITH a speech_end still names its source", async () => {
+    // Realtime completions are `{ utt, usage }` — the controller assembles the
+    // record from the marks it accumulated, so this exercises the very line
+    // that decides the claim. A blanket `'none'` would be just as false as the
+    // blanket `'vad'` it replaces.
+    const withSpeechEnd = liveRealtimeScript();
+    withSpeechEnd.splice(1, 0, { at: 15, type: 'timing', event: 'speech_end', t: 0, utt: 0 });
+
+    const kit = renderApp({ scripts: { realtime: withSpeechEnd } });
+    await clickStartMicrophone();
+    await advance(200);
+
+    const record = kit.ledger.getRecords()[0]!;
+    expect((record.timings as Record<string, unknown>).speech_end).toBe(0);
+    expect(record.speechEndSource).toBe('vad');
   });
 });
