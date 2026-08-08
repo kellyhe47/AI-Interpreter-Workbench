@@ -3,6 +3,8 @@
  * injectable seams (getUserMedia, audioContextFactory, pipeline) so no real
  * AudioContext ever exists in jsdom.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   startCapture,
@@ -29,6 +31,8 @@ interface Harness {
   pipeline: ReturnType<typeof vi.fn>;
   teardown: ReturnType<typeof vi.fn>;
   contextFactory: ReturnType<typeof vi.fn>;
+  /** The injected getUserMedia seam, so the CONSTRAINTS can be asserted. */
+  gum: StartCaptureOptions['getUserMedia'];
   getEmit: () => (samples: Float32Array) => void;
   stops: ReturnType<typeof vi.fn>[];
 }
@@ -66,6 +70,7 @@ function makeHarness(
     pipeline,
     teardown,
     contextFactory,
+    gum: gum as StartCaptureOptions['getUserMedia'],
     getEmit: () => {
       if (!emit) throw new Error('pipeline was never invoked');
       return emit;
@@ -178,5 +183,68 @@ describe('startCapture stop()', () => {
     result.handle.stop();
     expect(() => result.handle.stop()).not.toThrow();
     for (const stop of h.stops) expect(stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* ===========================================================================
+ * TICKET 047 — echo cancellation is a DECLARED CONTROL, not a browser default.
+ *
+ * In Live the microphone is open while the translation plays out loud, so on
+ * speakers the model could hear its own output. Browsers default
+ * `echoCancellation: true` for a bare `audio: true`, and the operator confirmed
+ * empirically that the model never transcribed itself — but an implicit default
+ * is not a control. A browser changing its default must not silently change the
+ * experiment, so the constraint is REQUESTED, beside VAD and endpointing.
+ *
+ * Input gating/muting during output was CONSIDERED AND REJECTED (it kills
+ * barge-in, can drop real speech, and layers a second gate on the pinned
+ * `silence_duration_ms: 500`). See LiveView.autoplay.test.tsx for the guard.
+ * ======================================================================== */
+
+/** The exact object, asserted whole so a future edit cannot drop one field. */
+const EXPECTED_CONSTRAINTS = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  },
+};
+
+describe('startCapture requests the audio constraints explicitly (ticket 047)', () => {
+  it('passes the EXACT constraint object to the injected getUserMedia', async () => {
+    const h = makeHarness('granted');
+    await startCapture(h.opts);
+
+    expect(h.gum).toHaveBeenCalledTimes(1);
+    // toHaveBeenCalledWith is a deep equality: a dropped field, a renamed
+    // field, or a stray extra field all fail here.
+    expect(h.gum).toHaveBeenCalledWith(EXPECTED_CONSTRAINTS);
+    const passed = (h.gum as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]![0];
+    expect(passed).toEqual(EXPECTED_CONSTRAINTS);
+    // `audio: true` is exactly what this ticket replaces.
+    expect(passed).not.toBe(true);
+    expect((passed as { audio: unknown }).audio).not.toBe(true);
+  });
+
+  it('requests the SAME constraints on a denial path too (one microphone path)', async () => {
+    const err = new Error('Permission denied');
+    err.name = 'NotAllowedError';
+    const h = makeHarness(vi.fn(async () => Promise.reject(err)));
+    await startCapture(h.opts);
+    expect(h.gum).toHaveBeenCalledWith(EXPECTED_CONSTRAINTS);
+  });
+
+  it('the constraints are a NAMED, exported, documented control in capture.ts', () => {
+    // A declared control, not three booleans inlined in a call: the same
+    // discipline VAD and endpointing get everywhere else in this codebase.
+    const source = readFileSync(resolve(process.cwd(), 'src/client/audio/capture.ts'), 'utf8');
+    expect(source).toMatch(/export const LIVE_CAPTURE_CONSTRAINTS\b/);
+    for (const field of ['echoCancellation', 'noiseSuppression', 'autoGainControl']) {
+      expect(source, `${field} must be declared`).toContain(field);
+    }
+    // ...and the module header explains WHY it is pinned, beside the other
+    // measurement controls.
+    const header = source.slice(0, source.indexOf('import '));
+    expect(header).toMatch(/echoCancellation/);
   });
 });

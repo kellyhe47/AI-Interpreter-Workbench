@@ -49,7 +49,7 @@ const CASCADE_SESSION = { mode: 'cascade' as const };
 // ---------------------------------------------------------------------------
 
 describe('the single target card', () => {
-  it('cascade: in-flight bar, then ready with text, play + duration, FIVE labelled stage ms', async () => {
+  it('cascade: in-flight bar, then ready with text, duration readout, FIVE labelled stage ms', async () => {
     renderApp({
       initialState: CASCADE_SESSION,
       scripts: { cascade: cascadeUtteranceScript() },
@@ -71,8 +71,10 @@ describe('the single target card', () => {
     expect(card.querySelector('[data-target-arch]')).toHaveTextContent('Cascade');
     expect(card.querySelector('[data-target-arch]')).toHaveTextContent(DEFAULT_CASCADE_TRIPLE.stt);
 
-    const play = within(card).getByRole('button', { name: /^play/ });
-    expect(play).toHaveTextContent('2.1 s');
+    // TICKET 047 — the duration is a READOUT, not the label of a play button.
+    // Live has no pause state, so the control it used to sit inside is gone.
+    expect(card.querySelector('[data-utterance-duration]')).toHaveTextContent('2.1 s');
+    expect(within(card).queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
 
     // Numbers, not bars alone: every interval carries a LABEL and a value.
     const stages: Array<[string, string]> = [
@@ -513,10 +515,19 @@ describe('the saved LiveSession records the context policy it ran under', () => 
 });
 
 // ---------------------------------------------------------------------------
-// TICKET 040 — Realtime audio arrives on the WebRTC MEDIA TRACK, never as PCM
-// through onAudio, so the session's ArmPlayback queue is empty and its
-// play()/pause() move nothing audible. The play/pause control must drive the
-// injected RemoteAudioSink — the real audio path — instead.
+// TICKET 040, AS AMENDED BY 047 — Realtime audio arrives on the WebRTC MEDIA
+// TRACK, never as PCM through onAudio, so the session's ArmPlayback queue is
+// empty and the RemoteAudioSink is the only real audio path.
+//
+// 040 proved that by driving the sink from Live's play/pause button. 047
+// DELETES that button: Live has no pause state, and pause/resume of a live feed
+// behaves differently per arm (cascade replays LATE into a frozen clock;
+// realtime loses whatever arrived). What 040 actually cared about — the inbound
+// stream reaching the sink, and Live sounding without anyone pressing anything —
+// is what is pinned here instead.
+//
+// The sink's attach → play() wiring is pinned in LiveView.autoplay.test.tsx
+// against the production sink; ontrack → attach in transport/realtime.test.ts.
 // ---------------------------------------------------------------------------
 
 /** A realtime utterance carrying NO audio events: the media-track case. */
@@ -524,8 +535,8 @@ function realtimeTrackOnlyScript(): FixtureScriptEvent[] {
   return realtimeUtteranceScript().filter((e) => e.type !== 'audio');
 }
 
-describe('Live play/pause controls the REAL realtime audio path (ticket 040)', () => {
-  it('play then pause drive the remote audio sink, and the button label reflects it', async () => {
+describe('Live never suspends the realtime audio path (ticket 040, amended by 047)', () => {
+  it('a realtime session completes with NO control to press and the sink never paused', async () => {
     const audio = makeFakeRemoteAudioSink();
     renderApp({
       scripts: { realtime: realtimeTrackOnlyScript() },
@@ -537,20 +548,30 @@ describe('Live play/pause controls the REAL realtime audio path (ticket 040)', (
     const card = targetCard();
     expect(card).toHaveAttribute('data-target-status', 'ready');
     // Nothing was ever enqueued into ArmPlayback — the audio is on the track.
-    expect(audio.calls).toEqual([]);
 
-    fireEvent.click(within(card).getByRole('button', { name: /^play/ }));
-    expect(audio.calls).toEqual(['play']);
-    expect(targetCard()).toHaveAttribute('data-target-status', 'playing');
-    expect(within(targetCard()).getByRole('button', { name: /^pause/ })).toBeInTheDocument();
-
-    fireEvent.click(within(targetCard()).getByRole('button', { name: /^pause/ }));
-    expect(audio.calls).toEqual(['play', 'pause']);
-    expect(targetCard()).toHaveAttribute('data-target-status', 'ready');
-    expect(within(targetCard()).getByRole('button', { name: /^play/ })).toBeInTheDocument();
+    // There is no play/pause affordance anywhere in Live to press...
+    expect(within(card).queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
+    // ...and the session never suspended the sink of its own accord.
+    expect(audio.calls).not.toContain('pause');
   });
 
-  it('REGRESSION GUARD: with no sink injected the control still works (cascade is untouched)', async () => {
+  it('stopping the session still never pauses the sink — a stopped feed is torn down, not suspended', async () => {
+    const audio = makeFakeRemoteAudioSink();
+    renderApp({
+      scripts: { realtime: realtimeTrackOnlyScript() },
+      remoteAudioSink: audio.sink,
+    });
+    await clickStartMicrophone();
+    await advance(1200);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
+    await advance(100);
+
+    expect(audio.calls).not.toContain('pause');
+    expect(screen.queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
+  });
+
+  it('CASCADE with no sink injected: the utterance is audible with no press at all', async () => {
     renderApp({
       initialState: CASCADE_SESSION,
       scripts: { cascade: cascadeUtteranceScript() },
@@ -559,9 +580,8 @@ describe('Live play/pause controls the REAL realtime audio path (ticket 040)', (
     await advance(1200);
 
     const card = targetCard();
-    expect(() =>
-      fireEvent.click(within(card).getByRole('button', { name: /^play/ })),
-    ).not.toThrow();
-    expect(targetCard()).toHaveAttribute('data-target-status', 'playing');
+    expect(card).toHaveAttribute('data-target-status', 'ready');
+    expect(card.querySelector('[data-utterance-duration]')).toHaveTextContent('2.1 s');
+    expect(within(card).queryByRole('button', { name: /^(play|pause)/i })).not.toBeInTheDocument();
   });
 });
