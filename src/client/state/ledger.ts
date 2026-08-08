@@ -22,9 +22,12 @@
  *   aggregated.
  * - aggregates(runId?) → { perArm } keyed by arm id, one entry per arm with
  *   at least one real record (fixture-only arms are absent). Perceived
- *   end-to-end latency = timings.audio_queued − timings.speech_end. Records
- *   missing either timestamp still count toward `count` and `costUsd` but
- *   are excluded from percentiles. Percentiles use nearest-rank:
+ *   latency = timings.audio_queued − the record's END-OF-SPEECH ANCHOR:
+ *   `speech_end` (corpus ground truth — Replay) when present, otherwise the
+ *   endpointer's decision (`vad_fired` / `server_speech_stopped` — Live, which
+ *   has no ground truth and never will; ticket 051, anchoredLatencyMs). Records
+ *   with neither anchor, or no audio_queued, still count toward `count` and
+ *   `costUsd` but are excluded from percentiles. Percentiles use nearest-rank:
  *   sorted[ceil(p * n) − 1] (p50 of 10 sorted values = 5th, p95 = 10th).
  *   No latency samples → p50Ms/p95Ms are null, never 0.
  * - costUsd = sum of costUnits over the aggregated records (costUnits are
@@ -155,6 +158,7 @@ import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
 import { latestWerScores, werScoreKey } from '../../core/wer';
 import type { WerScore } from '../../core/wer';
 import type { RunOrigin } from '../../core/protocol';
+import { anchoredLatencyMs } from '../../core/timing';
 import type { Mode, UtteranceRecord } from '../../core/timing';
 
 /* -------------------------------------------------------------------------
@@ -942,10 +946,12 @@ export class RunLedger {
       }
       agg.count += 1;
       agg.costUsd += r.costUnits;
-      const timings = r.timings as { speech_end?: number; audio_queued?: number };
-      if (typeof timings.speech_end === 'number' && typeof timings.audio_queued === 'number') {
-        latenciesByArm[r.arm]!.push(timings.audio_queued - timings.speech_end);
-      }
+      // TICKET 051 — anchored per record: `speech_end` when the corpus supplied
+      // it (REPLAY, unmoved), otherwise the endpointer's decision, which is the
+      // only end-of-speech instant a LIVE record can carry. Records with
+      // neither still count toward `count` and `costUsd`.
+      const latency = anchoredLatencyMs(r.timings as Record<string, number | undefined>);
+      if (latency !== null) latenciesByArm[r.arm]!.push(latency);
     }
 
     for (const [arm, latencies] of Object.entries(latenciesByArm)) {

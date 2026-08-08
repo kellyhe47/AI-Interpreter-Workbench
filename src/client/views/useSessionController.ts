@@ -59,7 +59,10 @@
  *   contract); 'final' replaces the source card text.
  * - onTargetText 'delta' appends, 'final' replaces.
  * - onTiming accumulates the utterance's timestamps; the stage rows derive
- *   via deriveCascadeIntervals / deriveRealtimeIntervals in the view.
+ *   via deriveLiveCascadeIntervals / deriveLiveRealtimeIntervals in the view.
+ *   TICKET 051: onTiming is NOT the only source — the cascade server sends no
+ *   `stage.timing` message at all, so a completion record's `timings` are
+ *   merged into the card's marks in onUtteranceComplete.
  * - onUtteranceComplete / onError SETTLE the utterance (a failure settles it
  *   too, so one dead utterance never wedges the session): ARMS_SETTLED then
  *   UTTERANCE_BOUNDARY, which applies any queued switch and bumps
@@ -79,6 +82,7 @@ import {
   type ProviderTriple,
   type RunConfig,
 } from '../../core/arms';
+import { anchoredLatencyMs } from '../../core/timing';
 import type { Mode, UtteranceRecord } from '../../core/timing';
 import type { CaptureHandle, CaptureResult } from '../audio/capture';
 import { ArmPlayback, type ArmPlaybackOptions } from '../audio/playback';
@@ -273,6 +277,57 @@ function emptyTarget(): TargetView {
   };
 }
 
+// ---------------------------------------------------------------------------
+// TICKET 051 — Arm A's Live cost, METERED from `response.done`
+//
+// SCOPE, deliberately narrow: this prices ONE thing — a Realtime utterance the
+// transport reported usage for. Cascade Live, Replay and the sweeps are priced
+// by ticket 052 (the cost model), which owns the general table; nothing here
+// pretends to be it.
+//
+// Audio and text are billed at DIFFERENT rates on each side, and collapsing
+// them would make the figure a fiction that happens to be non-zero. The rates
+// are OpenAI's published gpt-realtime prices, USD per 1M tokens.
+// ---------------------------------------------------------------------------
+
+const REALTIME_USD_PER_MTOK = {
+  textIn: 4,
+  cachedIn: 0.4,
+  audioIn: 32,
+  textOut: 16,
+  audioOut: 64,
+} as const;
+
+interface RealtimeUsage {
+  input_token_details?: { audio_tokens?: number; text_tokens?: number; cached_tokens?: number };
+  output_token_details?: { audio_tokens?: number; text_tokens?: number };
+}
+
+function tokens(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * USD for one Realtime utterance from the `response.done` usage block. An
+ * utterance the transport reported NO usage for costs 0 — never an invented
+ * figure, and never one derived from wall-clock instead of meter.
+ */
+function realtimeUsdFromUsage(usage: unknown): number {
+  if (usage === null || typeof usage !== 'object') return 0;
+  const u = usage as RealtimeUsage;
+  const inDetails = u.input_token_details;
+  const outDetails = u.output_token_details;
+  if (inDetails === undefined && outDetails === undefined) return 0;
+  const r = REALTIME_USD_PER_MTOK;
+  const usd =
+    tokens(inDetails?.audio_tokens) * r.audioIn +
+    tokens(inDetails?.text_tokens) * r.textIn +
+    tokens(inDetails?.cached_tokens) * r.cachedIn +
+    tokens(outDetails?.audio_tokens) * r.audioOut +
+    tokens(outDetails?.text_tokens) * r.textOut;
+  return usd / 1_000_000;
+}
+
 /** Nearest-rank percentile, matching RunLedger's convention exactly. */
 function nearestRank(sorted: number[], p: number): number {
   return sorted[Math.ceil(p * sorted.length) - 1]!;
@@ -434,7 +489,8 @@ export function useSessionController(deps: SessionDeps): SessionController {
         timings: { ...target.timings } as UtteranceRecord['timings'],
         speechEndSource: 'vad',
         providers: { ...REALTIME_PROVIDERS },
-        costUnits: 0,
+        // TICKET 051 — metered from what `response.done` reported, or 0.
+        costUnits: realtimeUsdFromUsage(completion.usage),
         corpusId: 'live-mic',
         runId,
       };
@@ -489,6 +545,20 @@ export function useSessionController(deps: SessionDeps): SessionController {
       },
       onUtteranceComplete: (e) => {
         touch(e.record.utt);
+        // TICKET 051 — THE COMPLETION IS WHERE CASCADE'S MARKS ARRIVE. The
+        // server sends no `stage.timing` message at all (src/server/ws.ts), so
+        // the whole cascade timings map reaches the client exactly once, on the
+        // completion record. Merging it here — rather than relying on the
+        // `onTiming` stream, which production never feeds — is what makes the
+        // stage rows non-blank in a real Live cascade session. Marks that DID
+        // stream in (the realtime transport's, and any fixture's) are kept:
+        // whatever the completion carries wins for the keys it names.
+        if (e.record.timings) {
+          store.target.timings = {
+            ...store.target.timings,
+            ...(e.record.timings as Record<string, number>),
+          };
+        }
         const record = assembleRecord(e.record);
         depsRef.current.ledger.append(record);
         // METRICS ONLY — the LiveSession row carries no transcript and no
@@ -565,14 +635,12 @@ export function useSessionController(deps: SessionDeps): SessionController {
   const saveLiveSession = (startedAt: number, endedAt: number): void => {
     const config = runConfigRef.current;
     const cascade = config.architecture === 'cascade';
+    // TICKET 051 — the SAME anchor the ledger and the footer use: `speech_end`
+    // when the corpus supplied one, otherwise the endpointer's decision. A Live
+    // session has no ground truth, so anchoring on `speech_end` alone left every
+    // saved LiveSession with `latency.p50: null`.
     const latencies = store.utterances
-      .map((u) => {
-        const speechEnd = u.timings.speech_end;
-        const audioQueued = u.timings.audio_queued;
-        return typeof speechEnd === 'number' && typeof audioQueued === 'number'
-          ? audioQueued - speechEnd
-          : null;
-      })
+      .map((u) => anchoredLatencyMs(u.timings))
       .filter((v): v is number => v !== null)
       .sort((a, b) => a - b);
 

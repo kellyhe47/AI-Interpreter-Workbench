@@ -24,8 +24,11 @@
  *   conversation.item.input_audio_transcription.completed  -> 'final' (TURN-final;
  *     exactly one per turn, text = event.transcript), generator completes after
  *     the final for the last turn once the audio input is exhausted
- *   speech_started/speech_stopped/committed/session.updated and any unknown
- *     event types are ignored
+ *   input_audio_buffer.speech_stopped                      -> 'speech_stopped'
+ *     (ticket 051): the endpointer's decision, text '', emitted BEFORE the
+ *     turn-final. The cascade orchestrator stamps `vad_fired` from it.
+ *   speech_started/committed/session.updated and any unknown event types are
+ *     ignored
  *   {type:'error', error} -> throws ProviderError
  * - Abort semantics (project-wide contract): already-aborted signal yields
  *   nothing and opens NO connection; abort mid-stream closes the socket and
@@ -139,6 +142,22 @@ export class OpenAiStt implements SttProvider {
           accumulated = '';
           sawFinal = true;
           maybeEnd();
+          break;
+        }
+        // TICKET 051 — the endpointer's own announcement, surfaced rather than
+        // dropped. It is the ONLY signal that says WHEN the server decided the
+        // speaker had stopped; without it the cascade orchestrator has nothing
+        // to stamp `vad_fired` from but the closing transcript's own instant,
+        // which renders "detected end of speech -> transcript" as a fabricated
+        // 0 ms on every utterance. It carries no text by construction — the
+        // transcript is a separate event and arrives later.
+        case 'input_audio_buffer.speech_stopped': {
+          queue.push({
+            type: 'speech_stopped',
+            text: '',
+            tStart: turnStart,
+            tEnd: Date.now() - t0,
+          });
           break;
         }
         case 'error': {

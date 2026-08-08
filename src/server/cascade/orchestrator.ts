@@ -27,10 +27,12 @@
  * produce a final, e.g. the 'empty' fault, consume NO utt number):
  *  - STT partials are forwarded as {type:'stt.partial'} as they arrive,
  *    before the final.
+ *  - An SttEvent {type:'speech_stopped'} is the ENDPOINTER'S ANNOUNCEMENT: it
+ *    stamps timings.vad_fired and does NOT end the turn (it carries no text).
  *  - On STT TURN-final: emit {type:'stt.final'}; set timings.stt_final =
- *    Date.now() and timings.vad_fired = the same instant (semantically weak
- *    but acceptable for now; speech_end may later be supplied by the client
- *    and is left unset by the orchestrator).
+ *    Date.now() and timings.vad_fired = the announcement's instant, falling
+ *    back to the turn-final's own when the provider announced nothing
+ *    (speech_end may later be supplied by the client and is left unset here).
  *  - An STT turn that produces NO final (e.g. fixture failWith:'empty')
  *    is SKIPPED: no MT/TTS, no utterance.complete, no error — the loop just
  *    proceeds to the next turn.
@@ -199,6 +201,8 @@ export async function* runCascade(
 
       const sourcePartials: string[] = [];
       let sourceFinal: string | undefined;
+      /** TICKET 051 — the instant the STT provider announced the endpointer. */
+      let vadFired: number | undefined;
       let sttError: unknown;
       let sttFailed = false;
 
@@ -209,6 +213,11 @@ export async function* runCascade(
           if (ev.type === 'partial') {
             sourcePartials.push(ev.text);
             yield { type: 'stt.partial', utt: uttCounter, text: ev.text };
+          } else if (ev.type === 'speech_stopped') {
+            // The endpointer's decision, NOT the turn-final: it carries no text
+            // and must not finalise the turn (an empty final is dropped as an
+            // empty turn, which would lose the utterance entirely).
+            vadFired ??= Date.now();
           } else {
             sourceFinal = ev.text;
             break; // TURN-final ends the transcribe call
@@ -239,7 +248,11 @@ export async function* runCascade(
       uttCounter += 1;
       const timings: CascadeTimestamps = {};
       const tFinal = Date.now();
-      timings.vad_fired = tFinal; // semantically weak; see doc-comment
+      // TICKET 051 — `vad_fired` is the ENDPOINTER'S ANNOUNCEMENT when the
+      // provider makes one (openai-stt maps input_audio_buffer.speech_stopped).
+      // A provider that announces nothing falls back to the turn-final's own
+      // instant, exactly as before, so no prior run and no other adapter moves.
+      timings.vad_fired = vadFired ?? tFinal;
       timings.stt_final = tFinal;
       const finalText = sourceFinal;
       yield { type: 'stt.final', utt, text: finalText };

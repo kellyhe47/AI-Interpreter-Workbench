@@ -62,19 +62,30 @@
  * [data-target-status] in 'in-flight' | 'ready' | 'failed' (ticket 047: there
  * is no fourth value — Live has no pause state, so nothing can put the card
  * into a playing/suspended one), [data-target-arch] naming the architecture,
- * [data-stage-row="<label>"] rows carrying LABELLED milliseconds, the
- * intervals note, and [data-utterance-duration] — a readout, not a control.
+ * [data-stage-row="<label>"] rows, the intervals note, and
+ * [data-utterance-duration] — a readout, not a control.
+ *
+ * TICKET 051 — the stage rows are measured from marks the LIVE transports
+ * actually produce, and every row NAMES THE TWO EVENTS IT SPANS:
+ *   Arm A  — ONE row, `model` (opaque): detected end of speech → audio ready
+ *   Cascade — `transcribe` / `translate` / `speak`
+ * There is NO `endpointing` row anywhere in Live (it needs corpus ground truth
+ * for when the human stopped, which Live has none of) and no Arm A `queue`
+ * (over WebRTC nothing is observable between "model produced audio" and "audio
+ * queued"). [data-live-total] carries the headline, labelled with its ANCHOR so
+ * it can never be read as Replay's differently-anchored end-to-end. Figures are
+ * seconds, two decimals.
  *
  * [data-session-footer]: '{n} utterances', p50 / p95 / session $ from
- * ledger.aggregates(sessionRunId).
+ * ledger.aggregates(sessionRunId), and the anchor named once for all three.
  * ==========================================================================
  */
 
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
 import { MENUS, armLabel } from '../../core/arms';
 import {
-  deriveCascadeIntervals,
-  deriveRealtimeIntervals,
+  deriveLiveCascadeIntervals,
+  deriveLiveRealtimeIntervals,
   type CascadeTimestamps,
   type RealtimeTimestamps,
 } from '../../core/timing';
@@ -374,38 +385,62 @@ function formatClock(ms: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** Seconds, two decimals — the unit every Live figure is read in. */
+function formatSeconds(ms: number | null): string {
+  return ms === null ? '—' : `${(ms / 1000).toFixed(2)} s`;
+}
+
+/**
+ * TICKET 051 — the anchor Live can actually observe, in the operator's own
+ * words. It is NOT `speech_end` (corpus ground truth, Replay only) and must
+ * never be labelled as if it were.
+ */
+const DETECTED_END = 'detected end of speech';
+
 interface StageRowData {
   label: string;
+  /** The two events this row spans, in plain language. No glossary needed. */
+  span: string;
   ms: number | null;
   /** Realtime's model interval: the asymmetry is the PRD finding. */
   opaque?: boolean;
 }
 
+/**
+ * TICKET 051 — Live's stage rows, from marks the LIVE transports actually
+ * produce.
+ *
+ * GONE: `endpointing`. It is the gap between when the human stopped speaking
+ * and when the system decided they had; the first has no signal anywhere in a
+ * browser, so the row could never hold a value. Removed rather than blanked — a
+ * row structurally incapable of a figure reads as breakage forever.
+ *
+ * GONE: Arm A's `queue`. `first_audio_delta` comes from
+ * `response.output_audio.delta`, which does not exist over WebRTC (ticket 040),
+ * so there is no observable instant between "model produced audio" and "audio
+ * queued". ONE observable span means ONE row.
+ */
 function stageRowsFor(
   architecture: 'cascade' | 'realtime',
   target: TargetView,
 ): { rows: StageRowData[]; total: number | null } {
   if (architecture === 'cascade') {
-    const iv = deriveCascadeIntervals(target.timings as CascadeTimestamps);
+    const iv = deriveLiveCascadeIntervals(target.timings as CascadeTimestamps);
     return {
       rows: [
-        { label: 'endpointing', ms: iv.endpointing },
-        { label: 'stt', ms: iv.stt },
-        { label: 'mt', ms: iv.mt },
-        { label: 'tts', ms: iv.tts },
-        { label: 'queue', ms: iv.queue },
+        { label: 'transcribe', span: `${DETECTED_END} → transcript`, ms: iv.transcribe },
+        { label: 'translate', span: 'transcript → translated text', ms: iv.translate },
+        { label: 'speak', span: 'translated text → audio ready', ms: iv.speak },
       ],
-      total: iv.endToEnd,
+      total: iv.total,
     };
   }
-  const iv = deriveRealtimeIntervals(target.timings as RealtimeTimestamps);
+  const iv = deriveLiveRealtimeIntervals(target.timings as RealtimeTimestamps);
   return {
     rows: [
-      { label: 'endpointing', ms: iv.endpointing },
-      { label: 'model', ms: iv.model, opaque: true },
-      { label: 'queue', ms: iv.queue },
+      { label: 'model', span: `${DETECTED_END} → audio ready`, ms: iv.model, opaque: true },
     ],
-    total: iv.endToEnd,
+    total: iv.total,
   };
 }
 
@@ -564,7 +599,7 @@ function TargetCard({
                 data-stage-row={row.label}
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: '110px 1fr 58px',
+                  gridTemplateColumns: '104px 220px 1fr 62px',
                   gap: '0 10px',
                   alignItems: 'center',
                   font: '400 11.5px var(--font-sans)',
@@ -576,6 +611,10 @@ function TargetCard({
                     <span style={{ color: 'var(--text-muted)', marginLeft: 6 }}>opaque</span>
                   )}
                 </span>
+                {/* TICKET 051 — every row NAMES THE TWO EVENTS IT SPANS, so the
+                    figure needs no glossary and cannot be mistaken for Replay's
+                    differently-anchored one. */}
+                <span data-stage-span style={{ color: 'var(--text-muted)' }}>{row.span}</span>
                 <span
                   style={{
                     height: 5,
@@ -590,14 +629,12 @@ function TargetCard({
                       display: 'block',
                       height: 5,
                       borderRadius: 3,
-                      background: row.label === 'endpointing' ? 'var(--gray-400)' : 'var(--accent)',
+                      background: 'var(--accent)',
                       width: `${pct}%`,
                     }}
                   />
                 </span>
-                <span style={{ textAlign: 'right', ...monoStyle }}>
-                  {row.ms === null ? '—' : `${row.ms} ms`}
-                </span>
+                <span style={{ textAlign: 'right', ...monoStyle }}>{formatSeconds(row.ms)}</span>
               </div>
             );
           })}
@@ -616,8 +653,12 @@ function TargetCard({
             paddingTop: 9,
           }}
         >
-          <span>
-            total{' '}
+          {/* TICKET 051 — the headline STATES ITS ANCHOR. Replay's total is
+              measured from the corpus's `speech_end` (when the human actually
+              stopped); this one starts where the endpointer DECIDED they had.
+              Two different quantities must never share one name. */}
+          <span data-live-total>
+            {`total from ${DETECTED_END} `}
             <b
               style={{
                 color: 'var(--text-body)',
@@ -626,11 +667,11 @@ function TargetCard({
                 fontSize: 11.5,
               }}
             >
-              {total === null ? '—' : `${total} ms`}
+              {formatSeconds(total)}
             </b>
           </span>
           <span style={{ color: 'var(--text-muted)' }}>
-            {architecture === 'cascade' ? '5 intervals · all visible' : '3 intervals · 1 opaque'}
+            {architecture === 'cascade' ? '3 intervals · all visible' : '1 interval · opaque'}
           </span>
         </div>
       )}
@@ -1145,6 +1186,11 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
           session{' '}
           <span style={{ fontFamily: 'var(--font-mono)' }}>{`$${footer.costUsd.toFixed(2)}`}</span>
         </span>
+        {/* TICKET 051 — the anchor, named ONCE for the whole footer. These
+            percentiles start at the endpointer's decision; Replay's start at
+            the corpus's annotated end of speech. Same shape, different
+            quantity — the reader has to be told which one this is. */}
+        <span>{`from ${DETECTED_END}`}</span>
       </div>
     </>
   );
