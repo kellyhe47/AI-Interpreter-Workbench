@@ -148,3 +148,65 @@ can prove. Accepted as-is; it is on the operator smoke list.
 - Replay's single reused context, once suspended by autoplay policy, actually RESUMES on the 2nd-10th press
 - The whole page stays under Chrome's cap across a long QA pass, once capture contexts and the realtime in/outbound taps are counted with their async closes
 - `response.output_audio.delta` truly never arrives on the WebRTC data channel (040's finding)
+
+---
+
+## ROUND 3 — re-review of round 2 (independent reviewer)
+
+28 mutations run, **25 caught**. Both round-1 slips are closed: deleting the controller wiring (M11)
+is now caught by the reason row plus the tripwire, and restoring `play()`'s dead
+`this.buffered = []` (M13) is caught by the structural guard.
+
+**The gate was verified correct in BOTH directions — including the false-negative risk.**
+`STOPPABLE_STATUSES` is a strict SUPERSET of `TRANSPORT_STATUSES`, which is the only set during
+which a transport exists to deliver `onAudio`; and `stopSession` calls `store.router.stop()`
+synchronously before the status can be observed as `stopping`, so no chunk can be enqueued outside
+the gate. The queued-switch path was checked too — `state.mode` is always the APPLIED mode, so
+neither a pending cascade->realtime nor realtime->cascade switch raises or suppresses the notice
+early. **There is no status in which cascade audio is enqueued but the notice is suppressed.**
+
+### R3-1 (MAJOR) — R2-5 is HALF-DELIVERED: `playTake` never reaches the funnel
+`ReplayView.tsx:612` passes `playTake={deps.playTake}` RAW, bypassing the `playRun` funnel, and the
+consumer narrows the type straight back down: `RecordTake.tsx:110` declares
+`playTake?: (take: RecordedTake) => void` — ONE argument — and `:598` calls `playTake?.(take)`.
+So the `onUnavailable` parameter added to `buildReplayDeps().playTake` has **zero production
+callers**; it is exercised only by the test calling the seam directly.
+Operator scenario: open the record flow, press **Play take** with the context cap full -> silent
+no-op, no notice, no console. Exactly the state R2-5 was opened to remove — and worse than the run
+case, because a freshly recorded take has no "no audio stored" explanation available at all.
+An unused parameter that READS as wired is a landmine: the next author will assume Replay reports.
+**DECIDED:** widen `RecordTakeProps.playTake` to the two-arg signature and route it through the same
+funnel. Do not take the alternative (dropping the parameter and reporting only for runs) — the take
+press is the more ambiguous of the two.
+
+### R3-2 (MINOR, demonstrated consequence) — `clearPlaybackFailure()` clearing `reported` is RIGHT but unpinned
+Mutation R2i SLIPPED: deleting `this.reported = false` (`playback.ts:174`) leaves all 1853 green.
+The reviewer probed the consequence against the real `App` — two sessions, two DIFFERENT failures:
+- as implemented: session 2 shows `InvalidStateError: audio hardware is unavailable`. Correct.
+- with `reported` left set: session 2 renders the notice with **`[data-playback-notice-reason]`
+  absent entirely** — "no audio output" and no reason, for a session that failed for a new cause.
+It opens NO "told more than once" hole: `clearPlaybackFailure()` is reachable only from
+`newSession` (grepped — not from `reset()`, the transport swap, or any automatic path), and within a
+session `reset()` still clears nothing, so `told EXACTLY ONCE` stays exactly true. That test could
+not have caught this; the missing one is a SECOND-SESSION test.
+**DECIDED:** add it.
+
+### R3-3 (MINOR) — the BlindCompare arm of the funnel is unpinned
+Mutation R2o SLIPPED: reverting `onPlay={playRun}` to `onPlay={(runId) => deps.playRun(runId)}` at
+`ReplayView.tsx:583` leaves the suite green. The failure test drives `[data-run-play]` (RunsList)
+only. The funnel is single today, but only one of its two call sites is defended — and blind compare
+is where "I pressed play and heard nothing" costs most, since judging audio IS the task.
+**DECIDED:** pin the BlindCompare call site too.
+
+### R3-4 (MINOR) — `playbackUnavailableReason` sharing the gate is unpinned
+Mutation R2p SLIPPED: making it ungated (`store.playbackFailureReason` raw) leaves the suite green,
+because the view only renders the reason INSIDE the notice. The implementer's stated property —
+"gated identically so the two can't disagree" — is therefore unenforced, and a future consumer
+reading the reason alone would get a stale non-null value on a stopped or realtime session.
+**DECIDED:** pin the controller property directly, not through the view.
+
+## OPERATOR REAL-CHROME LIST (consolidated, unchanged plus one)
+1. Replay's single reused context, once suspended by autoplay policy, actually RESUMES on the 2nd-10th press
+2. The page stays under Chrome's per-document cap across a long QA pass, once capture contexts and the realtime in/outbound taps are counted WITH their async closes settling
+3. `response.output_audio.delta` truly never arrives on the WebRTC data channel (040's finding — the mode gate now depends on it in a second place)
+4. NEW: that a REAL transient recovery works — press New session after the cap frees and confirm cascade audio returns. `clearPlaybackFailure()` has only ever been exercised against a fake factory.

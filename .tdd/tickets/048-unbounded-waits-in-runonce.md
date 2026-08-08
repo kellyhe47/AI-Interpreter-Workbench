@@ -144,3 +144,77 @@ next reviewer files this same ticket a fourth time.
 ### R2-8 (MINOR) — `runner.unboundedWaits.test.ts:498` hardcodes `120_000`
 `browserDeps`' `RUN_TIMEOUT_MS` is not exported, so the ordering guard rots silently if it moves.
 Export it and import it.
+
+---
+
+## ROUND 3 — re-review of round 2 (independent reviewer)
+
+The R2-1 probe was re-run across FOUR stall points, not just the one named, each ending in a real
+`RunLedger` -> `deriveExperimentAggregates`:
+
+| stall point | aggregatable sweep Runs for rep 1 | provenance | max concurrent transports |
+|---|---|---|---|
+| upload | **1** OK | n=1, 1 of 1 | 1 |
+| `recordings.getAudio` | **1** OK | n=1, 1 of 1 | 1 |
+| `transport.start()` | **1** OK | n=1, 1 of 1 | **2** |
+| **`runs.create`** | **2** WRONG | **n=2, "1 of 1"** | 1 |
+
+Round-1 battery re-run with no regressions, and m16 (a round-1 slip) is now CAUGHT. Both re-reads
+verified independently load-bearing. The reason gate was traced airtight in both directions
+(cancel-then-budget keeps the cancel reason and writes no stub; budget-then-cancel keeps the budget
+reason and the stub was already owed) and `wrote` is genuinely race-free (`wrote = true` is the
+first statement of the `create` wrapper, before any await, and `abort()` dispatches listeners
+synchronously). **R2-3 is the strongest test in the branch** — it drives the real executor, builds a
+real ledger, and asserts the RENDERED "2 of 3 reps completed".
+
+### R3-1 (MAJOR) — R2-1 SURVIVES for a stalled `runs.create`
+`replay/runner.ts:1047` (last re-read) and the executor's `create` wrapper. Probe with the stall
+inside `deps.runs.create`:
+```
+posted: run-1 manual complete rep0 | run-3 sweep complete rep1 (retry)
+      | run-2 sweep complete rep1 (abandoned attempt, POST landed at 10 s)
+aggregatable sweep runs for rep 1 = 2     provenance n=2, completedReps=1, intendedReps=1
+summary.failures = []
+```
+The last re-read sits immediately BEFORE `deps.runs.create(run)`, so an abort landing while the POST
+is IN FLIGHT is too late. Worse: the wrapper sets `wrote = true` at CALL time, so `onAbandoned` also
+declines to write a stub — **the guard actively converts this case into the duplicate rather than
+the accounted one.** p50/p95/`n` pooled over two samples of one repetition, provenance reading clean.
+**No test stalls `runs.create`.** The header's new claim that delegating it to `runTimeoutMs` "buys
+nothing" is false — it demonstrably buys a duplicate aggregatable sample.
+**DECIDED:** bound `runs.create` inside `runOnce` with its own deadline strictly shorter than
+`runTimeoutMs`. The attempt then RETURNS and is never retried, so no second sample can exist. The
+alternatives do not work: you cannot un-POST, and the batch cannot know the attempt already wrote.
+
+### R3-2 (MAJOR, test quality) — both mechanisms round 2 INVENTED are entirely unpinned
+Three separate deletions each leave **1848/1848 green**:
+| mutation | consequence (probed, not theorised) |
+|---|---|
+| drop the `reason !== RUN_BUDGET_EXCEEDED` guard | operator **cancel** writes a `sweep`/`failed` stub into the APPEND-ONLY ledger — contradicts "a cancelled run is never POSTed" and R2-5's own pin, and permanently records the operator's decision as a pipeline failure |
+| drop `if (wrote) return;` | the stalled-POST case writes a stub BESIDE the real Run for the same execution |
+| drop `wrote = true` from the `create` wrapper | same double-write |
+The design is correct and the logic is airtight — but its correctness rests entirely on statement
+ordering that nothing protects, and each deletion writes a FALSE ROW into an append-only stream.
+**DECIDED:** pin all three. Cancel writes no stub; a budget abort writes exactly one; an execution
+that already POSTed gets none.
+
+### R3-3 (MINOR) — R2-2 holds only for aborts at a wait `runOnce` OBSERVES
+Probe: abort inside `transport.start()` -> `maxConcurrentTransports = 2`, held until `start()`
+resolves on its own (forever if it never does). The R2-2 test's assertions are honest for the
+`finished` window they exercise, but the `describe` title "an abandoned attempt gives its transport
+back" is broader than what holds.
+**DECIDED:** route `transport.start()` through `untilSettledOrAborted` too — it is a promise, the
+helper already fits, and teardown can then actually run. (Do not merely narrow the title; 046's
+context-cap premise is what is at stake.)
+
+### R3-4 (MINOR) — an abort landing mid-upload orphans the artifact
+`runner.unboundedWaits.test.ts:611` knowingly asserts `calls === ['uploadAudio']` after the abort.
+Correct call — but `runs/<id>.out.wav` is then stored for a Run that is never POSTed. Harmless to
+every number.
+**DECIDED:** name it as the accepted cost in the header rather than leaving it silent.
+
+### NON-BLOCKING, confirmed by the reviewer
+- `summary.failures[].runId` undefined for a budget-abandoned cell — the denominator (the thing that
+  mattered) is fixed and rendered honestly, and the stub is findable by `(repIndex, arm)`. Follow-up.
+- The setup-await leak — inherent to abandoning rather than terminating; the stub makes the rep
+  accounted for. Same follow-up.
