@@ -193,6 +193,41 @@ export const SEGMENTATION_IDLE_MS = 5_000;
 export const TRANSPORT_CLOSE_TIMEOUT_MS = 2_000;
 
 /**
+ * TICKET 048 (STUB — declared for the locked tests; NOT YET WIRED) — how long a
+ * run waits for the output-audio upload before giving up on the STORE.
+ *
+ * `runs.uploadAudio` is a bare browser `fetch` with no timeout, so a server that
+ * accepts the connection and never answers hangs the run forever — and nothing
+ * races it (`startBatch`'s `runTimeoutMs` only aborts a signal `runOnce` reads
+ * nowhere after pacing). This is the ARTIFACT side-effect, not the measurement:
+ * giving up on it must cost the bytes and never the run.
+ */
+export const AUDIO_UPLOAD_TIMEOUT_MS = 10_000;
+
+/**
+ * TICKET 048 (STUB — declared for the locked tests; NOT YET WIRED) — how long a
+ * run waits on `finished` before declaring the measurement lost.
+ *
+ * SEGMENTATION_IDLE_MS already caps a manifest-backed run. A MANIFEST-LESS
+ * (mic-shaped) run arms neither 031 timer and waits on `finished` forever, so a
+ * transport that goes quiet without ever completing its utterance freezes the
+ * run. Unlike the upload, this deadline IS fatal: a run that never saw its
+ * utterance complete does not know whether it saw the whole answer.
+ *
+ * Longer than SEGMENTATION_IDLE_MS so a manifest-backed run still fails with its
+ * own NAMED segmentation reason, and far shorter than the sweep's 120 s per-run
+ * patience (browserDeps RUN_TIMEOUT_MS) so the reason is named before the blunt
+ * abort fires.
+ */
+export const RUN_COMPLETION_TIMEOUT_MS = 30_000;
+
+/**
+ * TICKET 048 (STUB) — the prefix of the line a run carries when it gave up
+ * waiting for the utterance completion that never came.
+ */
+export const RUN_COMPLETION_TIMED_OUT = 'run timed out waiting for utterance completion';
+
+/**
  * TICKET 046 ROUND 3 (R3-7) — the prefix of the line a run carries when the
  * capture path SAW a track and admitted none of it.
  *
