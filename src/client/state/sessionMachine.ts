@@ -36,6 +36,18 @@
  *   utterance can begin while the previous result is on screen).
  * - PLAY carries no payload (there is one architecture, so one output);
  *   PLAYBACK_ENDED returns to 'ready'. PLAY is only meaningful from 'ready'.
+ * - TICKET 047 — PLAY / PLAYBACK_ENDED / status 'playing' are UNREACHABLE IN
+ *   PRODUCTION AND RETAINED ON PURPOSE. Live has no pause state: the play/
+ *   pause control is deleted, the controller has no action that dispatches
+ *   PLAY, and the translation sounds unconditionally as it arrives. They are
+ *   NOT deleted because 'playing' staying in the SessionStatus union is what
+ *   lets LiveView.autoplay.test.tsx render the view in `status: 'playing'`
+ *   and assert that STILL no control appears — the hedge that catches a
+ *   reintroduction routed through the machine. Deleting the state would
+ *   delete the trap. So `'playing'` also stays in ACTIVE_STATUSES,
+ *   TRANSPORT_STATUSES, STOPPABLE_STATUSES, TICKING_STATUSES, LIVE_STATUSES
+ *   and the REQUEST_SWITCH queueing condition: a status that cannot be
+ *   entered must not be the one status those lists disagree about.
  * - PERMISSION_DENIED → 'permission-denied' + micPermission 'denied'; START
  *   while micPermission is 'denied' is a no-op (blocking screen).
  * - REQUEST_SWITCH(kind, label, patch) — TICKET 019: queues ONLY while an

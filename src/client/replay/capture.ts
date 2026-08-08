@@ -7,6 +7,17 @@
  * 24 kHz Int16 frames that `startCapture` already emits instead of streaming
  * them to a transport.
  *
+ * ============ THE CORPUS INHERITS LIVE_CAPTURE_CONSTRAINTS ================
+ * TICKET 047. `startCapture` now hardcodes LIVE_CAPTURE_CONSTRAINTS
+ * ({ echoCancellation, noiseSuppression, autoGainControl }, all true), so a
+ * CORPUS take is recorded under exactly those constraints too. That follows
+ * from "one microphone path in the client" and is what we want — the corpus
+ * should be recorded the way Live hears — but the constant is NAMED for Live,
+ * so say it here: tuning "the Live mic control" silently changes how the
+ * corpus recordings sound, and every WER and latency number in the experiment
+ * is computed downstream of those recordings. Change it with both in mind.
+ * ==========================================================================
+ *
  * startTake(opts) -> Promise<TakeRecorder | CaptureDenied>
  *   - the union is discriminated by `'status' in result`: a recorder has no
  *     `status` field, a denial is the four-value model UNCHANGED

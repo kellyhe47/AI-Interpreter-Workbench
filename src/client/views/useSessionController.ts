@@ -95,7 +95,6 @@ import {
   type SessionStatus,
 } from '../state/sessionMachine';
 import type { LiveSessionsClient } from '../replay/recordingsClient';
-import type { RemoteAudioSink } from '../transport/realtime';
 import { TransportRouter } from '../transport/router';
 import type {
   InterpreterTransport,
@@ -142,16 +141,6 @@ export interface SessionDeps {
   now: () => number;
   /** Test seed forwarded into createInitialState. */
   initialState?: Partial<SessionState>;
-  /**
-   * TICKET 040 (OPTIONAL) — the realtime WebRTC output sink. Realtime audio
-   * arrives on the media track, never as PCM through onAudio, so ArmPlayback
-   * holds nothing for a realtime session and THIS element is the real sound.
-   * TICKET 047: the controller never drives it. The transport attaches the
-   * inbound track on `ontrack` and the element autoplays, so the translation
-   * is audible with no user action — and Live, having no pause state, has no
-   * path that could suspend it. Cascade sessions leave it untouched.
-   */
-  remoteAudioSink?: RemoteAudioSink;
   /**
    * TICKET 041 (OPTIONAL) — where a finished LiveSession is PERSISTED. The
    * ledger write happens first and unconditionally; this POSTs the very same
@@ -674,6 +663,15 @@ export function useSessionController(deps: SessionDeps): SessionController {
       if (fresh) {
         store.runId = `session-${now}`;
         resetSessionStore();
+        // TICKET 047 (round 2) — the ONLY `ctx.resume()` in the client. An
+        // AudioContext built under an autoplay policy can start `suspended`,
+        // and with Live's play control deleted there is no affordance left to
+        // recover it by hand, so the resume happens HERE: inside the real user
+        // gesture that started the session, where the browser honours it.
+        // This is not a control — there is nothing to press and nothing to
+        // un-press — it only guarantees the context is running before the
+        // first chunk arrives. Autoplay stays unconditional.
+        store.playback.play();
         void requestCapture();
       }
     },

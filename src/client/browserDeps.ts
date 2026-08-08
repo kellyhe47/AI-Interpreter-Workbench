@@ -102,6 +102,18 @@ export interface BrowserDeps extends SessionDeps {
    * test bag that wires the first is not asking for the second.
    */
   hydrate: LedgerHydrationSource;
+  /**
+   * TICKET 040, MOVED HERE BY 047 — the AUDIBLE Live sink for the model's
+   * inbound WebRTC track. It lived on `SessionDeps` while Live's transport
+   * control drove it; with that control deleted the controller never read it,
+   * and a dead seam on the controller's surface is the same landmine as a dead
+   * action — a second, non-functional way to "wire Live's audio" waiting to be
+   * believed. Production hands the sink to the TRANSPORT factory (the transport
+   * attaches the track on `ontrack`, the element autoplays), so it belongs to
+   * the browser bag, not to the session surface. Published here because a seam
+   * nothing can observe is a seam that cannot be pinned.
+   */
+  remoteAudioSink: RemoteAudioSink;
 }
 
 /** A batch run that over-runs this is aborted and recorded as a failure. */
@@ -129,8 +141,10 @@ const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
  * Over WebRTC OpenAI sends the response audio on the media track only, so the
  * one conventional way to hear it is a hidden `<audio>` element carrying the
  * remote MediaStream as `srcObject`; there is no PCM to feed an AudioContext.
- * `autoplay` is what satisfies "audible in Live without pressing anything",
- * and play()/pause() are what make Live's control move the real sound.
+ * `autoplay` is the WHOLE playback path — TICKET 047 deleted Live's transport
+ * control, so attaching the stream is what has to make it audible, with no
+ * interaction of any kind. The seam still exposes `play` and `pause` because
+ * Replay's muted sink is the same object; nothing in Live calls either.
  *
  * The element is created lazily and reused across reconnects: attaching a new
  * stream to the same element is exactly the reconnect story, and one element
@@ -158,7 +172,8 @@ function createRemoteAudioSink(options: RemoteAudioSinkOptions): RemoteAudioSink
       el = document.createElement('audio');
       el.autoplay = true;
       el.muted = options.muted;
-      // Not a control surface: Live's own play/pause button drives it.
+      // No native transport controls: neither screen offers one. Live autoplays
+      // (ticket 047) and Replay's copy of this element is silent by design.
       el.controls = false;
       el.style.display = 'none';
       document.body.appendChild(el);
@@ -169,8 +184,16 @@ function createRemoteAudioSink(options: RemoteAudioSinkOptions): RemoteAudioSink
   // optional call has to be optional on BOTH halves — otherwise the seam throws
   // in every test that touches it.
   const attemptPlay = (node: HTMLAudioElement): void => {
-    // A rejected autoplay is not a failure worth surfacing: the operator
-    // still has the play button, which drives this same element.
+    // TICKET 047 — the rejection is swallowed because there is nothing useful
+    // to do with it and no affordance to offer: Live has no transport control
+    // any more, and Replay's copy of this sink is muted on purpose (a muted
+    // element is never blocked by the autoplay policy at all).
+    //
+    // What makes the Live case safe is ORDERING, not a fallback: a stream is
+    // only ever attached after the operator pressed "Start microphone" and
+    // granted the mic, which gives the document sticky activation and exempts
+    // it from the autoplay policy. Every retry path — a reconnect, a fresh
+    // session — comes back through `attach`, which calls this again.
     void node.play?.()?.catch(() => {});
   };
   return {
@@ -372,10 +395,11 @@ export function buildBrowserDeps(): BrowserDeps {
   let liveMicStream: MediaStream | null = null;
 
   // TICKET 040 — the Live output for the model's inbound track. ONE sink for
-  // the session: it is handed to every realtime transport the factory builds
-  // (so a reconnect re-attaches to the same element) and to the controller, so
-  // the play/pause control moves exactly the audio the operator is hearing.
-  // AUDIBLE, unlike Replay's: this is the sound the operator is listening to.
+  // the session, handed to every realtime transport the factory builds, so a
+  // reconnect re-attaches to the same element instead of stacking them.
+  // AUDIBLE, unlike Replay's: this is the sound the operator is listening to,
+  // and since ticket 047 attaching it is the entire playback path — the
+  // controller neither receives it nor drives it.
   const remoteAudioSink = createRemoteAudioSink({ muted: false });
 
   // TICKET 041 — ONE live-sessions client, handed to BOTH seams: the write

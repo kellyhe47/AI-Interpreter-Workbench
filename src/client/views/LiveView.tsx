@@ -59,9 +59,11 @@
  * record flow shows too — one wording of it exists in the product, not two.
  *
  * Session cards: [data-source-card]; exactly ONE [data-target-card] with
- * [data-target-status] in 'in-flight' | 'ready' | 'playing' | 'failed',
- * [data-target-arch] naming the architecture, [data-stage-row="<label>"]
- * rows carrying LABELLED milliseconds, and the intervals note.
+ * [data-target-status] in 'in-flight' | 'ready' | 'failed' (ticket 047: there
+ * is no fourth value — Live has no pause state, so nothing can put the card
+ * into a playing/suspended one), [data-target-arch] naming the architecture,
+ * [data-stage-row="<label>"] rows carrying LABELLED milliseconds, the
+ * intervals note, and [data-utterance-duration] — a readout, not a control.
  *
  * [data-session-footer]: '{n} utterances', p50 / p95 / session $ from
  * ledger.aggregates(sessionRunId).
