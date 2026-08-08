@@ -47,6 +47,7 @@ import { writeWav } from '../../harness/wav';
 import {
   startCapture,
   type CaptureAudioContextLike,
+  type CaptureConstraints,
   type CapturePipeline,
   type CaptureResult,
   type MediaStreamLike,
@@ -86,7 +87,11 @@ export interface TakeRecorder {
 }
 
 export interface StartTakeOptions {
-  getUserMedia: (constraints: { audio: true }) => Promise<MediaStreamLike>;
+  /**
+   * Widened with startCapture's seam (ticket 047) — the request now carries
+   * the declared audio constraints, and this forwards straight to it.
+   */
+  getUserMedia: (constraints: CaptureConstraints) => Promise<MediaStreamLike>;
   audioContextFactory: () => CaptureAudioContextLike;
   pipeline: CapturePipeline;
   /** Mic level bars 0..5, forwarded from startCapture. */

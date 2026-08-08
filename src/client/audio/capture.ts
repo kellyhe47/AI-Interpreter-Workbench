@@ -15,8 +15,27 @@
  * touches AudioNode APIs — everything DOM-audio-specific lives behind the
  * pipeline seam, which is why jsdom tests need no real AudioContext.
  *
+ * ================== ECHO CANCELLATION IS A DECLARED CONTROL ================
+ * TICKET 047. In Live the microphone stays open while the translation plays
+ * out loud, so on speakers the model could hear its own output and transcribe
+ * it as if the operator had spoken. Browsers default `echoCancellation: true`
+ * for a bare `audio: true`, and the operator confirmed empirically that the
+ * model never transcribed itself — but an implicit default is not a control.
+ * A browser changing its default must not silently change the experiment, so
+ * the constraints are REQUESTED explicitly and named:
+ * LIVE_CAPTURE_CONSTRAINTS = { audio: { echoCancellation, noiseSuppression,
+ * autoGainControl } }, all true. Same discipline as VAD
+ * (`silence_duration_ms: 500`) and endpointing: pinned, named, asserted.
+ *
+ * INPUT GATING IS DELIBERATELY ABSENT. Muting the mic while output plays was
+ * considered and REJECTED: it kills barge-in (hiding a real architectural
+ * difference between the arms), it can silently drop real speech, and it
+ * layers a second gate on top of the pinned VAD control. Nothing here — or in
+ * the Live view/controller — may set `track.enabled` or `muted`.
+ * ==========================================================================
+ *
  * Behavior:
- * 1. Calls opts.getUserMedia({ audio: true }).
+ * 1. Calls opts.getUserMedia(LIVE_CAPTURE_CONSTRAINTS).
  *    - resolves            -> permission 'granted' (four-value model: caller
  *      maps this to micPermission 'granted').
  *    - rejects with an error whose .name === 'NotAllowedError'
@@ -75,8 +94,35 @@ export type CaptureResult =
   | { status: 'granted'; handle: CaptureHandle }
   | { status: 'denied'; reason: 'blocked' | 'unavailable' };
 
+/**
+ * The shape of the constraint object handed to the getUserMedia seam. Widened
+ * from `{ audio: true }` (ticket 047) so the audio constraints travel with the
+ * request; injected fakes ignore the argument and keep working.
+ */
+export interface CaptureConstraints {
+  audio: {
+    echoCancellation: boolean;
+    noiseSuppression: boolean;
+    autoGainControl: boolean;
+  };
+}
+
+/**
+ * TICKET 047 — the microphone control, declared rather than inherited from a
+ * browser default. See the module header: Live keeps the mic open while the
+ * translation plays, and echo cancellation is what keeps the model from
+ * transcribing its own output. Frozen so nothing can mutate the shared object.
+ */
+export const LIVE_CAPTURE_CONSTRAINTS: CaptureConstraints = Object.freeze({
+  audio: Object.freeze({
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  }),
+});
+
 export interface StartCaptureOptions {
-  getUserMedia: (constraints: { audio: true }) => Promise<MediaStreamLike>;
+  getUserMedia: (constraints: CaptureConstraints) => Promise<MediaStreamLike>;
   audioContextFactory: () => CaptureAudioContextLike;
   pipeline: CapturePipeline;
   /** Receives exact 480-sample Int16 frames at 24 kHz. */
@@ -88,7 +134,7 @@ export interface StartCaptureOptions {
 export async function startCapture(opts: StartCaptureOptions): Promise<CaptureResult> {
   let stream: MediaStreamLike;
   try {
-    stream = await opts.getUserMedia({ audio: true });
+    stream = await opts.getUserMedia(LIVE_CAPTURE_CONSTRAINTS);
   } catch (err) {
     const name = err instanceof Error ? err.name : '';
     return {

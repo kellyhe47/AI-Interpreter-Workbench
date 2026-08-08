@@ -30,9 +30,13 @@
  *   deps.startCapture (browsers do not re-prompt after a denial).
  * - Playback: one ArmPlayback for the session, autoplay ALWAYS on. TICKET 040:
  *   realtime audio arrives on the WebRTC media track and never as PCM, so
- *   ArmPlayback is empty for a realtime session and `togglePlay` also drives
- *   the OPTIONAL deps.remoteAudioSink — the real sound. Cascade keeps moving
- *   the queue; the sink is simply absent.
+ *   ArmPlayback is empty for a realtime session and the sound is the media
+ *   element the transport attaches the track to; cascade keeps moving the
+ *   queue. TICKET 047: LIVE HAS NO PAUSE STATE. There is no play/pause action
+ *   on this surface and no code path here suspends playback or the sink —
+ *   pausing a live feed is not replay (cascade would schedule into a frozen
+ *   clock and play LATE; realtime would simply lose what arrived), and the
+ *   PRD says "Live: autoplay on", unconditionally.
  * - Ledger: each onUtteranceComplete assembles/completes an UtteranceRecord,
  *   stamps `runId` with the live session run id (`session-${startedAt}`) and
  *   `arm` with the DERIVED arm tag, and appends it. Footer figures (p50 /
@@ -141,8 +145,11 @@ export interface SessionDeps {
   /**
    * TICKET 040 (OPTIONAL) — the realtime WebRTC output sink. Realtime audio
    * arrives on the media track, never as PCM through onAudio, so ArmPlayback
-   * holds nothing for a realtime session and `togglePlay` must drive THIS to
-   * control real sound. Cascade sessions leave it untouched.
+   * holds nothing for a realtime session and THIS element is the real sound.
+   * TICKET 047: the controller never drives it. The transport attaches the
+   * inbound track on `ontrack` and the element autoplays, so the translation
+   * is audible with no user action — and Live, having no pause state, has no
+   * path that could suspend it. Cascade sessions leave it untouched.
    */
   remoteAudioSink?: RemoteAudioSink;
   /**
@@ -188,7 +195,6 @@ export interface SessionActions {
   /** Advance one cascade stage to the next model in MENUS[stage]. */
   cycleProvider: (stage: ProviderStage) => void;
   setContextPolicy: (value: ContextPolicy) => void;
-  togglePlay: () => void;
   reconnect: () => void;
 }
 
@@ -721,23 +727,9 @@ export function useSessionController(deps: SessionDeps): SessionController {
       dispatch({ type: 'SET_PROVIDER', stage, model });
     },
     setContextPolicy: (value) => dispatch({ type: 'SET_CONTEXT_POLICY', value }),
-    togglePlay: () => {
-      // TICKET 040 — the sink is the REAL audio path for realtime (the media
-      // track), the ArmPlayback queue the real one for cascade. Both are
-      // driven: only one of them ever holds anything, and the control must
-      // move whichever it is.
-      const sink = depsRef.current.remoteAudioSink;
-      if (stateRef.current.status === 'playing') {
-        store.playback.pause();
-        sink?.pause();
-        dispatch({ type: 'PLAYBACK_ENDED' });
-      } else {
-        store.playback.onEnded(() => dispatch({ type: 'PLAYBACK_ENDED' }));
-        store.playback.play();
-        sink?.play();
-        dispatch({ type: 'PLAY' });
-      }
-    },
+    // TICKET 047 — there is deliberately no play/pause action here. Live's
+    // ArmPlayback runs `autoplay: true` and the realtime sink autoplays the
+    // attached track, so the translation sounds the moment it arrives.
     reconnect: () => {
       dispatch({ type: 'RECONNECT_CLICKED' });
       void store.router.active?.start(buildTransportConfig());

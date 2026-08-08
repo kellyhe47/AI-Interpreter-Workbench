@@ -322,23 +322,6 @@ function CheckCircleIcon(): ReactElement {
   );
 }
 
-function PlayGlyph(): ReactElement {
-  return (
-    <svg width={14} height={14} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M7 5.5v13a1 1 0 0 0 1.54.84l10-6.5a1 1 0 0 0 0-1.68l-10-6.5A1 1 0 0 0 7 5.5z" />
-    </svg>
-  );
-}
-
-function PauseGlyph(): ReactElement {
-  return (
-    <svg width={14} height={14} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <rect x="6" y="5" width="4" height="14" rx="1" />
-      <rect x="14" y="5" width="4" height="14" rx="1" />
-    </svg>
-  );
-}
-
 function ChevronIcon(): ReactElement {
   return (
     <svg
@@ -443,26 +426,27 @@ function Banner({
   return <div style={styles[tone]}>{children}</div>;
 }
 
-/** The one target card. There is no grid: one architecture, one output. */
+/**
+ * The one target card. There is no grid: one architecture, one output.
+ *
+ * TICKET 047 — and no play/pause control. The translation sounds the instant
+ * it arrives (autoplay is unconditional in Live), so the only thing the old
+ * button carried that was worth keeping is the utterance duration, which is
+ * information rather than a control and now sits in its own readout row.
+ */
 function TargetCard({
   architecture,
   recipe,
   target,
-  playing,
-  stopped,
-  onTogglePlay,
 }: {
   architecture: 'cascade' | 'realtime';
   recipe: string;
   target: TargetView;
-  playing: boolean;
-  stopped: boolean;
-  onTogglePlay: () => void;
 }): ReactElement {
   const failed = target.status === 'failed';
   const inFlight = target.status === 'in-flight';
-  const displayStatus = failed ? 'failed' : playing ? 'playing' : target.status;
-  const statusLabel = failed ? 'failed' : inFlight ? 'in flight' : playing ? 'playing' : 'ready';
+  const displayStatus = failed ? 'failed' : target.status;
+  const statusLabel = failed ? 'failed' : inFlight ? 'in flight' : 'ready';
   const statusColor = failed
     ? 'var(--negative)'
     : inFlight
@@ -544,29 +528,16 @@ function TargetCard({
         </div>
       )}
 
-      {showDetails && !stopped && (
-        <button
-          onClick={onTogglePlay}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 7,
-            border: `1px solid ${playing ? 'var(--accent)' : 'var(--border-default)'}`,
-            borderRadius: 'var(--radius-md)',
-            padding: '7px 12px',
-            background: 'var(--surface-card)',
-            font: '500 12px var(--font-sans)',
-            cursor: 'pointer',
-            width: '100%',
-            color: playing ? 'var(--accent)' : 'var(--text-body)',
-          }}
-        >
-          {playing ? <PauseGlyph /> : <PlayGlyph />}
-          {playing ? 'pause' : 'play'}
-          <span style={{ ...monoStyle, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+      {/* The duration of the audio for THIS utterance — a readout, right where
+          the deleted play button used to sit. Rendered whenever the card has
+          data, including after the session stops (the button vanished there;
+          the information should not). */}
+      {showDetails && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <span data-utterance-duration style={{ ...monoStyle, color: 'var(--text-muted)' }}>
             {(target.durationMs / 1000).toFixed(1)} s
           </span>
-        </button>
+        </div>
       )}
 
       {showDetails && (
@@ -1100,14 +1071,7 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
           </div>
 
           {/* THE single target card — no grid, no add pill, no audible selector */}
-          <TargetCard
-            architecture={state.mode}
-            recipe={recipe}
-            target={target}
-            playing={status === 'playing'}
-            stopped={stopped}
-            onTogglePlay={() => actions.togglePlay()}
-          />
+          <TargetCard architecture={state.mode} recipe={recipe} target={target} />
         </>
       )}
 
