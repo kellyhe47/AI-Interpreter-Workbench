@@ -75,6 +75,53 @@ export interface OutboundAudioSinkOptions {
   audioContextFactory: (options: { sampleRate: number }) => OutboundAudioContextLike;
 }
 
-export function createOutboundAudioSink(_options: OutboundAudioSinkOptions): OutboundAudioSink {
-  throw new Error('not implemented: ticket 043');
+/** PCM16 full scale. `s / 32768` maps -32768 -> -1 and 32767 -> 32767/32768. */
+const PCM16_SCALE = 32_768;
+
+export function createOutboundAudioSink(options: OutboundAudioSinkOptions): OutboundAudioSink {
+  // EAGER, exactly once: the track has to exist before createOffer, so there is
+  // nothing to be lazy about. The FACTORY is what keeps jsdom safe — a bag that
+  // never connects never calls this function at all.
+  const ctx = options.audioContextFactory({ sampleRate: OUTBOUND_SAMPLE_RATE });
+  const destination = ctx.createMediaStreamDestination();
+  const track: unknown = destination.stream.getAudioTracks()[0];
+
+  /**
+   * The end of the last scheduled frame, on the context clock. Frame k begins
+   * exactly where frame k-1 ended, so N writes occupy N frame-durations of
+   * context time no matter how fast the writes arrive: the pacer owns the
+   * schedule and this module can never flush the clip ahead of real time.
+   */
+  let nextStartTime = 0;
+  let closed = false;
+
+  return {
+    track,
+    write(pcm: Int16Array): void {
+      // A paced frame can land after stop(); it must be inert, never fatal.
+      if (closed) return;
+      // An empty frame schedules nothing at all (no buffer, no source).
+      if (pcm.length === 0) return;
+
+      // Buffer rate === context rate: a disagreement here resamples silently.
+      const buffer = ctx.createBuffer(1, pcm.length, OUTBOUND_SAMPLE_RATE);
+      const channel = buffer.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) channel[i] = (pcm[i] ?? 0) / PCM16_SCALE;
+
+      // Never schedule in the past: a context whose clock has run on (a late
+      // start, a pacer that fell behind) resumes from currentTime.
+      const when = Math.max(ctx.currentTime, nextStartTime);
+      nextStartTime = when + pcm.length / OUTBOUND_SAMPLE_RATE;
+
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(destination);
+      source.start(when);
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      void ctx.close();
+    },
+  };
 }

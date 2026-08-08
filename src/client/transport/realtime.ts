@@ -36,9 +36,28 @@
  * nothing. Fakes that implement neither `ontrack` nor media APIs are
  * unaffected.
  *
- * sendAudio(): NO-OP. Realtime mic audio rides the WebRTC media track (wired
- * from getUserMedia outside this class); the router still fans chunks here
- * harmlessly so both transport kinds share one call site.
+ * OUTBOUND MEDIA TRACK (ticket 043): before createOffer the transport attaches
+ * exactly one outbound audio source.
+ *  - A mic MediaStream (Live): its tracks are added via addTrack, and
+ *    `deps.createOutboundAudioSink` is NEVER invoked — a synthesized track
+ *    would compete with the mic and sendAudio would double it onto the wire.
+ *  - No mic + `deps.createOutboundAudioSink` (Replay): the factory is called
+ *    per connect, the previous sink is CLOSED (or every reconnect leaks an
+ *    AudioContext), and `sink.track` is added via addTrack — or, on a peer
+ *    connection that can only negotiate directions, `addTransceiver('audio',
+ *    { direction: 'sendrecv' })`.
+ *  - No mic and no factory: the ticket-040 `recvonly` transceiver fallback,
+ *    unchanged — nothing can be sent, and this is still how the model's
+ *    inbound track is asked for.
+ * Fakes implementing neither optional method behave exactly as before.
+ *
+ * sendAudio(pcm): with a mic, a NO-OP — realtime mic audio rides the WebRTC
+ * media track (wired from getUserMedia outside this class) and the router fans
+ * chunks here only so both transport kinds share one call site. With an
+ * outbound sink (Replay) the frame is written to the sink AS IT ARRIVES: one
+ * write per paced frame, never buffered or flushed ahead, so delivery stays 1×.
+ * Frames before start() and after stop() reach no sink; stop() releases the
+ * sink exactly once.
  *
  * DATA-CHANNEL EVENT MAPPING (GA event names), driven per parsed message:
  * - conversation.item.input_audio_transcription.delta { delta } ->
@@ -236,6 +255,12 @@ export class RealtimeTransport implements InterpreterTransport {
   private channel: RtcDataChannelLike | null = null;
   private stopped = false;
   private reconnecting = false;
+  /**
+   * TICKET 043 — the outbound sink for the current connection, or null when
+   * there is a mic (Live), no factory, or no connection yet. Rebuilt per
+   * connect; the previous one is closed as the new one is installed.
+   */
+  private outboundSink: OutboundAudioSink | null = null;
 
   /** Client-assigned utterance counter (0-based). */
   private utt = 0;
@@ -300,16 +325,38 @@ export class RealtimeTransport implements InterpreterTransport {
 
       // Production path (browser QA, not unit tests): attach the live mic
       // track BEFORE createOffer so the offer carries a sendrecv audio
-      // m-line (mic up, model audio down). Without a stream, fall back to a
-      // recvonly transceiver so the model's audio track still flows — since
-      // ticket 040 that track IS the playback path (see the ontrack handler
-      // above). Test fakes implement neither optional method and behave as
-      // before.
+      // m-line (mic up, model audio down). Test fakes implement neither
+      // optional method and behave as before.
+      //
+      // TICKET 043 — the microphone-less case (Replay). With an outbound sink
+      // factory the sink's synthesized track takes the mic's place, so the
+      // offer still describes SENDABLE audio; `recvonly` cannot send at all,
+      // which is why every paced frame used to have nowhere to go. With NO
+      // factory nothing can be sent, and the ticket-040 `recvonly` fallback is
+      // unchanged — that is still how the model's inbound track is asked for.
       const media = this.deps.getMediaStream?.() ?? null;
-      if (media && typeof pc.addTrack === 'function') {
+      if (media !== null && typeof pc.addTrack === 'function') {
         for (const track of media.getAudioTracks()) pc.addTrack(track, media);
-      } else if (typeof pc.addTransceiver === 'function') {
-        pc.addTransceiver('audio', { direction: 'recvonly' });
+      } else {
+        // The factory is invoked ONLY without a mic: under a mic the mic track
+        // IS the outbound audio, and a second synthesized track would compete
+        // with it (and `sendAudio`, which Live's controller fans mic frames
+        // into, would double the microphone onto the wire).
+        const sink = media === null ? (this.deps.createOutboundAudioSink?.() ?? null) : null;
+        if (sink !== null) {
+          // Build AND release: each connect needs a track for ITS peer
+          // connection, so without this close every reconnect would leak the
+          // abandoned AudioContext.
+          this.outboundSink?.close();
+          this.outboundSink = sink;
+          if (typeof pc.addTrack === 'function') {
+            pc.addTrack(sink.track);
+          } else if (typeof pc.addTransceiver === 'function') {
+            pc.addTransceiver('audio', { direction: 'sendrecv' });
+          }
+        } else if (typeof pc.addTransceiver === 'function') {
+          pc.addTransceiver('audio', { direction: 'recvonly' });
+        }
       }
 
       const offer = await pc.createOffer();
@@ -333,6 +380,12 @@ export class RealtimeTransport implements InterpreterTransport {
       if (this.stopped) {
         channel.close();
         pc.close();
+        // A sink built for a connection that is being abandoned owns an
+        // AudioContext; releasing it here is what keeps a stop() mid-handshake
+        // from leaking one. Nulling first makes the release single-shot.
+        const abandoned = this.outboundSink;
+        this.outboundSink = null;
+        abandoned?.close();
         return false;
       }
 
@@ -476,10 +529,31 @@ export class RealtimeTransport implements InterpreterTransport {
     this.pc?.close();
     this.channel = null;
     this.pc = null;
+    // TICKET 043 — release the outbound context. Nulled first so the guard at
+    // the top of stop() is not the only thing making this single-shot.
+    const sink = this.outboundSink;
+    this.outboundSink = null;
+    sink?.close();
   }
 
-  sendAudio(_pcm: Int16Array): void {
-    // NO-OP: realtime mic audio rides the WebRTC media track.
+  /**
+   * TICKET 043 — paced PCM out.
+   *
+   * With a MICROPHONE this is still a no-op: Live's mic rides the WebRTC media
+   * track, and the router fans chunks here only so both transport kinds share
+   * one call site. In REPLAY there is no mic — the runner paces the recording
+   * and hands over one 480-sample frame every 20 ms — so the frame goes to the
+   * outbound sink AS IT ARRIVES. Nothing is buffered here: the pacer owns the
+   * schedule, and a batched flush would invalidate VAD and every latency figure
+   * while looking like it worked.
+   *
+   * Gated on `stopped`, not merely on sink presence: the pacer can deliver a
+   * frame after stop(), and it must reach a released sink no more than it
+   * reaches the wire.
+   */
+  sendAudio(pcm: Int16Array): void {
+    if (this.stopped) return;
+    this.outboundSink?.write(pcm);
   }
 
   setHandlers(handlers: TransportHandlers): void {

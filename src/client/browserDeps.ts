@@ -47,6 +47,7 @@
 import { CORPUS_VERSION } from '../core/corpus';
 import { readWav } from '../harness/wav';
 import { startCapture, type CapturePipeline, type CaptureResult } from './audio/capture';
+import { createOutboundAudioSink, type OutboundAudioContextLike } from './audio/outboundAudio';
 import { ArmPlayback, type PlaybackAudioContextLike } from './audio/playback';
 import { createRunOnceExecutor, startBatch, type BatchHandle } from './batch/runner';
 import {
@@ -198,6 +199,16 @@ export function buildReplayDeps(): ReplayDeps {
 
   // Replay has no microphone: the clip is paced INTO the transport, so the
   // realtime peer connection carries no live track (getMediaStream omitted).
+  //
+  // TICKET 043 — which is exactly why the realtime branch needs an OUTBOUND
+  // sink: `sendAudio` had nowhere to put the paced frames, so OpenAI heard
+  // silence, VAD never fired and Arm A produced zero utterances. The factory
+  // (not an instance) keeps the AudioContext unbuilt until a run actually
+  // connects, and gives each reconnect a track for its own peer connection.
+  // This belongs to REPLAY ONLY: Live's bag must never get one, because there
+  // the mic already rides the media track and the session controller fans mic
+  // frames into `sendAudio` — a sink there would double the microphone.
+  //
   // NO `remoteAudioSink` either, and deliberately: NOTHING IN REPLAY AUTOPLAYS
   // (PRD §7), and a sink here would sound the model's track the moment it
   // arrived. The measurement Replay needs comes from the transport's
@@ -210,6 +221,11 @@ export function buildReplayDeps(): ReplayDeps {
           fetchImpl: browserFetch,
           rtcFactory: () => new RTCPeerConnection() as unknown as RtcPeerConnectionLike,
           now: () => Date.now(),
+          createOutboundAudioSink: () =>
+            createOutboundAudioSink({
+              audioContextFactory: (o) =>
+                new AudioContext(o) as unknown as OutboundAudioContextLike,
+            }),
         },
       );
     }
