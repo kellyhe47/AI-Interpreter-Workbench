@@ -42,7 +42,9 @@
  * review:
  *   [data-record-cap-reached]   CAP_REACHED — only when the cap stopped it
  *   [data-take-duration]        the take's length
- *   [data-record-play]          button 'Play take' -> playTake(take)
+ *   [data-record-play]          button 'Play take' -> playTake(take); a press
+ *                               that cannot build an AudioContext is reported
+ *                               through the host's funnel (ticket 049 R3-1)
  *   [data-take-label]           textbox 'Clip label'
  *   [data-take-language]        select 'Source language' — en | es | yue
  *   [data-segmentation-note]    SEGMENTATION_NOTE, verbatim
@@ -99,15 +101,28 @@ import {
 } from '../../replay/capture';
 import type { NewRecordingInput } from '../../replay/recordingsClient';
 import type { SegmentedUtterance } from '../../replay/segment';
-import type { ReplayTakeOptions } from '../../views/ReplayView';
+import type { ReplayDeps, ReplayTakeOptions } from '../../views/ReplayView';
 
 export interface RecordTakeProps {
   /** Pre-bound capture seam; the browser bits belong to the host, not here. */
   startTake: (options: ReplayTakeOptions) => Promise<TakeRecorder | CaptureDenied>;
   /** Proposes the utterance boundaries the operator then confirms. */
   segmentTake: (samples: Int16Array) => SegmentedUtterance[];
-  /** On-demand playback of the recorded take. NEVER called at render. */
-  playTake?: (take: RecordedTake) => void;
+  /**
+   * On-demand playback of the recorded take. NEVER called at render.
+   *
+   * TICKET 049 R3-1 — the SECOND argument is not optional decoration: it is how
+   * a press that could not build an AudioContext says so. Replay shares one
+   * context per deps bag, so such a press is otherwise a silent no-op — and a
+   * freshly recorded take has no "no audio stored" explanation available at
+   * all, which makes it the most ambiguous silence on either screen. This prop
+   * was previously narrowed to one argument, which quietly stranded the
+   * reporter `buildReplayDeps().playTake` accepts.
+   *
+   * Typed as the SEAM ITSELF rather than a restatement of its shape, so this
+   * prop cannot drift back out of step with `ReplayDeps['playTake']`.
+   */
+  playTake?: NonNullable<ReplayDeps['playTake']>;
   /** Provenance stamped onto a corpus save; absent hosts stamp nothing. */
   corpusVersion?: string;
   now: () => number;

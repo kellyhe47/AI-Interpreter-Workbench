@@ -399,11 +399,29 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
    */
   const [playbackError, setPlaybackError] = useState<unknown>(null);
 
-  /** Every play press goes through here, so no seam can forget to report. */
+  /**
+   * Every play press on this screen goes through one of these two, so no arm
+   * can forget to report. THREE arms feed them: the runs list, blind compare
+   * (where an unexplained silence is scored as a property of the run) and the
+   * record flow's "Play take".
+   *
+   * TICKET 049 R3-1 — `playTake` used to be handed to RecordTake RAW, which
+   * narrowed it straight back to one argument, so the reporter the bag accepts
+   * had no production caller at all. A press with the context cap full was a
+   * silent no-op, and a freshly recorded take has no "no audio stored"
+   * explanation available to fall back on.
+   */
   const playRun = useCallback(
     (runId: string): void => {
       setPlaybackError(null);
       deps.playRun(runId, (error) => setPlaybackError(error));
+    },
+    [deps],
+  );
+  const playTake = useCallback(
+    (take: RecordedTake): void => {
+      setPlaybackError(null);
+      deps.playTake?.(take, (error) => setPlaybackError(error));
     },
     [deps],
   );
@@ -606,10 +624,14 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
 
   const recordPanel =
     recordOpen && startTake !== undefined && segmentTake !== undefined ? (
+      /* R3-1 — `playTake` is the FUNNEL, never `deps.playTake` raw: the raw
+         forward was narrowed back to one argument here and stranded the
+         reporter. `undefined` is preserved so a host that wires no playback
+         renders exactly as it did. */
       <RecordTake
         startTake={startTake}
         segmentTake={segmentTake}
-        playTake={deps.playTake}
+        playTake={deps.playTake === undefined ? undefined : playTake}
         corpusVersion={deps.corpusVersion}
         now={deps.now}
         newId={deps.newId}
