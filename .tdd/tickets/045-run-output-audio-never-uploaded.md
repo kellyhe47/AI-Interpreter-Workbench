@@ -1,7 +1,7 @@
 ---
 id: 045
 title: Run output audio is never uploaded — the play button 404s and blind compare has nothing to play
-status: pending
+status: green
 source: qa-live
 depends_on: []
 touches: [src/server/routes/runs.ts, src/client/replay/recordingsClient.ts, src/client/replay/runner.ts, src/client/components/replay/RunsList.tsx]
@@ -77,3 +77,46 @@ Arm A `audioChunks` is empty and there is nothing to upload even with this route
   wiring, plus the play-control gate.
 - Nothing autoplays in Replay (PRD §7): the upload must not cause playback, and no `AudioContext`
   may be constructed at render.
+
+## Attempt log
+
+- Green in one implementation pass, 17 red -> 0. Suite 1699/99; both tsconfigs clean; build clean.
+- New `POST /api/runs/:id/audio` (own endpoint, `{ audioBase64 }` -> `201 { id, outputAudioPath,
+  bytes }`, code `invalid-run-audio`). It VALIDATES before touching the store — the recordings
+  discipline, not the runs pass-through one — so a rejected upload provably creates no file.
+- `runAudioStorePath(runId)` exported from storage so the PRD §7 layout is spelled ONCE, in storage,
+  and the route reports it. The client never invents a path.
+
+### The ticket's ordering was WRONG and the test-writer caught it
+
+My AC said "upload AFTER the Run is POSTed". The ledger is append-only with no PATCH, so a Run
+POSTed first can never be corrected when the upload fails: it would sit in history promising audio
+that was never written, and the play control gates on exactly that field, so it would offer a 404
+button. **Inverted: upload FIRST, then POST the Run carrying the path the upload reported.**
+`outputAudioPath` is a REPORT, not a promise — which is why the route must accept an upload for a
+not-yet-POSTed Run, now pinned by its own test.
+
+### The play-gate rule changed, deliberately
+
+Ticket 013 pinned `[data-run-play]` to "complete only". That was a PROXY for "has audio" and is
+wrong in **both** directions: a complete Arm A run stores no audio and was offering a button that
+404s (the 024/044 defect exactly), while a failed run that synthesized output before losing a stage
+keeps diagnostic audio worth hearing. **The gate is now `run.outputAudioPath !== undefined`**;
+status governs only the failure notice and the stage cells. Absent, not disabled, plus
+`[data-run-no-audio]` ("no output audio stored") so the card says why.
+
+### Audio can never reach a ledger line — three independent barriers
+
+The bytes travel a different route than `POST /api/runs`; the route hands them straight to
+`writeRunAudio` and returns only `{id, path, bytes}`; and the upload helper takes the `RunsClient`,
+not the Run object, so there is nowhere to attach bytes. Pinned by a 1 MB structural test: one
+ledger line under 4096 chars with no base64 fragment, full bytes on disk.
+
+- Mutation-checked:
+  | mutation | result |
+  |---|---|
+  | play gated on `status === 'complete'` again | 2 red |
+  | an upload failure fails the Run | 1 red |
+  | an empty `audioBase64` accepted (zero-byte .wav answering 200-with-silence) | 1 red |
+- Corrected the false header in `routes/runs.ts` — *"the orchestrator writes it, so this router only
+  reads it"* — which is the comment that made the missing write path look intentional.
