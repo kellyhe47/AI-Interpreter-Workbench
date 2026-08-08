@@ -42,6 +42,21 @@
  * - reset(): clears the queue and counters for the next utterance —
  *   audioQueuedAt back to null, durationMs 0; the next enqueue captures a
  *   fresh audioQueuedAt.
+ *
+ * TICKET 049 — A HOSTILE AudioContext DEGRADES PLAYBACK, IT NEVER KILLS IT.
+ * `new AudioContext()` throws for real, and because the factory is invoked
+ * LAZILY from enqueue that throw used to escape from inside the transport's
+ * onAudio callback, where nothing catches it. Now:
+ * - the factory is attempted AT MOST ONCE, ever;
+ * - enqueue still does ALL of its measurement work (audioQueuedAt,
+ *   durationMs — sound is not a measurement), drops the chunk, and REPORTS via
+ *   `onPlaybackUnavailable` exactly once per instance, across chunks and
+ *   across reset()s;
+ * - play() never reports (see its own comment).
+ * ROUND 2 — "once" means once per FAILURE, not once per page:
+ * `clearPlaybackFailure()` drops the latch so the next attempt is made afresh.
+ * The controller calls it from `newSession` only; `reset()` still clears none
+ * of it.
  * ==========================================================================
  */
 
@@ -71,6 +86,13 @@ export interface ArmPlaybackOptions {
   autoplay: boolean;
   /** Injectable performance.now-style clock (ms). */
   now?: () => number;
+  /**
+   * TICKET 049 — reported ONCE when a chunk could not be sounded because the
+   * AudioContext could not be built. Never called from play(): a failed resume
+   * with nothing queued has cost the operator no sound (realtime enqueues
+   * nothing at all).
+   */
+  onPlaybackUnavailable?: (error: unknown) => void;
 }
 
 export class ArmPlayback {
@@ -86,6 +108,17 @@ export class ArmPlayback {
   private endedCb: (() => void) | null = null;
   private endedFired = false;
   private nextStartTime = 0;
+  /**
+   * TICKET 049 — the factory is attempted AT MOST ONCE. `new AudioContext()`
+   * throws for real (Chrome at its ~6-per-document limit; Safari under some
+   * policy states) and a context limit does not un-fill itself mid-session, so
+   * re-attempting per chunk is one throw per 20 ms frame.
+   */
+  private contextFailed = false;
+  private contextError: unknown = null;
+  /** Survives reset(): a notice that flickers off per utterance is no notice. */
+  private unavailable = false;
+  private reported = false;
 
   constructor(opts: ArmPlaybackOptions) {
     this.opts = opts;
@@ -93,9 +126,58 @@ export class ArmPlayback {
     this.playing = opts.autoplay;
   }
 
-  private getContext(): PlaybackAudioContextLike {
-    if (!this.context) this.context = this.opts.audioContextFactory();
+  /** null once the factory has thrown — never retried (see contextFailed). */
+  private getContext(): PlaybackAudioContextLike | null {
+    if (this.context) return this.context;
+    if (this.contextFailed) return null;
+    try {
+      this.context = this.opts.audioContextFactory();
+    } catch (err) {
+      this.contextFailed = true;
+      this.contextError = err;
+      return null;
+    }
     return this.context;
+  }
+
+  /**
+   * TICKET 049 — the sound was actually LOST, so say so exactly once. Called
+   * only from enqueue: a failed play() with nothing queued cost nothing, and a
+   * realtime session (whose audio rides the remoteAudioSink element) never
+   * enqueues a chunk at all.
+   */
+  private reportUnavailable(): void {
+    this.unavailable = true;
+    if (this.reported) return;
+    this.reported = true;
+    this.opts.onPlaybackUnavailable?.(this.contextError);
+  }
+
+  /**
+   * TICKET 049 ROUND 2 (R2-6) — drop the one-shot latch so the next enqueue
+   * attempts the factory again. Called by the controller from `newSession`
+   * ONLY, never from `reset()`.
+   *
+   * The failure this class latches is not always permanent: a per-document
+   * context cap frees when some other context closes, and Safari's policy
+   * state changes. Without this the only cure was reloading the tab. Between
+   * two sentences of ONE session, though, nothing has changed — which is why
+   * `reset()` still clears none of it (retrying there is one throw per 20 ms
+   * frame).
+   *
+   * `reported` is cleared too, so a NEW failure in the new session is reported
+   * afresh rather than leaving the operator reading a stale reason.
+   */
+  clearPlaybackFailure(): void {
+    this.contextFailed = false;
+    this.contextError = null;
+    this.unavailable = false;
+    this.reported = false;
+  }
+
+  /** TICKET 049 — true once a chunk was dropped for want of a context. */
+  get playbackUnavailable(): boolean {
+    return this.unavailable;
   }
 
   /** Captured at the FIRST enqueue (per utterance); null before any audio. */
@@ -112,20 +194,32 @@ export class ArmPlayback {
     if (this.queuedAt === null) this.queuedAt = this.now();
     this.totalSamples += pcm.length;
 
+    // TICKET 049 — MEASUREMENT FIRST, and unconditionally: audioQueuedAt and
+    // durationMs above are timing marks, not playback events, so a context
+    // that cannot be built costs the sound and nothing else. Dropping the
+    // chunk here (rather than letting the constructor throw) is what keeps the
+    // transport's onAudio callback — which catches nothing — from wedging Live.
     const ctx = this.getContext();
+    if (ctx === null) {
+      this.reportUnavailable();
+      return;
+    }
     const buffer = ctx.createBuffer(1, pcm.length, 24000);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < pcm.length; i++) data[i] = pcm[i]! / 32768;
 
     if (this.playing) {
-      this.startBuffer(buffer, pcm.length);
+      this.startBuffer(ctx, buffer, pcm.length);
     } else {
       this.buffered.push({ buffer, length: pcm.length });
     }
   }
 
-  private startBuffer(buffer: PlaybackBufferLike, length: number): void {
-    const ctx = this.getContext();
+  private startBuffer(
+    ctx: PlaybackAudioContextLike,
+    buffer: PlaybackBufferLike,
+    length: number,
+  ): void {
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     src.connect(ctx.destination);
@@ -152,12 +246,24 @@ export class ArmPlayback {
   }
 
   play(): void {
-    const ctx = this.getContext();
-    void ctx.resume();
     this.playing = true;
+    // TICKET 049 — DELIBERATELY SILENT on failure. The controller calls this
+    // once inside the Start gesture (047 R2-3) purely to resume a possibly
+    // suspended context; a realtime session then enqueues nothing, so saying
+    // "no audio output" here would slander a perfectly audible session. The
+    // first chunk that is actually dropped reports instead.
+    //
+    // ROUND 2 (R2-4) — and it discards NOTHING. A queue can only exist if a
+    // context was built, and a built context is cached, so there is nothing
+    // here to drop; clearing `buffered` on this branch would read as "throw
+    // the queued audio away and say nothing", the one thing this ticket
+    // forbids. The honest failure path is a bare return.
+    const ctx = this.getContext();
+    if (ctx === null) return;
+    void ctx.resume();
     const pending = this.buffered;
     this.buffered = [];
-    for (const { buffer, length } of pending) this.startBuffer(buffer, length);
+    for (const { buffer, length } of pending) this.startBuffer(ctx, buffer, length);
   }
 
   pause(): void {
@@ -177,5 +283,8 @@ export class ArmPlayback {
     this.endedFired = false;
     this.nextStartTime = 0;
     this.playing = this.opts.autoplay;
+    // TICKET 049 — `unavailable` / `contextFailed` / `reported` are NOT
+    // cleared. reset() means "next utterance", and the context limit that
+    // caused this has not un-filled itself between utterances.
   }
 }

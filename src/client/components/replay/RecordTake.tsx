@@ -42,7 +42,9 @@
  * review:
  *   [data-record-cap-reached]   CAP_REACHED — only when the cap stopped it
  *   [data-take-duration]        the take's length
- *   [data-record-play]          button 'Play take' -> playTake(take)
+ *   [data-record-play]          button 'Play take' -> playTake(take); a press
+ *                               that cannot build an AudioContext is reported
+ *                               through the host's funnel (ticket 049 R3-1)
  *   [data-take-label]           textbox 'Clip label'
  *   [data-take-language]        select 'Source language' — en | es | yue
  *   [data-segmentation-note]    SEGMENTATION_NOTE, verbatim
@@ -99,15 +101,39 @@ import {
 } from '../../replay/capture';
 import type { NewRecordingInput } from '../../replay/recordingsClient';
 import type { SegmentedUtterance } from '../../replay/segment';
-import type { ReplayTakeOptions } from '../../views/ReplayView';
+import type { ReplayDeps, ReplayTakeOptions } from '../../views/ReplayView';
 
 export interface RecordTakeProps {
   /** Pre-bound capture seam; the browser bits belong to the host, not here. */
   startTake: (options: ReplayTakeOptions) => Promise<TakeRecorder | CaptureDenied>;
   /** Proposes the utterance boundaries the operator then confirms. */
   segmentTake: (samples: Int16Array) => SegmentedUtterance[];
-  /** On-demand playback of the recorded take. NEVER called at render. */
-  playTake?: (take: RecordedTake) => void;
+  /**
+   * On-demand playback of the recorded take. NEVER called at render.
+   *
+   * TICKET 049 R3-1 — a press that could not build an AudioContext must SAY SO.
+   * Replay shares one context per deps bag, so such a press is otherwise a
+   * silent no-op, and a freshly recorded take has no "no audio stored"
+   * explanation available at all — the most ambiguous silence on either screen.
+   *
+   * WHAT PREVENTS THAT REGRESSION IS THE HOST'S FUNNEL, NOT THIS TYPE.
+   * `ReplayView` passes its own `playTake` callback, which binds the reporter
+   * in a closure; it never forwards `deps.playTake` raw. Both ways of undoing
+   * that are caught by locked tests (the raw forward, and a funnel that drops
+   * the callback). The type is NOT a barrier in the dangerous direction — R4-2
+   * verified with `tsc` that narrowing this prop back to one argument, and
+   * restoring the raw forward, BOTH compile clean and leave the suite green,
+   * because TypeScript lets a fewer-parameter function satisfy a
+   * more-parameter signature. Seam-typing below is single-source-of-truth
+   * hygiene — it does propagate changes to the seam's first parameter — and
+   * nothing more. Do not delete the funnel on the strength of it.
+   *
+   * COROLLARY: with the funnel in place this prop's ARITY IS INERT. The
+   * reporter lives entirely in the host, and the call site here passes one
+   * argument on purpose. That is the intended architecture: the component
+   * presses play, the host owns the notice.
+   */
+  playTake?: NonNullable<ReplayDeps['playTake']>;
   /** Provenance stamped onto a corpus save; absent hosts stamp nothing. */
   corpusVersion?: string;
   now: () => number;
