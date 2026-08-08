@@ -565,6 +565,21 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
 
   transport.stop();
 
+  // TICKET 046 — the transport's OWN captured output audio, for the arm whose
+  // audio never reaches `onAudio` at all: over WebRTC the model's voice rides
+  // the media track, so Arm A buffers zero chunks here and 045's upload path
+  // had nothing to give the store. Read AFTER stop(), when the capture is
+  // finished, and used only when the data-channel path produced NOTHING — a
+  // decoded sample always wins, so cascade is byte-for-byte unchanged.
+  //
+  // It is deliberately NOT routed through `onAudio`: that handler is what
+  // stamps `firstAudioAt`, and feeding it here would silently re-anchor Arm A's
+  // headline latency to the moment the run happened to drain a buffer.
+  if (audioChunks.length === 0) {
+    const captured = transport.takeOutputAudio?.();
+    if (captured !== undefined && captured.length > 0) audioChunks.push(captured);
+  }
+
   const outputAudio = concatPcm(audioChunks);
   timings.speech_end = t0 + recording.speechEndMs;
   // TICKET 040 — a decoded PCM sample wins, then a transport-sent mark (the

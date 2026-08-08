@@ -298,6 +298,16 @@ export class RealtimeTransport implements InterpreterTransport {
    * connect; the previous one is closed as the new one is installed.
    */
   private outboundSink: OutboundAudioSink | null = null;
+  /**
+   * TICKET 046 — the INBOUND capture tap, or null until the first inbound AUDIO
+   * track arrives (and forever, when no factory is wired — Live). Built at most
+   * ONCE per transport: one run is one recording, so a reconnect re-attaches
+   * THIS tap rather than building a second AudioContext with its own buffer.
+   *
+   * NEVER nulled by `stop()`. The runner reads `takeOutputAudio()` after the
+   * transport has been stopped, so the closed tap has to outlive the connection.
+   */
+  private inboundTap: InboundAudioTap | null = null;
 
   /** Client-assigned utterance counter (0-based). */
   private utt = 0;
@@ -357,7 +367,20 @@ export class RealtimeTransport implements InterpreterTransport {
         if (ev.track.kind !== 'audio') return;
         const stream = ev.streams[0];
         if (stream === undefined) return;
+        // PLAYBACK FIRST, ALWAYS. 040's sink is what Live hears; capture is
+        // bolted onto the same event and the SAME stream object — no second
+        // negotiation, and never ahead of the audio the operator is waiting on.
         this.deps.remoteAudioSink?.attach(stream);
+        // TICKET 046 — and then the capture, LAZILY: the factory owns an
+        // AudioContext, so a connect that never carries audio must construct
+        // nothing. The tapped samples deliberately do NOT reach `onAudio` —
+        // that is what the runner stamps `audio_queued` from, and Arm A's
+        // headline latency must keep coming from `output_audio_buffer.started`.
+        const buildTap = this.deps.createInboundAudioTap;
+        if (buildTap !== undefined) {
+          this.inboundTap ??= buildTap();
+          this.inboundTap.attach(stream);
+        }
       };
 
       // Production path (browser QA, not unit tests): attach the live mic
@@ -571,6 +594,10 @@ export class RealtimeTransport implements InterpreterTransport {
     const sink = this.outboundSink;
     this.outboundSink = null;
     sink?.close();
+    // TICKET 046 — release the inbound context too. Closed EXACTLY ONCE (the
+    // `stopped` guard above makes stop() single-shot) and NOT nulled: the
+    // runner reads the captured audio after this returns.
+    this.inboundTap?.close();
   }
 
   /**
@@ -598,9 +625,13 @@ export class RealtimeTransport implements InterpreterTransport {
   }
 
   /**
-   * TICKET 046 — STUB. The captured inbound audio, 24 kHz mono PCM16.
+   * TICKET 046 — the captured inbound audio, 24 kHz mono PCM16.
+   *
+   * Empty when no tap was wired (Live, and every fake that omits the factory)
+   * or when the media track carried nothing. Readable AFTER `stop()`, which is
+   * the only moment the runner asks: the capture is finished exactly then.
    */
   takeOutputAudio(): Int16Array {
-    return new Int16Array(0);
+    return this.inboundTap?.take() ?? new Int16Array(0);
   }
 }

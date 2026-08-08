@@ -47,6 +47,7 @@
 import { CORPUS_VERSION } from '../core/corpus';
 import { readWav } from '../harness/wav';
 import { startCapture, type CapturePipeline, type CaptureResult } from './audio/capture';
+import { createInboundAudioTap, type InboundAudioContextLike } from './audio/inboundAudio';
 import { createOutboundAudioSink, type OutboundAudioContextLike } from './audio/outboundAudio';
 import { ArmPlayback, type PlaybackAudioContextLike } from './audio/playback';
 import { createRunOnceExecutor, startBatch, type BatchHandle } from './batch/runner';
@@ -225,6 +226,22 @@ export function buildReplayDeps(): ReplayDeps {
             createOutboundAudioSink({
               audioContextFactory: (o) =>
                 new AudioContext(o) as unknown as OutboundAudioContextLike,
+            }),
+          // TICKET 046 — and the INBOUND capture. Arm A's output audio exists
+          // ONLY on the media track (there is no `response.output_audio.delta`,
+          // 040), so without this the run uploads nothing and blind compare has
+          // nothing to play for any pair involving Arm A. A factory, like its
+          // outbound twin: the AudioContext stays unbuilt until an audio track
+          // actually arrives.
+          //
+          // REPLAY ONLY. Live's bag below must never wire this — Live plays the
+          // track through `remoteAudioSink` and persists NO audio at all
+          // (§17 19h). Capturing here is still silent: the tap's only path to
+          // the destination runs through a gain pinned at 0, so nothing in
+          // Replay autoplays (PRD §7).
+          createInboundAudioTap: () =>
+            createInboundAudioTap({
+              audioContextFactory: (o) => new AudioContext(o) as unknown as InboundAudioContextLike,
             }),
         },
       );

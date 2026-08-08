@@ -88,7 +88,117 @@ export interface InboundAudioTapOptions {
   audioContextFactory: (options: { sampleRate: number }) => InboundAudioContextLike;
 }
 
-/** STUB — ticket 046 implementation pending. */
-export function createInboundAudioTap(_options: InboundAudioTapOptions): InboundAudioTap {
-  throw new Error('createInboundAudioTap is not implemented');
+/**
+ * The capture block size. A power of two, as Web Audio requires; 2048 is the
+ * same quantum `browserDeps`' microphone pipeline uses, so both capture paths
+ * in this client render on the same grain.
+ */
+const CAPTURE_BUFFER_SIZE = 2048;
+
+/** PCM16 full scale. `v * 32768` maps -1 -> -32768 and +1 -> 32768 (clamped). */
+const PCM16_SCALE = 32_768;
+const PCM16_MIN = -32_768;
+const PCM16_MAX = 32_767;
+
+/**
+ * One float sample to PCM16, CLAMPED AT FULL SCALE.
+ *
+ * Web Audio permits samples outside [-1, 1] (a mixed or gained graph routinely
+ * produces them), and 1.0 itself would wrap to -32768 under a bare 16-bit
+ * truncation. Clamping keeps an over-range sample loud rather than turning it
+ * into aliased garbage that blind compare would hear as a defect of the ARM.
+ */
+function toPcm16(sample: number): number {
+  const scaled = Math.round(sample * PCM16_SCALE);
+  if (scaled > PCM16_MAX) return PCM16_MAX;
+  if (scaled < PCM16_MIN) return PCM16_MIN;
+  return scaled;
+}
+
+export function createInboundAudioTap(options: InboundAudioTapOptions): InboundAudioTap {
+  // EAGER, exactly once — the mirror of the outbound sink. The FACTORY is what
+  // keeps jsdom safe: a transport that never sees an audio track never calls
+  // `createInboundAudioTap` at all, so no AudioContext is ever constructed.
+  const ctx = options.audioContextFactory({ sampleRate: INBOUND_SAMPLE_RATE });
+
+  /** Everything captured so far, in arrival order. ONE run is ONE recording. */
+  const chunks: Int16Array[] = [];
+  let captured = 0;
+
+  /** The current connection's graph, or null before the first attach. */
+  let source: InboundSourceNodeLike | null = null;
+  let processor: InboundProcessorLike | null = null;
+  let gain: InboundGainLike | null = null;
+  let closed = false;
+
+  /**
+   * Tears down the graph of the PREVIOUS connection without touching `chunks`.
+   * Silencing the old processor is the load-bearing half: a reconnect that left
+   * it live would double every subsequent frame into the recording.
+   */
+  const release = (): void => {
+    if (processor !== null) {
+      processor.onaudioprocess = null;
+      processor.disconnect();
+    }
+    source?.disconnect();
+    gain?.disconnect();
+    source = null;
+    processor = null;
+    gain = null;
+  };
+
+  return {
+    attach(stream): void {
+      // A track event can land after stop(); it must be inert, never fatal.
+      if (closed) return;
+      release();
+
+      const nextSource = ctx.createMediaStreamSource(stream);
+      // MONO in, mono out: cascade's uploaded audio is one channel, and blind
+      // compare must not be able to tell the arms apart by format.
+      const nextProcessor = ctx.createScriptProcessor(CAPTURE_BUFFER_SIZE, 1, 1);
+      // A ScriptProcessor is only pulled when it reaches a destination, so the
+      // graph has to end at one — but NOTHING IN REPLAY AUTOPLAYS (PRD §7), so
+      // the only path there is through a gain pinned at 0.
+      const nextGain = ctx.createGain();
+      nextGain.gain.value = 0;
+
+      nextProcessor.onaudioprocess = (ev): void => {
+        if (closed) return;
+        const frame = ev.inputBuffer.getChannelData(0);
+        const pcm = new Int16Array(frame.length);
+        for (let i = 0; i < frame.length; i++) pcm[i] = toPcm16(frame[i] ?? 0);
+        chunks.push(pcm);
+        captured += pcm.length;
+      };
+
+      nextSource.connect(nextProcessor);
+      nextProcessor.connect(nextGain);
+      nextGain.connect(ctx.destination);
+
+      source = nextSource;
+      processor = nextProcessor;
+      gain = nextGain;
+    },
+    take(): Int16Array {
+      // NON-DESTRUCTIVE: the runner reads this AFTER stop() has closed the tap,
+      // and a second read (upload, then playback) must see the same recording.
+      const out = new Int16Array(captured);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return out;
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      release();
+      // The recording itself is deliberately NOT cleared: `take()` runs after
+      // this, and the bytes are the whole point of the tap.
+      void ctx.close();
+    },
+  };
 }
