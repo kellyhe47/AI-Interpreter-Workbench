@@ -69,6 +69,14 @@
  * `runTimeoutMs` is a required option rather than a constant because the right
  * bound depends on the clip length and the architecture under test.
  *
+ * TICKET 048 — AND IT IS A REAL TIMEOUT: the budget RACES the execution rather
+ * than only aborting a signal beside it. An abort is a request a wedged
+ * transport is free to ignore, which made this the backstop that never fired.
+ * It stays a BACKSTOP, though: `runOnce` bounds its own waits with named reasons
+ * (RUN_COMPLETION_TIMEOUT_MS, AUDIO_UPLOAD_TIMEOUT_MS, TRANSPORT_CLOSE_TIMEOUT_MS),
+ * all far shorter than a sane `runTimeoutMs`, so a diagnosable sweep reports what
+ * actually went wrong and only a truly wedged executor reaches this blunt line.
+ *
  * A CANCELLED SWEEP IS A SHORT SWEEP, NOT A DISCARDED ONE. Cancel aborts the
  * in-flight run, does NOT retry it, does NOT start the next cell, and returns
  * every run already completed. Throwing away 40 minutes of good runs because
@@ -300,13 +308,17 @@ export function startBatch(options: BatchOptions): BatchHandle {
     else cancellation.signal.addEventListener('abort', propagate, { once: true });
 
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, runTimeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     try {
-      const result = await deps.execute({
+      // TICKET 048 — THE BUDGET RACES THE EXECUTION, it does not merely abort a
+      // signal beside it. Aborting `controller` is a REQUEST to stop that only a
+      // cooperative executor honours; `runOnce` reads the signal nowhere after
+      // `await pacer.start()`, so a wedged transport simply ignored it and
+      // stalled the whole unattended sweep — the exact failure this option's own
+      // documentation says it prevents. The abort is still raised first, so an
+      // executor that CAN unwind still gets the chance to.
+      const pending = deps.execute({
         recordingId: cell.recordingId,
         configId: cell.configuration.id,
         config: cell.configuration.config,
@@ -318,6 +330,30 @@ export function startBatch(options: BatchOptions): BatchHandle {
         origin: cell.warmup ? 'manual' : 'sweep',
         signal: controller.signal,
       });
+      // An abandoned attempt usually fails on its own long afterwards. Without a
+      // handler of its own that late failure is an unhandled rejection per
+      // bounded-out run.
+      void pending.catch(() => undefined);
+
+      const raced = await Promise.race([
+        pending.then((value) => ({ value })),
+        new Promise<{ value?: undefined }>((resolve) => {
+          timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+            resolve({});
+          }, runTimeoutMs);
+        }),
+      ]);
+
+      if (raced.value === undefined) {
+        // The budget won. The attempt is abandoned where it stands: there is no
+        // Run at all, so nothing needs excluding from the aggregate downstream.
+        if (cancellation.signal.aborted) return { kind: 'cancelled' };
+        return { kind: 'failed', error: `run exceeded ${runTimeoutMs} ms` };
+      }
+      const result = raced.value;
+
       if (cancellation.signal.aborted) {
         return { kind: 'cancelled', run: result.cancelled ? undefined : result.run };
       }
@@ -338,7 +374,7 @@ export function startBatch(options: BatchOptions): BatchHandle {
         error: timedOut ? `run exceeded ${runTimeoutMs} ms` : messageOf(cause),
       };
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       cancellation.signal.removeEventListener('abort', propagate);
       executions += 1;
     }

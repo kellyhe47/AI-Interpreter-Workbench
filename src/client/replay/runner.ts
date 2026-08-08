@@ -193,8 +193,8 @@ export const SEGMENTATION_IDLE_MS = 5_000;
 export const TRANSPORT_CLOSE_TIMEOUT_MS = 2_000;
 
 /**
- * TICKET 048 (STUB — declared for the locked tests; NOT YET WIRED) — how long a
- * run waits for the output-audio upload before giving up on the STORE.
+ * TICKET 048 — how long a run waits for the output-audio upload before giving up
+ * on the STORE.
  *
  * `runs.uploadAudio` is a bare browser `fetch` with no timeout, so a server that
  * accepts the connection and never answers hangs the run forever — and nothing
@@ -205,8 +205,8 @@ export const TRANSPORT_CLOSE_TIMEOUT_MS = 2_000;
 export const AUDIO_UPLOAD_TIMEOUT_MS = 10_000;
 
 /**
- * TICKET 048 (STUB — declared for the locked tests; NOT YET WIRED) — how long a
- * run waits on `finished` before declaring the measurement lost.
+ * TICKET 048 — how long a run waits on `finished` before declaring the
+ * measurement lost.
  *
  * SEGMENTATION_IDLE_MS already caps a manifest-backed run. A MANIFEST-LESS
  * (mic-shaped) run arms neither 031 timer and waits on `finished` forever, so a
@@ -222,8 +222,8 @@ export const AUDIO_UPLOAD_TIMEOUT_MS = 10_000;
 export const RUN_COMPLETION_TIMEOUT_MS = 30_000;
 
 /**
- * TICKET 048 (STUB) — the prefix of the line a run carries when it gave up
- * waiting for the utterance completion that never came.
+ * TICKET 048 — the prefix of the line a run carries when it gave up waiting for
+ * the utterance completion that never came.
  */
 export const RUN_COMPLETION_TIMED_OUT = 'run timed out waiting for utterance completion';
 
@@ -308,6 +308,51 @@ function concatPcm(chunks: Int16Array[]): Int16Array {
 }
 
 /**
+ * TICKET 048 — what a bounded wait resolves to when the DEADLINE won rather than
+ * the wait itself. A sentinel rather than a rejection: `runOnce` resolves even
+ * for a lost run, and every deadline here is a verdict the caller has to record,
+ * not an exception to unwind through.
+ */
+const DEADLINE: unique symbol = Symbol('deadline');
+
+/**
+ * TICKET 048 — awaits `begin()`, but NEVER LONGER THAN THE BUDGET.
+ *
+ * The generalised form of 046 R3-1's `closeTransport`, because three ad-hoc races
+ * would be the same bug fixed three times and a fourth wait added later would be
+ * covered by none of them. `runTimeoutMs` cannot rescue any of these: `startBatch`
+ * only calls `controller.abort()`, and `runOnce` reads that signal nowhere after
+ * pacing, so every wait in the tail of a run has to bound ITSELF.
+ *
+ * - A THUNK, not a promise (R4-2): the CALL is inside the caller's guard too, so
+ *   a seam that throws synchronously is handled like one that rejects.
+ * - THE ABANDONED PROMISE KEEPS A REJECTION HANDLER. A `fetch` the deadline gave
+ *   up on typically fails on its own much later; without this that becomes an
+ *   unhandled rejection per run, i.e. 60 of them in a sweep.
+ * - THE TIMER IS CLEARED ON EVERY PATH, rejection included. A race that leaves
+ *   its handle armed is a live timer per run and a fake-timer teardown that lies
+ *   about what is still pending.
+ */
+async function withDeadline<T>(
+  begin: () => Promise<T>,
+  timeoutMs: number,
+): Promise<T | typeof DEADLINE> {
+  const pending = begin();
+  void pending.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<typeof DEADLINE>((resolve) => {
+        timer = setTimeout(() => resolve(DEADLINE), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
  * TICKET 045 — stores the run's output audio and reports where it landed.
  *
  * ORDER IS LOAD-BEARING: this runs BEFORE the Run is POSTed. The ledger is
@@ -325,6 +370,15 @@ function concatPcm(chunks: Int16Array[]): Int16Array {
  * artifact and it is already in hand; the store losing the bytes is surfaced as
  * one of the run's own `errors` — which ride the same append-only ledger line —
  * and the run claims no path.
+ *
+ * TICKET 048 — AND IT IS BOUNDED. `runs.uploadAudio` is a bare browser `fetch`
+ * with no timeout of its own, so a server that accepts the connection and never
+ * answers hangs the run forever. A HUNG upload is a FAILED upload with a slower
+ * cause, and it gets 045's verdict verbatim: the run stays `complete`, every
+ * timing survives, the Run is POSTed, `outputAudioPath` stays unset, and the
+ * reason rides `errors` NAMING the budget so an operator can tell a store that
+ * refused from one that went quiet. Any harsher verdict would let a flaky
+ * artifact store silently delete good latency samples from the experiment.
  */
 async function uploadOutputAudio(args: {
   runs: RunsClient;
@@ -335,7 +389,16 @@ async function uploadOutputAudio(args: {
 }): Promise<string | undefined> {
   if (args.skip || args.outputAudio.length === 0) return undefined;
   try {
-    const uploaded = await args.runs.uploadAudio(args.id, writeWav(args.outputAudio, SAMPLE_RATE));
+    const uploaded = await withDeadline(
+      () => args.runs.uploadAudio(args.id, writeWav(args.outputAudio, SAMPLE_RATE)),
+      AUDIO_UPLOAD_TIMEOUT_MS,
+    );
+    if (uploaded === DEADLINE) {
+      args.errors.push(
+        `output audio upload failed: no response within ${AUDIO_UPLOAD_TIMEOUT_MS} ms`,
+      );
+      return undefined;
+    }
     return uploaded.outputAudioPath;
   } catch (cause) {
     args.errors.push(
@@ -682,7 +745,37 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // Pacing is done; the answer may still be in flight. The run is over only
   // once the utterance completes too — a cancelled or failed run waits for
   // nothing.
-  if (!cancelled && !failed) await finished;
+  //
+  // TICKET 048 — AND THE WAIT IS BOUNDED. 031's idle deadline caps only a
+  // MANIFEST-BACKED run; a mic-shaped one arms neither 031 timer, so a transport
+  // that goes quiet without ever completing its utterance froze the run
+  // "running" forever, stored no Run and reported no error. This deadline is
+  // deliberately longer than SEGMENTATION_IDLE_MS, so a manifest-backed run
+  // still fails with its own NAMED segmentation reason and this blunter one
+  // never pre-empts it.
+  //
+  // UNLIKE THE UPLOAD, THIS ONE IS FATAL. A run that gave up waiting never saw
+  // its utterance complete, so it cannot know it observed the whole answer:
+  // `audio_queued` may belong to a partial answer and the transcripts may be
+  // mid-stream. That is not a measurement, and `status: 'failed'` is what keeps
+  // it out of every aggregate — through `isAggregatableRun`'s EXISTING clause,
+  // never a second gate beside it. The Run is still STORED: a failure is real
+  // information (PRD §12), and a hang that stored nothing was half of what made
+  // this defect invisible.
+  //
+  // IT IS ITS OWN BUDGET, NOT A WRAPPER. The close deadline below runs after it
+  // IN SERIES rather than nested inside it, so a run wedged on both pays both
+  // and neither budget silently absorbs the other.
+  if (!cancelled && !failed) {
+    const completed = await withDeadline(
+      () => finished.then(() => true as const),
+      RUN_COMPLETION_TIMEOUT_MS,
+    );
+    if (completed === DEADLINE) {
+      failed = true;
+      errors.push(`${RUN_COMPLETION_TIMED_OUT} after ${RUN_COMPLETION_TIMEOUT_MS} ms`);
+    }
+  }
   // Belt and braces for the paths that never awaited `finished` at all.
   disarm();
 
