@@ -323,6 +323,21 @@ export const RUN_POST_TIMEOUT_MS = 15_000;
 export const RUN_POST_TIMED_OUT = 'run record post failed: no response within';
 
 /**
+ * TICKET 048 ROUND 4 (R4-1, STUB — declared for the locked tests; NOT YET WIRED)
+ * — the longest clip a run can be asked to pace, from PRD §9: a corpus Recording
+ * is a ≤45 s take.
+ *
+ * IT BELONGS IN THE BUDGET ARITHMETIC BECAUSE IT IS THE RUN'S DOMINANT COST.
+ * Round 3's guard enumerated the worst case as "park on `finished`, wedge the
+ * close, hang the upload, then hang the POST" and summed 77 s against 120 s of
+ * sweep patience — omitting pacing entirely. The omitted term is larger than the
+ * 43 s of slack the guard was claiming, so at production constants the attempt
+ * can still be abandoned mid-POST and its retry writes a SECOND aggregatable Run
+ * for the same rep, under provenance that renders a clean "1 of 1".
+ */
+export const MAX_CLIP_MS = 45_000;
+
+/**
  * TICKET 046 ROUND 3 (R3-7) — the prefix of the line a run carries when the
  * capture path SAW a track and admitted none of it.
  *
