@@ -18,8 +18,16 @@
  * not comparable at all.
  *
  * A FAILED RUN IS INFORMATION, NOT AN ERROR STATE. It stays in the list, names
- * the stage that was lost, and states its exclusion — and it offers no
- * playback and no stage figures, because it produced neither.
+ * the stage that was lost, states its exclusion, and shows no stage figures,
+ * because it produced none.
+ *
+ * TICKET 045 — THE PLAY CONTROL IS GATED ON `outputAudioPath`, NOT ON STATUS.
+ * Ticket 013 offered it on every complete run, which was a proxy for "has
+ * audio" and is wrong in both directions: a complete Arm A run stores no output
+ * audio at all (ticket 046) and its play button answered 404, while a run that
+ * lost a stage AFTER synthesizing some output keeps partial audio that is
+ * diagnostic. A control that cannot act must not look actionable (024, 044), so
+ * a card with no stored audio says so instead of offering the button.
  */
 
 import type { CSSProperties, ReactElement } from 'react';

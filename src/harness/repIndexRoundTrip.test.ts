@@ -186,6 +186,8 @@ async function sweep(wav: Uint8Array): Promise<BatchSummary> {
     create: async (run: Run) => storage.appendRun(run),
     list: async () => storage.listRuns(),
     getAudio: async () => new Uint8Array(0),
+    // TICKET 045 — the output-audio upload seam; these suites produce no assertions on it.
+    uploadAudio: async (id: string) => ({ id, outputAudioPath: `runs/${id}.out.wav`, bytes: 0 }),
   };
   const deps: RunnerDeps = {
     recordings,

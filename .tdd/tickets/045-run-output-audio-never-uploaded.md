@@ -6,7 +6,7 @@ source: qa-live
 depends_on: []
 touches: [src/server/routes/runs.ts, src/client/replay/recordingsClient.ts, src/client/replay/runner.ts, src/client/components/replay/RunsList.tsx]
 iterations: 0
-test_files: []
+test_files: [src/server/routes/runs.audioUpload.test.ts, src/client/replay/recordingsClient.uploadAudio.test.ts, src/client/replay/runner.outputAudio.test.ts, src/client/components/replay/RunsList.playGate.test.tsx]
 branch: ""
 ---
 
@@ -51,7 +51,12 @@ Arm A `audioChunks` is empty and there is nothing to upload even with this route
 
 ## Acceptance criteria
 
-- [ ] A run that produced output audio uploads it after the Run is POSTed, and
+- [x] **ORDERING CORRECTED — my AC was wrong.** The upload happens BEFORE the Run is POSTed, and
+      the Run carries the path the upload REPORTED. Uploading after would leave a Run in an
+      append-only ledger with no PATCH promising audio that a failed upload never wrote — and the
+      play control gates on exactly that field, so it would offer a 404 button. `outputAudioPath`
+      is a report, not a promise. The route therefore accepts an upload for a not-yet-POSTed Run.
+- [ ] A run that produced output audio uploads it, and
       `GET /api/runs/:id/audio` then returns those exact bytes
 - [ ] The audio does **NOT** travel in the `POST /api/runs` body — assert the ledger line stays
       small and carries no base64

@@ -140,6 +140,8 @@ function makeHarness(opts: HarnessOptions = {}) {
     },
     list: async () => posted,
     getAudio: async () => new Uint8Array(0),
+    // TICKET 045 — the output-audio upload seam; these suites produce no assertions on it.
+    uploadAudio: async (id: string) => ({ id, outputAudioPath: `runs/${id}.out.wav`, bytes: 0 }),
   };
 
   const createTransport = (config: RunOnceConfig): FixtureTransport => {

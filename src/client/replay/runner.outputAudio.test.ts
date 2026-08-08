@@ -1,0 +1,279 @@
+/**
+ * TICKET 045 — runOnce must UPLOAD the output audio it already computes.
+ *
+ * The read path (GET /api/runs/:id/audio, RunsList's play control) has existed
+ * since ticket 003/013; the write path never did, so every real run's play
+ * button 404s. These tests pin the write path at the runner seam.
+ *
+ * ORDER IS LOAD-BEARING: the audio is uploaded FIRST and the Run is POSTed
+ * SECOND, carrying the `outputAudioPath` the upload reported. The ledger is
+ * append-only and there is no PATCH for a Run, so a Run POSTed before the
+ * upload could never be corrected when the upload failed — it would sit in the
+ * history promising audio that does not exist, and the play control (which
+ * gates on exactly that field, ticket 045's RunsList change) would offer a
+ * button that 404s. Uploading first makes `outputAudioPath` a REPORT rather
+ * than a PROMISE.
+ *
+ * NOTE ON THE TICKET: 045's first acceptance criterion says the audio is
+ * uploaded "after the Run is POSTed". That ordering cannot satisfy the ticket's
+ * own later criteria (an upload failure must not leave a Run misdescribing
+ * itself, and the play control must gate on audio actually existing), so it is
+ * inverted here deliberately.
+ *
+ * SCOPE IS CASCADE. Arm A's audio arrives on the WebRTC media track and
+ * `onAudio` never fires, so `audioChunks` is empty and there is nothing to
+ * upload — ticket 046. Nothing here fakes it; the "produced no audio" case
+ * below is exactly what an Arm A run looks like today.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { DEFAULT_CASCADE_TRIPLE } from '../../core/arms';
+import { SAMPLE_RATE } from '../../core/protocol';
+import { readWav, writeWav } from '../../harness/wav';
+import type { Recording, Run } from '../state/ledger';
+import { FixtureTransport, type FixtureScriptEvent } from '../transport/fixture';
+import { FRAME_SAMPLES } from './pacer';
+import type { RecordingsClient, RunAudioUpload, RunsClient } from './recordingsClient';
+import { runOnce, type RunOnceConfig, type RunnerDeps } from './runner';
+
+const ramp = (n: number): Int16Array =>
+  Int16Array.from({ length: n }, (_, i) => ((i * 7919) % 65536) - 32768);
+
+const RECORDING: Recording = {
+  id: 'rec-1',
+  label: 'clip one',
+  sourceLanguage: 'en',
+  durationMs: 100,
+  speechEndMs: 60,
+  origin: 'mic',
+  createdAt: 1_000,
+};
+
+const CASCADE_CONFIG: RunOnceConfig = {
+  architecture: 'cascade',
+  providers: DEFAULT_CASCADE_TRIPLE,
+  languagePair: 'EN↔ES',
+  direction: 'en→es',
+  targetLanguage: 'Spanish',
+};
+
+/** Two output chunks — enough that concatenation order is falsifiable. */
+const CHUNK_A = ramp(240);
+const CHUNK_B = Int16Array.from(ramp(240), (v) => -v);
+
+function scriptWithAudio(): FixtureScriptEvent[] {
+  return [
+    { at: 20, type: 'sourceText', kind: 'final', text: 'hello', utt: 0 },
+    { at: 30, type: 'audio', pcm: CHUNK_A, utt: 0 },
+    { at: 34, type: 'targetText', kind: 'final', text: 'hola', utt: 0 },
+    { at: 40, type: 'audio', pcm: CHUNK_B, utt: 0 },
+    { at: 90, type: 'utteranceComplete', record: { utt: 0 } },
+  ];
+}
+
+/** A cascade run that loses its TTS stage AFTER emitting one chunk. */
+function scriptFailingAfterAudio(): FixtureScriptEvent[] {
+  return [
+    { at: 20, type: 'sourceText', kind: 'final', text: 'hello', utt: 0 },
+    { at: 30, type: 'audio', pcm: CHUNK_A, utt: 0 },
+    { at: 40, type: 'error', message: 'stage timed out', opaque: false, stage: 'tts' },
+  ];
+}
+
+/** A run that produced no output audio at all — today's Arm A shape. */
+function scriptWithoutAudio(): FixtureScriptEvent[] {
+  return [
+    { at: 20, type: 'sourceText', kind: 'final', text: 'hello', utt: 0 },
+    { at: 34, type: 'targetText', kind: 'final', text: 'hola', utt: 0 },
+    { at: 90, type: 'utteranceComplete', record: { utt: 0 } },
+  ];
+}
+
+interface HarnessOptions {
+  script?: FixtureScriptEvent[];
+  /** Make the upload endpoint reject. */
+  uploadError?: Error;
+}
+
+function makeHarness(opts: HarnessOptions = {}) {
+  const wav = writeWav(ramp(FRAME_SAMPLES * 5), SAMPLE_RATE);
+  /** Every mutating client call, in order — this is how ordering is pinned. */
+  const calls: string[] = [];
+  const uploads: { id: string; wav: Uint8Array }[] = [];
+  const posted: Run[] = [];
+
+  const recordings: RecordingsClient = {
+    list: async () => [RECORDING],
+    get: async () => RECORDING,
+    getAudio: async () => wav,
+    create: async () => RECORDING,
+    patchLabel: async () => RECORDING,
+    remove: async () => RECORDING,
+  };
+
+  const runs: RunsClient = {
+    create: async (run: Run) => {
+      calls.push('create');
+      posted.push(run);
+      return run;
+    },
+    list: async () => posted,
+    getAudio: async () => new Uint8Array(0),
+    uploadAudio: async (id: string, wavBytes: Uint8Array): Promise<RunAudioUpload> => {
+      calls.push('uploadAudio');
+      if (opts.uploadError) throw opts.uploadError;
+      uploads.push({ id, wav: wavBytes });
+      return { id, outputAudioPath: `runs/${id}.out.wav`, bytes: wavBytes.length };
+    },
+  };
+
+  const deps: RunnerDeps = {
+    recordings,
+    runs,
+    createTransport: () =>
+      new FixtureTransport({
+        armId: 'fx',
+        kind: 'cascade',
+        script: opts.script ?? scriptWithAudio(),
+      }),
+    now: () => Date.now(),
+    newId: () => 'run-1',
+  };
+
+  return { deps, calls, uploads, posted };
+}
+
+type Harness = ReturnType<typeof makeHarness>;
+
+function start(h: Harness, signal?: AbortSignal) {
+  return runOnce({ recordingId: RECORDING.id, config: CASCADE_CONFIG, deps: h.deps, signal });
+}
+
+let audioContextSpy: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  audioContextSpy = vi.fn();
+  (globalThis as Record<string, unknown>).AudioContext = audioContextSpy;
+  (globalThis as Record<string, unknown>).webkitAudioContext = audioContextSpy;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  delete (globalThis as Record<string, unknown>).AudioContext;
+  delete (globalThis as Record<string, unknown>).webkitAudioContext;
+});
+
+// ---------------------------------------------------------------------------
+
+describe('runOnce — the output audio is UPLOADED, not merely returned', () => {
+  it('uploads a 24 kHz mono PCM16 WAV of exactly the buffered output, before POSTing the Run', async () => {
+    const h = makeHarness();
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(h.uploads).toHaveLength(1);
+    expect(h.uploads[0]!.id).toBe(result.run.id);
+    // Upload FIRST, POST SECOND — see the header.
+    expect(h.calls).toEqual(['uploadAudio', 'create']);
+
+    const decoded = readWav(h.uploads[0]!.wav);
+    expect(decoded.rate).toBe(SAMPLE_RATE);
+    expect(SAMPLE_RATE).toBe(24_000);
+    // The exact samples the run buffered, in arrival order — mono PCM16.
+    expect(Array.from(decoded.samples)).toEqual(Array.from(result.outputAudio));
+    expect(Array.from(decoded.samples)).toEqual([...CHUNK_A, ...CHUNK_B]);
+    expect(result.audioReady).toBe(true);
+
+    // Nothing sounded: uploading is not playing.
+    expect(audioContextSpy).not.toHaveBeenCalled();
+  });
+
+  it('the POSTed Run carries the reported outputAudioPath and NO audio bytes', async () => {
+    const h = makeHarness();
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    const run = h.posted[0]!;
+    // The path is the value the SERVER reported, not one the client invented.
+    expect(run.outputAudioPath).toBe(`runs/${run.id}.out.wav`);
+    expect(result.run.outputAudioPath).toBe(run.outputAudioPath);
+
+    // ...and the record itself stays a metadata record. `appendRun` writes this
+    // whole object as ONE LINE of the append-only ledger.
+    const serialized = JSON.stringify(run);
+    expect(serialized.length).toBeLessThan(2048);
+    const audioBase64 = btoa(
+      String.fromCharCode(...new Uint8Array(h.uploads[0]!.wav.subarray(0, 96))),
+    );
+    expect(serialized).not.toContain(audioBase64.slice(0, 64));
+  });
+
+  it('a CANCELLED run uploads nothing and POSTs nothing', async () => {
+    const h = makeHarness();
+    const controller = new AbortController();
+    const done = start(h, controller.signal);
+    await vi.advanceTimersByTimeAsync(40);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(result.cancelled).toBe(true);
+    expect(h.calls).toEqual([]);
+    expect(h.uploads).toEqual([]);
+    expect(h.posted).toEqual([]);
+  });
+
+  it('a FAILED run still uploads the audio it produced — partial audio is diagnostic', async () => {
+    const h = makeHarness({ script: scriptFailingAfterAudio() });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(result.run.status).toBe('failed');
+    expect(h.calls).toEqual(['uploadAudio', 'create']);
+    expect(Array.from(readWav(h.uploads[0]!.wav).samples)).toEqual(Array.from(CHUNK_A));
+    expect(h.posted[0]!.outputAudioPath).toBe(`runs/${result.run.id}.out.wav`);
+  });
+
+  it('a run that produced NO audio uploads nothing and claims no outputAudioPath', async () => {
+    const h = makeHarness({ script: scriptWithoutAudio() });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(result.audioReady).toBe(false);
+    // No empty upload: an empty runs/<id>.out.wav would make GET /audio answer
+    // 200-with-silence instead of the honest 404.
+    expect(h.calls).toEqual(['create']);
+    expect(h.uploads).toEqual([]);
+    expect(h.posted[0]!.outputAudioPath).toBeUndefined();
+    expect(result.run.outputAudioPath).toBeUndefined();
+  });
+
+  it('an upload failure does NOT fail the Run — the measurement is still recorded', async () => {
+    const h = makeHarness({ uploadError: new Error('HTTP 500') });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    // runOnce RESOLVES: the measurement is the valuable artifact.
+    const result = await done;
+
+    expect(h.calls).toEqual(['uploadAudio', 'create']);
+    expect(h.posted).toHaveLength(1);
+    // Still a complete run — the pipeline did its job; the store did not.
+    expect(result.run.status).toBe('complete');
+    // ...and it does NOT claim audio that is not there, so the play control
+    // stays absent rather than offering a button that 404s.
+    expect(result.run.outputAudioPath).toBeUndefined();
+    // The failure is SURFACED rather than swallowed: it rides the run's own
+    // errors into the append-only ledger.
+    expect(result.run.errors.some((e) => e.startsWith('output audio upload failed'))).toBe(true);
+    expect(h.posted[0]!.errors).toEqual(result.run.errors);
+    // The audio is still in hand for this session, even though the store lost it.
+    expect(result.audioReady).toBe(true);
+  });
+});

@@ -87,13 +87,19 @@
  *     [data-run-config]    architecture + every model id of the run
  *     [data-run-meta][data-mono]  'origin {origin} · rep {n} · …'
  *     [data-run-status]    'complete' | 'failed'
- *   complete only: [data-run-play] (button named 'play'),
- *     [data-run-stage=<stage>] one per interval in order, '{label} {ms} ms',
- *     [data-run-total] '{ms} ms', [data-run-cost] '$0.021/min'
- *     ($/min = run.cost ÷ recording minutes).
+ *   STORED AUDIO only (ticket 045, superseding 013's "complete only"):
+ *     [data-run-play] (button named 'play'), offered exactly when
+ *     `run.outputAudioPath` is set — a complete run with no stored audio
+ *     (Arm A today, ticket 046) offers [data-run-no-audio] 'no output audio
+ *     stored' instead, and a FAILED run that produced partial audio DOES
+ *     offer playback, because that audio is diagnostic (PRD §12). A control
+ *     that cannot act must not look actionable (tickets 024, 044).
+ *   complete only: [data-run-stage=<stage>] one per interval in order,
+ *     '{label} {ms} ms', [data-run-total] '{ms} ms', [data-run-cost]
+ *     '$0.021/min' ($/min = run.cost ÷ recording minutes).
  *   failed only: [data-run-failure][data-failed-stage=<stage>], naming the
  *     stage and ending '— run saved as failed, excluded from every aggregate'.
- *     No play control, no stage cells.
+ *     No stage cells.
  *   NOTHING AUTOPLAYS: deps.playRun fires on click and never on render.
  *
  * BatchProgress [data-batch-progress] — absent until 'Batch sweep…'

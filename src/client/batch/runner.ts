@@ -495,6 +495,9 @@ export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
       },
       list: (recordingId?: string) => deps.runs.list(recordingId),
       getAudio: (id: string) => deps.runs.getAudio(id),
+      // TICKET 045 — the wrapper stamps the RECORD only; the output audio rides
+      // its own endpoint and passes straight through.
+      uploadAudio: (id: string, wavBytes: Uint8Array) => deps.runs.uploadAudio(id, wavBytes),
     };
 
     const result = await runOnce({

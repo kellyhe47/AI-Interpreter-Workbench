@@ -84,11 +84,34 @@ export interface RecordingsClient {
   remove(id: string): Promise<Recording>;
 }
 
+/**
+ * TICKET 045 — what POST /api/runs/:id/audio answers. `outputAudioPath` is the
+ * store-relative location the bytes actually landed at, and it is the value the
+ * caller copies onto `Run.outputAudioPath` — the server owns the layout, so the
+ * Run never claims a path the client invented.
+ */
+export interface RunAudioUpload {
+  id: string;
+  /** Store-relative path of the written WAV, e.g. 'runs/run-1.out.wav'. */
+  outputAudioPath: string;
+  /** Byte length written. */
+  bytes: number;
+}
+
 export interface RunsClient {
   create(run: Run): Promise<Run>;
   list(recordingId?: string): Promise<Run[]>;
   /** The run's output WAV bytes. Rejects ApiError('run-audio-missing'). */
   getAudio(id: string): Promise<Uint8Array>;
+  /**
+   * TICKET 045 — the run's output WAV, on its OWN endpoint.
+   *
+   * It is emphatically NOT a field of the Run POSTed to /api/runs: that body is
+   * stored verbatim and `appendRun` writes the whole Run as ONE LINE of
+   * ledger.jsonl, so base64 audio there would put megabytes into every line of
+   * the append-only history.
+   */
+  uploadAudio(id: string, wavBytes: Uint8Array): Promise<RunAudioUpload>;
 }
 
 /**
@@ -354,5 +377,9 @@ export function createRunsClient(deps: ApiClientDeps): RunsClient {
         method: 'GET',
         fallback: 'run-audio-missing',
       }),
+
+    // TICKET 045 — STUB. Implementation belongs to the ticket's green phase.
+    uploadAudio: () =>
+      Promise.reject(new Error('RunsClient.uploadAudio: not implemented (ticket 045)')),
   };
 }
