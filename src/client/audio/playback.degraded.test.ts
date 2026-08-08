@@ -26,9 +26,17 @@
  *   output" on screen during a session that is audible.
  * - The factory is attempted ONCE. A context limit does not un-fill itself
  *   mid-session, and re-attempting per chunk means one throw per 20 ms frame.
+ *
+ * ROUND 2 — ...but not once per PAGE. `clearPlaybackFailure()` drops the latch
+ * so the next attempt is made afresh; the controller calls it from
+ * `newSession` and NEVER from `reset()`. A cap frees when some other context
+ * closes and Safari's policy state changes, so "reload the tab" was the wrong
+ * and only cure; between two sentences of one session, though, nothing has
+ * changed and retrying would throw once per 20 ms frame.
  * ==========================================================================
  */
 import { describe, expect, it, vi } from 'vitest';
+import { matchingLines, readCode } from '../testSource';
 import {
   ArmPlayback,
   type PlaybackAudioContextLike,
@@ -201,5 +209,73 @@ describe('ArmPlayback survives a context that cannot be constructed (ticket 049)
     expect(rec.resumes).toBe(1);
     expect(onPlaybackUnavailable).not.toHaveBeenCalled();
     expect(playback.playbackUnavailable).toBe(false);
+  });
+});
+
+describe('a transient failure is recoverable — clearPlaybackFailure() (round 2, R2-6)', () => {
+  it('retries the factory and sounds again, and the state goes back to healthy', () => {
+    const rec = workingContext();
+    let hostile = true;
+    const factory = vi.fn((): PlaybackAudioContextLike => {
+      if (hostile) throw contextLimitError();
+      return rec.context;
+    });
+    const onPlaybackUnavailable = vi.fn();
+    const playback = new ArmPlayback({
+      audioContextFactory: factory,
+      autoplay: true,
+      now: () => 1000,
+      onPlaybackUnavailable,
+    });
+
+    playback.enqueue(chunk(480));
+    expect(playback.playbackUnavailable).toBe(true);
+    expect(rec.started).toEqual([]);
+
+    // The browser recovers; the operator starts a new session.
+    hostile = false;
+    playback.clearPlaybackFailure();
+    playback.reset();
+    playback.enqueue(chunk(240));
+
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(rec.started).toEqual([240]);
+    expect(playback.playbackUnavailable).toBe(false);
+    // The report stays a ONE-SHOT across the recovery: the operator was told
+    // once, about the failure that happened.
+    expect(onPlaybackUnavailable).toHaveBeenCalledTimes(1);
+    // ...and the recovered context keeps sounding later chunks.
+    playback.enqueue(chunk(480));
+    expect(rec.started).toEqual([240, 480]);
+  });
+
+  it('M10 GUARD: reset() alone still clears NOTHING — between sentences nothing changed', () => {
+    const { playback, factory, onPlaybackUnavailable } = makeHostile();
+    playback.enqueue(chunk(480));
+    playback.reset();
+    playback.enqueue(chunk(480));
+
+    expect(playback.playbackUnavailable).toBe(true);
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(onPlaybackUnavailable).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('play() never DISCARDS queued audio on the failure path (round 2, R2-4)', () => {
+  it('STRUCTURAL GUARD: the ctx === null branch clears no queue', () => {
+    // The branch is UNREACHABLE — a queue exists only when a context was
+    // successfully built, and a built context is cached — so there is no
+    // behavioural partner for this one, and it is labelled accordingly. It is
+    // pinned anyway because of what it READS as: "drop the queued audio and say
+    // nothing", the single thing this ticket forbids. The honest failure path
+    // is `if (ctx === null) return;`.
+    //
+    // KNOWN ESCAPE ROUTE, written down rather than implied: a different idiom
+    // (`this.buffered.length = 0`, `this.buffered.splice(0)`) is not matched.
+    const code = readCode('src/client/audio/playback.ts');
+    const body = code.slice(code.indexOf('play(): void {'), code.indexOf('pause(): void {'));
+    // Exactly ONE — the legitimate drain in the success path
+    // (`const pending = this.buffered; this.buffered = [];`).
+    expect(matchingLines(body, /this\.buffered\s*=\s*\[\]/)).toHaveLength(1);
   });
 });

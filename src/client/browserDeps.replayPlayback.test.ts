@@ -18,6 +18,12 @@
  * already does (one element per bag, re-attached), and a suspended-by-policy
  * context is resumed by `ArmPlayback.play()` on every press anyway.
  *
+ * ROUND 2 (R2-5) — and a press that cannot build the context REPORTS. Reuse
+ * turned `playTake`'s throw (which at least reached the console) into a silent
+ * no-op: no sound, no message, indistinguishable from a run whose stored audio
+ * is empty. Both seams take an OPTIONAL `onUnavailable` callback the view
+ * renders from; the argument is the browser's own error.
+ *
  * LAZILY, not at bag construction: `buildReplayDeps()` runs at module wiring
  * time, and a context built there would be built on a page that may never press
  * play — which is the same "nothing in Replay autoplays" rule (PRD §7) seen from
@@ -92,7 +98,7 @@ afterEach(() => {
 });
 
 /** `playTake` is optional on ReplayDeps; the production bag always wires it. */
-function takePlayer(replay: ReplayDeps): (t: RecordedTake) => void {
+function takePlayer(replay: ReplayDeps): NonNullable<ReplayDeps['playTake']> {
   const fn = replay.playTake;
   if (!fn) throw new Error('buildReplayDeps() published no playTake');
   return fn;
@@ -162,6 +168,52 @@ describe('Replay playback reuses ONE AudioContext (ticket 049)', () => {
     // Now go to Live and start a session: the playback context still builds.
     expect(() => deps.playbackContextFactory()).not.toThrow();
     expect(FakeAudioContext.constructed).toBeLessThanOrEqual(6);
+  });
+});
+
+describe('a Replay press that cannot build a context REPORTS (round 2, R2-5)', () => {
+  it('playTake: no throw out of the click handler, and the operator is told why', () => {
+    installFakeAudioContext(0); // every construction throws, like a filled cap
+    const replay = buildReplayDeps();
+    const onUnavailable = vi.fn();
+
+    expect(() => takePlayer(replay)(take(240), onUnavailable)).not.toThrow();
+
+    expect(onUnavailable).toHaveBeenCalledTimes(1);
+    const err = onUnavailable.mock.calls[0]![0] as Error;
+    expect(err.name).toBe('NotSupportedError');
+    expect(err.message).toBe('the number of hardware contexts reached the maximum');
+  });
+
+  it('playRun: the same report, after the WAV has been fetched', async () => {
+    installFakeAudioContext(0);
+    const wav = writeWav(new Int16Array(480).fill(1000), 24000);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength),
+      })),
+    );
+    const replay = buildReplayDeps();
+    const onUnavailable = vi.fn();
+
+    replay.playRun('run-1', onUnavailable);
+
+    await vi.waitFor(() => expect(onUnavailable).toHaveBeenCalledTimes(1));
+    expect((onUnavailable.mock.calls[0]![0] as Error).name).toBe('NotSupportedError');
+  });
+
+  it('REGRESSION GUARD: a press that CAN build a context reports nothing', () => {
+    installFakeAudioContext();
+    const replay = buildReplayDeps();
+    const onUnavailable = vi.fn();
+
+    takePlayer(replay)(take(240), onUnavailable);
+
+    expect(onUnavailable).not.toHaveBeenCalled();
+    expect(FakeAudioContext.instances[0]!.started).toBe(1);
   });
 });
 

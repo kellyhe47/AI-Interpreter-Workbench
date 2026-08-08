@@ -1,6 +1,13 @@
 /**
  * Ticket 049 — a hostile AudioContext is a DEGRADED Live session, not a dead one.
  *
+ * ROUND 2 adds the doors nobody opened: the notice must not outlive the thing it
+ * describes (a mid-session switch to Realtime, or Stop), it must carry the
+ * BROWSER'S OWN reason — which only reaches the view through the controller's
+ * `onPlaybackUnavailable` callback, the seam mutation M11 deleted with the whole
+ * suite green — and a NEW SESSION must be able to recover from a transient
+ * failure.
+ *
  * Ticket 047 R3-1 fixed the Start-gesture path and left an in-file note saying
  * so: `ArmPlayback` builds its context lazily inside `enqueue`, so with a
  * throwing `AudioContext` the FIRST TTS chunk throws from inside the transport's
@@ -27,13 +34,14 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
 import type { UtteranceRecord } from '../../core/timing';
 import type { PlaybackAudioContextLike } from '../audio/playback';
 import type { RunLedger } from '../state/ledger';
+import { matchingLines, readCode } from '../testSource';
 import {
   advance,
   cascadeUtteranceScript,
@@ -62,12 +70,43 @@ const notice = (): HTMLElement | null =>
   document.querySelector('[data-playback-notice]') as HTMLElement | null;
 
 /** The real throw, verbatim from Chrome at its per-document context limit. */
-function hostileFactory(): () => PlaybackAudioContextLike {
+function contextLimitError(): Error {
+  const err = new Error('the number of hardware contexts reached the maximum');
+  err.name = 'NotSupportedError';
+  return err;
+}
+
+function hostileFactory(error: () => Error = contextLimitError): () => PlaybackAudioContextLike {
   return () => {
-    const err = new Error('the number of hardware contexts reached the maximum');
-    err.name = 'NotSupportedError';
-    throw err;
+    throw error();
   };
+}
+
+/** A context that records what it was asked to sound. */
+function recordingContext() {
+  const started: number[] = [];
+  let length = 0;
+  const context: PlaybackAudioContextLike = {
+    createBuffer: (_ch: number, len: number) => {
+      length = len;
+      return { getChannelData: () => new Float32Array(len) };
+    },
+    createBufferSource: () => {
+      const captured = length;
+      return {
+        buffer: null,
+        connect: () => {},
+        start: () => started.push(captured),
+        stop: () => {},
+        onended: null,
+      };
+    },
+    destination: {},
+    currentTime: 0,
+    resume: () => {},
+    suspend: () => {},
+  };
+  return { started, context };
 }
 
 interface RunOptions {
@@ -75,6 +114,8 @@ interface RunOptions {
   mode?: 'cascade' | 'realtime';
   /** Realtime never delivers PCM — its audio is on the media track. */
   dropAudio?: boolean;
+  /** Overrides the hostile factory (round 2: a second, different failure). */
+  factory?: () => PlaybackAudioContextLike;
 }
 
 function startSession(opts: RunOptions) {
@@ -87,7 +128,8 @@ function startSession(opts: RunOptions) {
     scripts: mode === 'cascade' ? { cascade: script } : { realtime: script },
     capture: capture.fn,
   });
-  kit.deps.playbackContextFactory = opts.hostile ? hostileFactory() : makeFakePlaybackContext;
+  kit.deps.playbackContextFactory =
+    opts.factory ?? (opts.hostile ? hostileFactory() : makeFakePlaybackContext);
   const view = render(createElement(App, { deps: kit.deps }));
   return { ...kit, capture, view };
 }
@@ -154,7 +196,9 @@ describe('a hostile AudioContext does not kill a Live session (ticket 049)', () 
     await advance(700); // the chunk at 1055 ms
     const el = notice();
     expect(el, 'a failed playback context must be SURFACED, not swallowed').not.toBeNull();
-    expect(text(el)).toBe(NOTICE_COPY);
+    // ROUND 2: `toContain`, because the notice now also carries the browser's
+    // own reason (see the R2-3 table below). The sentence itself is verbatim.
+    expect(text(el)).toContain(NOTICE_COPY);
     // Non-fatal, and it says so: the session is not stopped and not failed.
     expect(targetCard()).toHaveAttribute('data-target-status', 'ready');
     expect(screen.getByRole('button', { name: 'Stop session' })).toBeInTheDocument();
@@ -224,5 +268,151 @@ describe('a hostile AudioContext does not kill a Live session (ticket 049)', () 
     expect(el!.querySelector('button, [role="button"], [data-live-play]')).toBeNull();
     expect(el!.closest('button')).toBeNull();
     expect(document.querySelectorAll('[data-live-play]')).toHaveLength(0);
+  });
+});
+
+/* ===========================================================================
+ * ROUND 2 — the notice must not outlive what it describes, must carry the
+ * browser's reason, and must be recoverable.
+ * ======================================================================== */
+
+const reason = (): HTMLElement | null =>
+  document.querySelector('[data-playback-notice-reason]') as HTMLElement | null;
+
+const modeButton = (name: 'Realtime' | 'Cascade'): HTMLElement =>
+  screen.getByRole('button', { name });
+
+describe('the notice never outlives the session it describes (round 2)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('R2-1: a mid-session switch to REALTIME clears it — that session is audible', async () => {
+    // Live's mode buttons are never disabled, and at 'ready' the switch applies
+    // immediately. After it, audio rides `remoteAudioSink` and the operator can
+    // hear the translation — while the screen still said "no audio output".
+    startSession({ hostile: true });
+    await clickStartMicrophone();
+    await advance(1300);
+    expect(notice()).not.toBeNull();
+
+    fireEvent.click(modeButton('Realtime'));
+    await advance(10);
+
+    expect(targetCard().querySelector('[data-target-arch]')).toHaveTextContent('Realtime');
+    expect(notice(), 'realtime audio is audible — the notice is a falsehood there').toBeNull();
+
+    // ...and switching BACK restores it: the context is still unbuildable, so
+    // cascade audio is still silent. Clearing the latch on a mode switch would
+    // pass the assertion above and silently lose the notice for good.
+    fireEvent.click(modeButton('Cascade'));
+    await advance(10);
+    expect(targetCard().querySelector('[data-target-arch]')).toHaveTextContent('Cascade');
+    expect(notice()).not.toBeNull();
+  });
+
+  it('R2-2: STOP ends it — a stopped session is not "still running and still being measured"', async () => {
+    startSession({ hostile: true });
+    await clickStartMicrophone();
+    await advance(1300);
+    expect(notice()).not.toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
+    await advance(10);
+
+    // The session really did stop (the summary banner is up) and the notice,
+    // whose copy claims the session is still running, is gone with it.
+    expect(screen.getByRole('button', { name: 'Start new session' })).toBeInTheDocument();
+    expect(notice(), 'the notice claims the session is still running').toBeNull();
+    // The stopped summary is what the operator reads now; the degraded-audio
+    // line belongs to the session that ended. (Recovery on a NEW session is
+    // pinned separately, R2-6.)
+    expect(targetCard()).toBeInTheDocument();
+  });
+});
+
+describe("the notice carries the BROWSER'S own reason (round 2, R2-3)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /**
+   * Two DIFFERENT failures, so the reason cannot be a hardcoded string. The
+   * error object exists in exactly one place — the argument
+   * `onPlaybackUnavailable` is called with — so a controller that drops that
+   * wiring (mutation M11, which left all 1839 tests green because `onAudio`
+   * bumps the render anyway) cannot render this row.
+   */
+  const failures: Array<[label: string, make: () => Error, shown: string]> = [
+    [
+      'Chrome at its per-document context limit',
+      contextLimitError,
+      'NotSupportedError: the number of hardware contexts reached the maximum',
+    ],
+    [
+      'a policy refusal with a different name and message',
+      () => {
+        const err = new Error('audio hardware is unavailable');
+        err.name = 'InvalidStateError';
+        return err;
+      },
+      'InvalidStateError: audio hardware is unavailable',
+    ],
+  ];
+
+  for (const [label, make, shown] of failures) {
+    it(`${label}: [data-playback-notice-reason] repeats what the browser said`, async () => {
+      startSession({ hostile: true, factory: hostileFactory(make) });
+      await clickStartMicrophone();
+      await advance(1300);
+
+      const el = reason();
+      expect(el, 'the operator cannot diagnose "no sound" without the reason').not.toBeNull();
+      expect(text(el)).toBe(shown);
+      // It sits INSIDE the notice: one surfaced state, not two.
+      expect(notice()!.contains(el)).toBe(true);
+    });
+  }
+
+  it('SOURCE TRIPWIRE: the controller wires onPlaybackUnavailable (M11)', () => {
+    // Labelled a tripwire, in the 047 R3 tradition, because no behavioural test
+    // can distinguish this seam on its own: `onAudio` calls `bump()` right after
+    // `enqueue`, so the re-render happens whether or not the callback is wired,
+    // and deleting it left the whole suite green. The reason row above is the
+    // behavioural partner — it needs the error the callback carries — and this
+    // line is what makes the DELETION itself loud.
+    const code = readCode('src/client/views/useSessionController.ts');
+    expect(matchingLines(code, /onPlaybackUnavailable/)).not.toEqual([]);
+  });
+});
+
+describe('a transient failure is RECOVERABLE by a new session (round 2, R2-6)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('newSession retries the factory: audio sounds again and the notice is gone', async () => {
+    // Safari can refuse at the Start gesture and allow later; a context cap
+    // frees when a capture or tap context closes. `reset()` (the next
+    // utterance) must NOT retry — the cap has not un-filled itself between two
+    // sentences — but a new session is the operator saying "try again", and
+    // before this there was no way back short of reloading the page.
+    const kit = startSession({ hostile: true });
+    await clickStartMicrophone();
+    await advance(1300);
+    expect(notice()).not.toBeNull();
+
+    // The browser recovers, and the operator starts a fresh session.
+    const rec = recordingContext();
+    kit.deps.playbackContextFactory = () => rec.context;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
+    await advance(10);
+    // 'Start new session' re-requests the microphone and restarts the
+    // transport by itself — there is no second Start press.
+    fireEvent.click(screen.getByRole('button', { name: 'Start new session' }));
+    await advance(1300);
+
+    // 50400 samples @ 24 kHz — the new session's chunk really sounded.
+    expect(rec.started).toEqual([50_400]);
+    expect(notice()).toBeNull();
+    expect(targetCard()).toHaveAttribute('data-target-status', 'ready');
   });
 });

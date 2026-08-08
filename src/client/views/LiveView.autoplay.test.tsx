@@ -141,6 +141,7 @@ function stubController(state: Partial<SessionState>): SessionController {
     // LiveView.playbackFailure.test.tsx; here it must stay false so these
     // no-affordance tables keep describing an ordinary session.
     playbackUnavailable: false,
+    playbackUnavailableReason: null,
     actions,
   };
 }
