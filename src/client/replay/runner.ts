@@ -271,6 +271,39 @@ export const RUN_COMPLETION_TIMEOUT_MS = 30_000;
 export const RUN_COMPLETION_TIMED_OUT = 'run timed out waiting for utterance completion';
 
 /**
+ * TICKET 048 ROUND 3 (R3-1, STUB — declared for the locked tests; NOT YET WIRED)
+ * — how long a run waits for `runs.create` to acknowledge the POST.
+ *
+ * IT IS WHAT MAKES A SECOND SAMPLE OF ONE REP IMPOSSIBLE, and that is a stronger
+ * claim than "the run does not hang". Every other wait in the tail is guarded by
+ * re-reading the abort signal, but the POST is the one place that cannot be: the
+ * last re-read sits immediately BEFORE `deps.runs.create(run)`, so an abort that
+ * lands while the POST is in flight arrives too late to stop it, the sweep
+ * retries the attempt it abandoned, and BOTH rows reach an append-only ledger
+ * carrying `origin: 'sweep'` and the same `annotations.repIndex`. `derive.ts`
+ * counts DISTINCT rep indices, so provenance renders a clean "1 of 1 reps
+ * completed" over an `n` pooled from two samples of one repetition. The sweep
+ * summary shows nothing wrong.
+ *
+ * Bounding the POST removes the window rather than policing it: as long as every
+ * budget `runOnce` can spend adds up to LESS than the sweep's per-run patience
+ * (browserDeps RUN_TIMEOUT_MS), the attempt always RETURNS before the sweep
+ * abandons it, so no retry can ever race a live POST. That sum is pinned as a
+ * guard beside these constants.
+ *
+ * A POST that times out costs the ROW, not the measurement — the 045 verdict
+ * again: the pipeline did its job and the store did not, so `status` stays
+ * `complete` and the reason rides `errors`.
+ */
+export const RUN_POST_TIMEOUT_MS = 15_000;
+
+/**
+ * TICKET 048 ROUND 3 (STUB) — the prefix of the line a run carries when the
+ * ledger never acknowledged its POST.
+ */
+export const RUN_POST_TIMED_OUT = 'run record post failed: no response within';
+
+/**
  * TICKET 046 ROUND 3 (R3-7) — the prefix of the line a run carries when the
  * capture path SAW a track and admitted none of it.
  *
