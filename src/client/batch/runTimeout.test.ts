@@ -28,9 +28,13 @@ import { deriveExperimentAggregates, type AnnotatedRun } from '../components/res
 import { RunLedger, isAggregatableRun, type Recording, type Run } from '../state/ledger';
 import { FixtureTransport, type FixtureScriptEvent } from '../transport/fixture';
 import { ApiError, type RecordingsClient, type RunsClient } from '../replay/recordingsClient';
+import { RUN_TIMEOUT_MS } from '../browserDeps';
 import {
+  AUDIO_UPLOAD_TIMEOUT_MS,
+  MAX_CLIP_MS,
   RUN_COMPLETION_TIMED_OUT,
   RUN_COMPLETION_TIMEOUT_MS,
+  RUN_POST_TIMED_OUT,
   RUN_POST_TIMEOUT_MS,
   type RunOnceConfig,
   type RunOnceResult,
@@ -97,6 +101,7 @@ function handleOf(options: {
 async function drain(
   handle: BatchHandle,
   budgetMs: number,
+  stepMs = 100,
 ): Promise<{ settled: boolean; summary: BatchSummary | undefined }> {
   let settled = false;
   let summary: BatchSummary | undefined;
@@ -109,9 +114,8 @@ async function drain(
       settled = true;
     },
   );
-  const step = 100;
-  for (let elapsed = 0; elapsed < budgetMs && !settled; elapsed += step) {
-    await vi.advanceTimersByTimeAsync(step);
+  for (let elapsed = 0; elapsed < budgetMs && !settled; elapsed += stepMs) {
+    await vi.advanceTimersByTimeAsync(stepMs);
   }
   return { settled, summary };
 }
@@ -396,6 +400,14 @@ interface Stall {
   createMs?: number;
   /** ROUND 3 (R3-3) — `transport.start()` NEVER resolves. */
   startForever?: boolean;
+  /** ROUND 4 (R4-1) — ms `transport.start()` stalls before resolving normally. */
+  startMs?: number;
+  /** ROUND 4 (R4-1) — ms `recordings.getAudio` stalls before answering. */
+  getAudioMs?: number;
+  /** ROUND 4 (R4-3) — `transport.start()` REJECTS. */
+  startRejects?: string;
+  /** True: the ledger POST never answers at all. */
+  createForever?: boolean;
 }
 
 interface TransportRecord {
@@ -409,11 +421,24 @@ interface TransportRecord {
  * overlap once the first is abandoned, and a bag shared between them could not
  * tell them apart.
  */
-/** A transport whose `start()` never resolves — a handshake that never lands. */
-class WedgedStartTransport extends FixtureTransport {
+/**
+ * A transport whose handshake misbehaves: never lands, lands late, or REJECTS.
+ * `transport.start()` is deliberately left unbounded (R2-7), so it is the seam
+ * that makes the setup latency in R4-1's arithmetic real.
+ */
+class SlowStartTransport extends FixtureTransport {
+  constructor(
+    opts: ConstructorParameters<typeof FixtureTransport>[0],
+    private readonly mode: { forever?: boolean; afterMs?: number; rejects?: string },
+  ) {
+    super(opts);
+  }
   override async start(config: Parameters<FixtureTransport['start']>[0]): Promise<void> {
     await super.start(config);
-    return new Promise<void>(() => {});
+    if (this.mode.forever) return new Promise<void>(() => {});
+    if (this.mode.rejects !== undefined) throw new Error(this.mode.rejects);
+    if (this.mode.afterMs === undefined) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, this.mode.afterMs));
   }
 }
 
@@ -421,8 +446,14 @@ function realHarness(opts: {
   script?: FixtureScriptEvent[];
   scriptFor?: (req: BatchExecutorRequest) => FixtureScriptEvent[];
   stallFor?: (req: BatchExecutorRequest) => Stall;
+  /** ROUND 4 (R4-1) — real pacing: the run's DOMINANT cost. Default 50 ms. */
+  clipMs?: number;
 }) {
-  const wav = writeWav(ramp(SAMPLE_RATE / 20), SAMPLE_RATE);
+  const clipMs = opts.clipMs ?? 50;
+  const wav = writeWav(ramp((SAMPLE_RATE * clipMs) / 1000), SAMPLE_RATE);
+  // The Recording must agree with the bytes, or `cost` and `speech_end` describe
+  // a different clip from the one the pacer actually plays.
+  const recording: Recording = { ...RECORDING, durationMs: clipMs, speechEndMs: clipMs };
   const posted: Run[] = [];
   const createCalls: { id: string; at: number }[] = [];
   const uploads: string[] = [];
@@ -437,23 +468,27 @@ function realHarness(opts: {
     const stall = opts.stallFor?.(req) ?? {};
 
     const recordings: RecordingsClient = {
-      list: async () => [RECORDING],
+      list: async () => [recording],
       get: async (id) => {
         if (id !== RECORDING.id) throw new ApiError('recording-not-found', 404, 'no such id');
-        return RECORDING;
+        return recording;
       },
-      getAudio: () =>
-        stall.getAudioForever
-          ? new Promise<Uint8Array>(() => {})
-          : Promise.resolve(wav),
-      create: async () => RECORDING,
-      patchLabel: async () => RECORDING,
-      remove: async () => RECORDING,
+      getAudio: () => {
+        if (stall.getAudioForever) return new Promise<Uint8Array>(() => {});
+        if (!stall.getAudioMs) return Promise.resolve(wav);
+        return new Promise<Uint8Array>((resolve) => {
+          setTimeout(() => resolve(wav), stall.getAudioMs);
+        });
+      },
+      create: async () => recording,
+      patchLabel: async () => recording,
+      remove: async () => recording,
     };
 
     const runs: RunsClient = {
       create: (created: Run) => {
         createCalls.push({ id: created.id, at: Date.now() });
+        if (stall.createForever) return new Promise<Run>(() => {});
         if (!stall.createMs) {
           posted.push(created);
           return Promise.resolve(created);
@@ -492,8 +527,14 @@ function realHarness(opts: {
           script: opts.scriptFor?.(req) ?? opts.script ?? completeScript(),
           costPerMinUsd: COST_PER_MIN,
         };
-        const transport = stall.startForever
-          ? new WedgedStartTransport(transportOpts)
+        const misbehaves =
+          stall.startForever || stall.startMs !== undefined || stall.startRejects !== undefined;
+        const transport = misbehaves
+          ? new SlowStartTransport(transportOpts, {
+              forever: stall.startForever,
+              afterMs: stall.startMs,
+              rejects: stall.startRejects,
+            })
           : new FixtureTransport(transportOpts);
         const stop = transport.stop.bind(transport);
         vi.spyOn(transport, 'stop').mockImplementation(() => {
@@ -546,9 +587,9 @@ const sweepRunsOfRep = (posted: Run[], repIndex: number): AnnotatedRun[] =>
   );
 
 /** The ledger the Results layer would derive from, built from what was POSTed. */
-function ledgerOf(posted: Run[]): RunLedger {
+function ledgerOf(posted: Run[], recording: Recording = RECORDING): RunLedger {
   const ledger = new RunLedger();
-  ledger.appendRecording(RECORDING);
+  ledger.appendRecording(recording);
   for (const run of posted) ledger.appendRun(run);
   return ledger;
 }
@@ -1017,5 +1058,214 @@ describe('a stalled handshake gives its transport back too (ticket 048, R3-3)', 
     expect(h.abortedAt.every((a) => a === null)).toBe(true);
     expect(h.maxLive).toBe(1);
     expect(h.live).toBe(0);
+  });
+});
+
+// ===========================================================================
+// TICKET 048 ROUND 4.
+//
+// R4-1 — R3-1's defence is an INEQUALITY, and the inequality omitted the run's
+// dominant cost. "Every budget a run can spend adds up to 77 s, against 120 s of
+// sweep patience" left out PACING — up to 45 s at 1x for a PRD §9 take, a term
+// larger than the 43 s of slack being claimed — and both unbounded setup awaits.
+// At production constants the duplicate is still reachable, and the header
+// asserts it is not. The arithmetic is fixed beside these tests; what is fixed
+// HERE is structural, and it is the one that survives someone tuning a constant:
+// A CELL WHOSE ATTEMPT ALREADY POSTED IS NEVER RETRIED. The executor already
+// tracks exactly that (`wrote`), set at CALL time, before any await.
+//
+// R4-2 — and bounding the POST created a NEW way to lose a rep. A POST that
+// never answers used to hang; now the run RETURNS `complete`, the batch counts
+// it, and no row exists. Three reps ran, two rows, "2 of 2 reps completed".
+// No stub covers it: the attempt was never abandoned, so `onAbandoned` never
+// fires. The batch must at least stop calling it completed.
+// ===========================================================================
+
+describe('a cell whose attempt already POSTed is never retried (ticket 048, R4-1)', () => {
+  it('the retry that would write the duplicate is not started, whatever the arithmetic says', async () => {
+    // The per-run budget is deliberately set BELOW the POST budget, so the timing
+    // inequality cannot be what saves this: the attempt IS abandoned mid-POST.
+    // `runTimeoutMs` is caller-supplied, so this is reachable by configuration
+    // alone — and the same window opens at production constants the moment a
+    // clip plus setup eats the slack.
+    const h = realHarness({
+      stallFor: (req) =>
+        req.repIndex === 1 && req.attempt === 1 ? { createMs: RUN_POST_TIMEOUT_MS * 4 } : {},
+    });
+
+    const handle = handleOf({
+      execute: h.execute,
+      reps: 1,
+      runTimeoutMs: Math.round(RUN_POST_TIMEOUT_MS / 3),
+    });
+    const { settled, summary } = await drain(handle, RUN_POST_TIMEOUT_MS * 20);
+    // Let the abandoned POST land — which is what writes the second row.
+    await vi.advanceTimersByTimeAsync(RUN_POST_TIMEOUT_MS * 8);
+
+    expect(settled).toBe(true);
+    // The attempt really was abandoned mid-POST: it had entered `runs.create`.
+    expect(h.createCalls.some((c) => c.at < RUN_POST_TIMEOUT_MS)).toBe(true);
+
+    // THE criterion: one rep, one aggregatable sample. A retry here writes a
+    // second row for the same `repIndex` that no gate can tell apart from the
+    // first, and `derive.ts` counts DISTINCT rep indices, so the lie is silent.
+    const rep1 = sweepRunsOfRep(h.posted, 1);
+    expect(rep1.filter((r) => isAggregatableRun(r))).toHaveLength(1);
+    const arm = deriveExperimentAggregates(ledgerOf(h.posted)).perArm['B']!;
+    expect(arm.n).toBe(1);
+
+    // ...because the cell was NOT tried a second time. This is the structural
+    // half of the defence and it holds whatever the budget arithmetic says.
+    expect(summary!.failures).toHaveLength(1);
+    expect(summary!.failures[0]).toMatchObject({ repIndex: 1, attempts: 1 });
+  });
+
+  it('the R4-1 probe at PRODUCTION constants: a 45 s clip plus slow setup still measures once', async () => {
+    // The reviewer's reproduction, verbatim: a §9-length clip, a 10 s
+    // `recordings.getAudio`, a 25 s WebRTC handshake (both deliberately left
+    // unbounded), a hung upload and a POST that lands at 20 s — against the real
+    // per-run patience. On the defect this yields 2 aggregatable Runs for rep 1,
+    // `n = 2`, "1 of 1 reps completed" and `summary.failures = []`.
+    const h = realHarness({
+      clipMs: MAX_CLIP_MS,
+      stallFor: (req) =>
+        req.repIndex === 1 && req.attempt === 1
+          ? { getAudioMs: 10_000, startMs: 25_000, uploadMs: AUDIO_UPLOAD_TIMEOUT_MS * 2, createMs: 20_000 }
+          : {},
+    });
+
+    const handle = handleOf({ execute: h.execute, reps: 1, runTimeoutMs: RUN_TIMEOUT_MS });
+    const { settled, summary } = await drain(handle, RUN_TIMEOUT_MS * 4, 1_000);
+    await vi.advanceTimersByTimeAsync(RUN_TIMEOUT_MS);
+
+    expect(settled).toBe(true);
+
+    // THE criterion, in the three places the defect shows.
+    const rep1 = sweepRunsOfRep(h.posted, 1);
+    expect(rep1.filter((r) => isAggregatableRun(r))).toHaveLength(1);
+    const arm = deriveExperimentAggregates(
+      ledgerOf(h.posted, { ...RECORDING, durationMs: MAX_CLIP_MS, speechEndMs: MAX_CLIP_MS }),
+    ).perArm['B']!;
+    expect(arm.n).toBe(1);
+    expect(arm.provenance.line).toContain('1 of 1 reps completed');
+    // ...and the sweep is not quietly reporting success over a doubled sample.
+    expect(summary!.completedRuns).toBeLessThanOrEqual(1);
+    // The rep was measured by exactly one execution: one transport for the
+    // warmup and one for it, never a third for a retry racing a live POST.
+    expect(h.transports).toHaveLength(2);
+  });
+
+  it('CONTROL: a cell whose attempt never POSTed IS still retried (guard)', async () => {
+    // Without this, "never retry anything" would satisfy the tests above and
+    // would silently delete the single retry the sweep is specified to spend.
+    const h = realHarness({ stallFor: (req) => (req.repIndex === 1 ? { getAudioForever: true } : {}) });
+    const handle = handleOf({ execute: h.execute, reps: 1, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled, summary } = await drain(handle, RUN_BUDGET_MS * 20);
+
+    expect(settled).toBe(true);
+    // Abandoned before `runs.create` was ever reached — the only rows written for
+    // this rep are the two abandonment stubs, one per execution — so the single
+    // retry the sweep is specified to spend was still owed, and still spent.
+    expect(sweepRunsOfRep(h.posted, 1)).toHaveLength(2);
+    expect(summary!.failures[0]).toMatchObject({ repIndex: 1, attempts: 2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('a run whose POST went unacknowledged is not a completed rep (ticket 048, R4-2)', () => {
+  it('the sweep reports the lost rep instead of counting it', async () => {
+    // Bounding the POST (R3-1) turned "the run hangs" into "the run returns
+    // `complete`, the batch counts it, and no row exists". Nothing writes a stub:
+    // the attempt was never abandoned, so `onAbandoned` never fires, and `wrote`
+    // was set at call time anyway. Three reps run, two rows exist, and the sweep
+    // summary says everything succeeded.
+    const h = realHarness({ stallFor: (req) => (req.repIndex === 2 ? { createForever: true } : {}) });
+
+    const handle = handleOf({
+      execute: h.execute,
+      reps: 3,
+      // Above the POST budget, so `runOnce` gives up on the acknowledgement first
+      // and the attempt returns rather than being abandoned.
+      runTimeoutMs: RUN_POST_TIMEOUT_MS * 4,
+    });
+    const { settled, summary } = await drain(handle, RUN_POST_TIMEOUT_MS * 40);
+
+    expect(settled).toBe(true);
+
+    // THE criterion: a rep whose row never landed is not a completed rep.
+    expect(summary!.completedRuns).toBe(2);
+    expect(summary!.runs.map((r) => (r as AnnotatedRun).annotations?.repIndex)).toEqual([1, 3]);
+    // ...and it is SURFACED, with the reason, rather than vanishing.
+    expect(summary!.failures.map((f) => f.repIndex)).toEqual([2]);
+    expect(summary!.failures[0]!.error).toContain(RUN_POST_TIMED_OUT);
+
+    // The ledger holds exactly the rows that were acknowledged — the bounded POST
+    // invents nothing, which is the point of surfacing this in the summary
+    // instead of writing a stub for a row that may yet land server-side.
+    expect(h.posted.filter((r) => r.origin === 'sweep').map((r) => (r as AnnotatedRun).annotations?.repIndex)).toEqual([1, 3]);
+    const arm = deriveExperimentAggregates(ledgerOf(h.posted)).perArm['B']!;
+    expect(arm.n).toBe(2);
+
+    // KNOWN GAP — TICKET 050, DELIBERATELY PINNED SO IT CANNOT DRIFT SILENTLY.
+    // The rendered line still reads "2 of 2" rather than "2 of 3": `intendedReps`
+    // is distinct `repIndex` over sweep ROWS, and rep 2 has none. Only an
+    // idempotent server-side POST keyed by run id can restore that denominator
+    // honestly — writing a stub here would invent a row that may yet land, and
+    // retrying would risk the duplicate R4-1 exists to kill. When 050 lands this
+    // assertion must be UPDATED to "2 of 3", never deleted.
+    expect(arm.provenance.line).toContain('2 of 2 reps completed');
+  });
+
+  it('CONTROL: a rep whose POST is acknowledged is still counted (guard)', async () => {
+    const h = realHarness({});
+    const handle = handleOf({ execute: h.execute, reps: 3, runTimeoutMs: RUN_POST_TIMEOUT_MS * 4 });
+    const { settled, summary } = await drain(handle, RUN_POST_TIMEOUT_MS * 20);
+
+    expect(settled).toBe(true);
+    expect(summary!.completedRuns).toBe(3);
+    expect(summary!.failures).toEqual([]);
+    const arm = deriveExperimentAggregates(ledgerOf(h.posted)).perArm['B']!;
+    expect(arm.n).toBe(3);
+    expect(arm.provenance.line).toContain('3 of 3 reps completed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('a REJECTING handshake still loses the run its stage (ticket 048, R4-3)', () => {
+  it('GUARD: the rejection reaches the sweep as a named failure, not a swallowed one', async () => {
+    // `untilSettledOrAborted` propagates rejections rather than swallowing them,
+    // and reverting that was caught in only 2 of 6 full-suite runs — never as an
+    // assertion, only as a suite-level crash in an unrelated file. That reads as
+    // flake and gets retried away. This is the deterministic version: a sweep-path
+    // `transport.start()` that REJECTS must lose the run its stage.
+    const h = realHarness({
+      stallFor: (req) => (req.repIndex === 1 ? { startRejects: 'handshake refused' } : {}),
+    });
+
+    const handle = handleOf({ execute: h.execute, reps: 1, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled, summary } = await drain(handle, RUN_BUDGET_MS * 20);
+
+    expect(settled).toBe(true);
+    // THE criterion: the reason travels, so an operator can see WHAT failed.
+    expect(summary!.failures).toHaveLength(1);
+    expect(summary!.failures[0]).toMatchObject({ repIndex: 1, attempts: 2 });
+    expect(summary!.failures[0]!.error).toContain('handshake refused');
+
+    // ...and a run whose handshake never happened is never a measurement: a
+    // swallowed rejection would let it proceed and be counted.
+    expect(summary!.completedRuns).toBe(0);
+    expect(sweepRunsOfRep(h.posted, 1).filter((r) => isAggregatableRun(r))).toEqual([]);
+  });
+
+  it('CONTROL: a handshake that resolves loses the run nothing (guard)', async () => {
+    const h = realHarness({ stallFor: () => ({ startMs: 100 }) });
+    const handle = handleOf({ execute: h.execute, reps: 1, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled, summary } = await drain(handle, RUN_BUDGET_MS * 8);
+
+    expect(settled).toBe(true);
+    expect(summary!.failures).toEqual([]);
+    expect(summary!.completedRuns).toBe(1);
   });
 });

@@ -63,6 +63,7 @@ import { FRAME_SAMPLES } from './pacer';
 import type { RecordingsClient, RunAudioUpload, RunsClient } from './recordingsClient';
 import {
   AUDIO_UPLOAD_TIMEOUT_MS,
+  MAX_CLIP_MS,
   RUN_COMPLETION_TIMED_OUT,
   RUN_COMPLETION_TIMEOUT_MS,
   RUN_POST_TIMED_OUT,
@@ -216,8 +217,21 @@ function makeHarness(opts: HarnessOptions = {}) {
     newId: () => 'run-1',
   };
 
+  const transportOpts = {
+    armId: 'fx',
+    kind: 'cascade' as const,
+    script: opts.script ?? completeScript(),
+    costPerMinUsd: COST_PER_MIN,
+  };
+
   return {
     deps,
+    transportOpts,
+    /** The same bag with a caller-supplied transport factory. */
+    depsWith: (createTransport: () => FixtureTransport): RunnerDeps => ({
+      ...deps,
+      createTransport,
+    }),
     calls,
     posted,
     get uploadStartedAt() {
@@ -527,7 +541,7 @@ describe('the deadlines relate to the ones already in place (ticket 048, guard)'
     expect(TRANSPORT_CLOSE_TIMEOUT_MS).toBeLessThan(AUDIO_UPLOAD_TIMEOUT_MS);
   });
 
-  it('ROUND 3 (R3-1): EVERY budget a run can spend still fits inside the sweeps patience', () => {
+  it('ROUND 3/4 (R3-1, R4-1): EVERY cost a run can incur still fits inside the sweeps patience', () => {
     // This is the property that makes a duplicate sample IMPOSSIBLE rather than
     // merely unlikely, so it is worth an assertion of its own.
     //
@@ -535,23 +549,55 @@ describe('the deadlines relate to the ones already in place (ticket 048, guard)'
     // signal — the last re-read is immediately BEFORE `runs.create`, so an abort
     // landing while the POST is in flight is too late to stop it, and the retry
     // the sweep then starts writes a SECOND aggregatable Run for the same rep.
-    // The window disappears entirely when every budget `runOnce` can spend in one
-    // run adds up to less than the sweep's per-run patience: the attempt then
-    // always RETURNS before the sweep abandons it, so no retry can ever race a
-    // live POST.
+    // The window closes when everything one run can spend adds up to less than
+    // the sweep's per-run patience: the attempt then always RETURNS before the
+    // sweep abandons it, so no retry can ever race a live POST.
     //
-    // Worst case for one run, in series: park on `finished` for its whole budget,
-    // wedge the close, hang the upload, then hang the POST.
-    const worstCase =
+    // ROUND 4 (R4-1) — AND PACING IS PART OF THAT SUM. Round 3 enumerated the
+    // worst case as "park on `finished`, wedge the close, hang the upload, then
+    // hang the POST" and summed 77 s against 120 s. Pacing was omitted, and a
+    // §9 take is up to 45 s at 1x — a term LARGER than the 43 s of slack the
+    // guard was claiming. At production constants the duplicate was still
+    // reachable, with this guard asserting it was not.
+    //
+    // Two cases, because they bound different things.
+
+    // (a) THE WORST CASE FOR A RUN THAT CAN BE THE DUPLICATE. Only a run that
+    // reaches `runs.create` can write a row, and a run that spends the whole
+    // completion budget is `failed` by construction — so the duplicate-capable
+    // worst case pays SEGMENTATION_IDLE_MS of post-pacing patience, not the full
+    // completion budget.
+    const worstCompleteRun =
+      MAX_CLIP_MS +
+      SEGMENTATION_IDLE_MS +
+      TRANSPORT_CLOSE_TIMEOUT_MS +
+      AUDIO_UPLOAD_TIMEOUT_MS +
+      RUN_POST_TIMEOUT_MS;
+    expect(worstCompleteRun).toBeLessThan(RUN_TIMEOUT_MS);
+
+    // (b) THE WORST CASE FOR ANY RUN AT ALL, so the sweep's blunt abort stays the
+    // backstop it is documented to be rather than the everyday path.
+    const worstRun =
+      MAX_CLIP_MS +
       RUN_COMPLETION_TIMEOUT_MS +
       TRANSPORT_CLOSE_TIMEOUT_MS +
       AUDIO_UPLOAD_TIMEOUT_MS +
       RUN_POST_TIMEOUT_MS;
-    expect(worstCase).toBeLessThan(RUN_TIMEOUT_MS);
+    expect(worstRun).toBeLessThan(RUN_TIMEOUT_MS);
+
+    // The decision that follows from (b): 45 + 77 = 122 does not fit inside 120.
+    expect(RUN_TIMEOUT_MS).toBe(180_000);
+
     // ...and the POST budget is strictly shorter than the patience on its own,
-    // which is the clause the decision names.
+    // which is the clause R3-1's decision names.
     expect(RUN_POST_TIMEOUT_MS).toBeGreaterThan(0);
     expect(RUN_POST_TIMEOUT_MS).toBeLessThan(RUN_TIMEOUT_MS);
+
+    // NOTE: this inequality is a promise about constants, and nobody re-derives
+    // it when one is tuned. It is the SECOND line of defence — the first is
+    // structural and lives in batch/runTimeout.test.ts (R4-1): a cell whose
+    // attempt already POSTed is never retried, which kills the duplicate
+    // whatever these numbers say.
   });
 
   it('ROUND 2 (R2-4): the upload budget is sized for a real link, not for localhost', () => {
@@ -733,5 +779,76 @@ describe('runOnce — the ledger POST is BOUNDED (ticket 048, R3-1)', () => {
     expect(run.errors).toEqual([]);
     expect(h.posted).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ROUND 4 (R4-4) — THE ALREADY-ABORTED BRANCH IS THE ONE PLACE WHERE THE
+// REJECTION HANDLER IS THE ONLY HANDLER.
+//
+// `untilSettledOrAborted` has three branches. Two of them hand `pending` to a
+// `.then(onFulfilled, onRejected)` pair, so a late failure is handled by
+// construction — which is exactly why R2-6 found the `void pending.catch()`
+// lines beside them to be dead armour. The third branch, taken when the signal
+// is ALREADY aborted, returns without ever attaching one: there its
+// `void pending.catch(() => undefined)` is the only handler in existence, and
+// deleting it leaves the suite green while every abandoned handshake that later
+// fails becomes an unhandled rejection.
+// ---------------------------------------------------------------------------
+
+/** A transport whose handshake fails LATE — after the caller gave up on it. */
+class LateFailingStartTransport extends FixtureTransport {
+  override async start(config: Parameters<FixtureTransport['start']>[0]): Promise<void> {
+    await super.start(config);
+    return new Promise<void>((_resolve, reject) => {
+      setTimeout(() => reject(new Error('handshake failed late')), 5_000);
+    });
+  }
+}
+
+describe('runOnce — an ALREADY-aborted wait still handles its orphan (ticket 048, R4-4)', () => {
+  it('GUARD: a handshake abandoned before it was awaited raises no unhandled rejection', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const h = makeHarness();
+      // Aborted BEFORE the run starts, so `transport.start()` is handed to
+      // `untilSettledOrAborted` with the signal already in the aborted state —
+      // the branch that returns without attaching a `.then` pair.
+      const controller = new AbortController();
+      controller.abort();
+
+      let resolvedAt: number | null = null;
+      const done = runOnce({
+        recordingId: RECORDING.id,
+        config: CASCADE_CONFIG,
+        deps: h.depsWith(() => new LateFailingStartTransport(h.transportOpts)),
+        signal: controller.signal,
+      });
+      void done.then(
+        () => {
+          resolvedAt = Date.now();
+        },
+        () => {
+          resolvedAt = Date.now();
+        },
+      );
+
+      // Let the abandoned handshake reach its failure, well after the run is over.
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(resolvedAt).not.toBeNull();
+      // THE criterion. In a 60-run sweep a leak here is 60 unhandled rejections.
+      expect(unhandled).toEqual([]);
+      // ...and the run really did take the abandoned path: nothing was stored.
+      expect(h.posted).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });
