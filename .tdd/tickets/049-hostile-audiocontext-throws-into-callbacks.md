@@ -1,13 +1,13 @@
 ---
 id: 049
 title: A throwing AudioContext constructor still kills Live from inside the transport callback, and Replay leaks one context per press
-status: pending
+status: green
 source: code-review (047 round 3)
 depends_on: [047]
-touches: [src/client/audio/playback.ts, src/client/browserDeps.ts, src/client/views/useSessionController.ts]
+touches: [src/client/audio/playback.ts, src/client/browserDeps.ts, src/client/views/useSessionController.ts, src/client/views/LiveView.tsx, src/client/views/ReplayView.tsx, src/client/components/replay/RecordTake.tsx]
 iterations: 0
-test_files: []
-branch: ""
+test_files: [src/client/audio/playback.degraded.test.ts, src/client/views/LiveView.playbackFailure.test.tsx, src/client/browserDeps.replayPlayback.test.ts, src/client/views/ReplayView.playbackFailure.test.tsx, src/client/views/LiveView.autoplay.test.tsx, src/client/views/ReplayView.test.tsx]
+branch: "tdd/049"
 ---
 
 ## Why
