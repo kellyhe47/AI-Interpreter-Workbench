@@ -1,7 +1,7 @@
 ---
 id: 044
 title: Run and Batch sweep give no in-flight feedback — the UI is identical to not having clicked
-status: pending
+status: green
 source: qa-live
 depends_on: []
 touches: [src/client/views/ReplayView.tsx]
@@ -54,3 +54,26 @@ not look actionable. A handler-only guard would satisfy 044's literal criteria w
 enabled button that silently swallows clicks — precisely the failure 024 was written against. The
 title still distinguishes the two reasons, so the no-selection explanation is never replaced by the
 busy one.
+
+## Attempt log
+
+- Green in one implementation pass, 12 red -> 0. Suite 1677/95; both tsconfigs clean; build clean.
+- **All three clear-paths funnel through ONE `.finally`**, which is the only place the flag is
+  cleared: `.then(append) .catch(() => {}) .finally(clear)`. Complete and resolved-`failed` both
+  take `.then` (the runner RESOLVES a lost stage rather than throwing); a rejection skips it, is
+  absorbed by `.catch`, and `.finally` still clears. Putting the clear in `.finally` rather than
+  duplicating it per handler is what stops a future exit path from forgetting it.
+- **The unhandled-rejection leak was real, not theoretical.** `run()` was `.then()`-only, so a
+  rejected `runOnce` leaked. A `process.on('unhandledRejection')` probe now pins it.
+- Batch double-fire was ALREADY correct (`startSweep` guards `sweep !== null`), so that half of the
+  ticket was purely the affordance. The test is kept as a regression pin.
+- 024's no-selection title always wins: the no-selection check is first in both ternaries, so the
+  busy hint never replaces the explanatory one.
+- Mutation-checked:
+  | mutation | result |
+  |---|---|
+  | the flag never clears (stuck busy forever) | 5 red |
+  | the rejection goes uncaught again (leak returns) | 1 red |
+  | Run stays enabled while in flight (double-fire) | 2 red |
+- Prose corrected in `ReplayView.tsx` and `RunConfigPanel.tsx`, both of which asserted the opposite
+  ("the gate is the SELECTION and nothing else"), with the ruling recorded in place.
