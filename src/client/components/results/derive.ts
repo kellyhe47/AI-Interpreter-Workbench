@@ -126,6 +126,7 @@ import {
 // bench/soak — importing it here left two copies free to drift apart.
 import type { CorpusCategory } from '../../../core/corpus';
 import { costFromStored, formatCostUsd, sumMeasuredCosts } from '../../../core/pricing';
+import { anchoredLatencyMs } from '../../../core/timing';
 import type { WerScore } from '../../../core/wer';
 import {
   isAggregatableLiveSession,
@@ -1090,27 +1091,22 @@ export function deriveLiveModel(ledger: RunLedger): LiveModel {
 
   const columns = order.map((arm): LiveArmColumn => {
     const sessions = groups.get(arm)!;
+    // TICKET 051 R2-2 — THE SAME ANCHOR AS EVERYWHERE ELSE IN THE TICKET.
+    // This read `speech_end`, which Live NEVER carries (option (c) deliberately
+    // never stamps it), so `samples` was always empty and the column fell
+    // through to a MEAN OF PER-SESSION p50s — not a percentile of anything, and
+    // session-weighted, so a one-utterance take counted as much as a
+    // fifty-utterance one. Once 051 made `saveLiveSession` write real numbers,
+    // that fallback would have published a figure computed by the wrong
+    // statistic beside Replay's corpus-anchored p50. It is DELETED: a percentile
+    // over no samples is not a figure, and a session's self-reported summary is
+    // not a measurement of the utterances it carries.
     const samples = sessions
       .flatMap((s) => s.utterances)
-      .map((u) => {
-        const speechEnd = u.timings?.speech_end;
-        const audioQueued = u.timings?.audio_queued;
-        if (typeof speechEnd !== 'number' || typeof audioQueued !== 'number') return null;
-        return audioQueued - speechEnd;
-      })
+      .map((u) => anchoredLatencyMs(u.timings))
       .filter((ms): ms is number => ms !== null);
 
-    // Prefer the sessions' own utterances; fall back to what each session
-    // reported when none of them carries a usable pair of timestamps.
-    const measured = percentilesOf(samples);
-    const p50Ms =
-      samples.length > 0
-        ? measured.p50Ms
-        : meanOf(sessions.map((s) => s.latency.p50).filter((v): v is number => v !== null));
-    const p95Ms =
-      samples.length > 0
-        ? measured.p95Ms
-        : meanOf(sessions.map((s) => s.latency.p95).filter((v): v is number => v !== null));
+    const { p50Ms, p95Ms } = percentilesOf(samples);
 
     return {
       arm,

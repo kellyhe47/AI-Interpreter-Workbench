@@ -22,12 +22,15 @@
  *   aggregated.
  * - aggregates(runId?) → { perArm } keyed by arm id, one entry per arm with
  *   at least one real record (fixture-only arms are absent). Perceived
- *   latency = timings.audio_queued − the record's END-OF-SPEECH ANCHOR:
- *   `speech_end` (corpus ground truth — Replay) when present, otherwise the
- *   endpointer's decision (`vad_fired` / `server_speech_stopped` — Live, which
- *   has no ground truth and never will; ticket 051, anchoredLatencyMs). Records
- *   with neither anchor, or no audio_queued, still count toward `count` and
- *   `costUsd` but are excluded from percentiles. Percentiles use nearest-rank:
+ *   latency = the record's FIRST AUDIO (`tts_first_byte ?? audio_queued`, since
+ *   cascade re-stamps audio_queued per chunk and realtime does not) minus its
+ *   END-OF-SPEECH ANCHOR: `speech_end` (corpus ground truth — Replay) when
+ *   present, otherwise the endpointer's decision (`vad_fired` /
+ *   `server_speech_stopped` — Live, which has no ground truth and never will;
+ *   ticket 051, anchoredLatencyMs). Records with neither anchor, or no audio at
+ *   all, still count toward `count` and `costUsd` but are excluded from
+ *   percentiles. An UNSCOPED call whose arm holds BOTH anchors reports no
+ *   percentile at all — that pool describes no single quantity (R2-6). Percentiles use nearest-rank:
  *   sorted[ceil(p * n) − 1] (p50 of 10 sorted values = 5th, p95 = 10th).
  *   No latency samples → p50Ms/p95Ms are null, never 0.
  * - costUsd = sum of costUnits over the aggregated records (costUnits are
@@ -158,8 +161,8 @@ import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
 import { latestWerScores, werScoreKey } from '../../core/wer';
 import type { WerScore } from '../../core/wer';
 import type { RunOrigin } from '../../core/protocol';
-import { anchoredLatencyMs } from '../../core/timing';
-import type { Mode, UtteranceRecord } from '../../core/timing';
+import { anchoredLatencyMs, latencyAnchorOf } from '../../core/timing';
+import type { LatencyAnchor, Mode, UtteranceRecord } from '../../core/timing';
 
 /* -------------------------------------------------------------------------
  * Ticket 010 — the ledger becomes the client's VIEW over the server-persisted
@@ -966,6 +969,8 @@ export class RunLedger {
   aggregates(runId?: string): LedgerAggregates {
     const perArm: { [arm: string]: ArmAggregate } = {};
     const latenciesByArm: { [arm: string]: number[] } = {};
+    /** R2-6 — which anchors an arm's samples were taken under. */
+    const anchorsByArm: { [arm: string]: Set<LatencyAnchor> } = {};
 
     for (const r of this.records) {
       if (runId !== undefined && r.runId !== runId) continue;
@@ -975,6 +980,7 @@ export class RunLedger {
         agg = { count: 0, p50Ms: null, p95Ms: null, costUsd: null, measuredCostRecords: 0 };
         perArm[r.arm] = agg;
         latenciesByArm[r.arm] = [];
+        anchorsByArm[r.arm] = new Set<LatencyAnchor>();
       }
       agg.count += 1;
       // TICKET 052 — measured records only. A record the transport reported no
@@ -985,14 +991,26 @@ export class RunLedger {
       }
       // TICKET 051 — anchored per record: `speech_end` when the corpus supplied
       // it (REPLAY, unmoved), otherwise the endpointer's decision, which is the
-      // only end-of-speech instant a LIVE record can carry. Records with
-      // neither still count toward `count` and `costUsd`.
-      const latency = anchoredLatencyMs(r.timings as Record<string, number | undefined>);
-      if (latency !== null) latenciesByArm[r.arm]!.push(latency);
+      // only end-of-speech instant a LIVE record can carry. The interval ENDS
+      // at the first audio (`tts_first_byte ?? audio_queued`), because cascade's
+      // `audio_queued` is the LAST synthesized chunk and realtime's is the
+      // first. Records with neither anchor still count toward `count` and
+      // `costUsd`.
+      const marks = r.timings as Record<string, number | undefined>;
+      const latency = anchoredLatencyMs(marks);
+      if (latency !== null) {
+        latenciesByArm[r.arm]!.push(latency);
+        anchorsByArm[r.arm]!.add(latencyAnchorOf(marks)!);
+      }
     }
 
     for (const [arm, latencies] of Object.entries(latenciesByArm)) {
       if (latencies.length === 0) continue;
+      // R2-6 — REFUSE TO MIX. An unscoped pool can hold corpus-anchored and
+      // endpointer-anchored samples at once, and a percentile over both
+      // describes neither quantity. Scoping to a runId is never such a pool —
+      // one run has one anchor — so every in-app caller is unaffected.
+      if (runId === undefined && anchorsByArm[arm]!.size > 1) continue;
       const sorted = [...latencies].sort((a, b) => a - b);
       perArm[arm]!.p50Ms = nearestRank(sorted, 0.5);
       perArm[arm]!.p95Ms = nearestRank(sorted, 0.95);

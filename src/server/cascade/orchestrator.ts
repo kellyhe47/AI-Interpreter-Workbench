@@ -439,7 +439,10 @@ export async function* runCascade(
         audioState: 'queued',
         audioDurationMs: (totalSamples / SAMPLE_RATE) * 1000,
         timings,
-        speechEndSource: 'vad',
+        // TICKET 051 R2-4 — the orchestrator stamps NO `speech_end` (option (c)
+        // is precisely the decision not to back-derive one), so claiming a
+        // VAD-derived one was a falsehood in an exported field.
+        speechEndSource: timings.speech_end === undefined ? 'none' : 'vad',
         providers: {
           stt: providers.stt.name,
           mt: providers.mt.name,

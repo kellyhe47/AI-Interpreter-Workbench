@@ -458,7 +458,11 @@ export function useSessionController(deps: SessionDeps): SessionController {
         audioState: 'queued',
         audioDurationMs: target.durationMs,
         timings: { ...target.timings } as UtteranceRecord['timings'],
-        speechEndSource: 'vad',
+        // R2-4 — NAME WHAT THE RECORD ACTUALLY CARRIES. Option (c) never stamps
+        // `speech_end` in Live, so 'vad' was a false claim in a persisted,
+        // exported field — and a blanket 'none' would be just as false for a
+        // record that does carry the mark.
+        speechEndSource: target.timings.speech_end === undefined ? 'none' : 'vad',
         providers: { ...REALTIME_PROVIDERS },
         // TICKET 052 — metered through the ONE cost model. `null` when the
         // transport reported no usage: NOT MEASURED, never a $0.00 turn.

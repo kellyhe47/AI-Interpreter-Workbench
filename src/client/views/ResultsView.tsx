@@ -567,6 +567,14 @@ function LiveCard(props: { model: LiveModel }): ReactElement {
         <>
           <p data-provenance="live" data-mono="" style={monoStyle}>
             {`LiveSessions only · ${sessions} sessions · ${utterances} utterances completed · ` +
+              // TICKET 051 R2-2 — NAME THE ANCHOR. These percentiles sit on the
+              // same screen as Experiment 1's, and they are a DIFFERENT
+              // QUANTITY: Replay's run from the corpus manifest's annotated
+              // `speech_end`; Live has no ground truth and never will, so its
+              // sample starts where the endpointer DECIDED the speaker stopped.
+              // Unlabelled, side by side, the two invite exactly the comparison
+              // this ticket exists to prevent.
+              'latency from detected end of speech to first audio · ' +
               'no reference text, so no WER'}
           </p>
 

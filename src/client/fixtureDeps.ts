@@ -143,11 +143,18 @@ interface StageOffsets {
   marks: Array<[string, number, string?]>;
 }
 
-/** Cascade offsets matching the design mock: 500/42/298/201/12 = 1053. */
+/**
+ * Cascade offsets matching the design mock: 42/298/201/12 from the endpointer.
+ *
+ * TICKET 051 ROUND 2 (R2-5) — NO `speech_end`. `?fixture=1` is the manual-QA
+ * path onto the very surface this ticket rebuilt, and `speech_end` is corpus
+ * ground truth that no live transport can produce. A fixture that scripts it
+ * makes QA sign off on a card the product cannot render — and a record carrying
+ * both anchors renders a total anchored on one while its rows use the other.
+ */
 function cascadeOffsets(base: number): StageOffsets {
   return {
     timings: {
-      speech_end: base,
       vad_fired: base + 500,
       stt_final: base + 542,
       mt_first_token: base + 840,
@@ -155,7 +162,6 @@ function cascadeOffsets(base: number): StageOffsets {
       audio_queued: base + 1053,
     },
     marks: [
-      ['speech_end', 500],
       ['vad_fired', 505],
       ['stt_final', 565, 'stt'],
       ['mt_first_token', 850, 'mt'],
@@ -165,17 +171,16 @@ function cascadeOffsets(base: number): StageOffsets {
   };
 }
 
-/** Realtime offsets matching the design mock: 500/471/9 = 980. */
+/** Realtime offsets matching the design mock: 471/9 from the endpointer.
+ *  No `speech_end` — see cascadeOffsets (ticket 051 round 2, R2-5). */
 function realtimeOffsets(base: number): StageOffsets {
   return {
     timings: {
-      speech_end: base,
       server_speech_stopped: base + 500,
       first_audio_delta: base + 971,
       audio_queued: base + 980,
     },
     marks: [
-      ['speech_end', 500],
       ['server_speech_stopped', 505],
       ['first_audio_delta', 975],
       ['audio_queued', 985],
@@ -202,7 +207,8 @@ function fixtureRecord(
     audioState: 'queued',
     audioDurationMs: 2_100,
     timings: timings as UtteranceRecord['timings'],
-    speechEndSource: 'vad',
+    // R2-4 — the fixture stamps no `speech_end`, so it claims none.
+    speechEndSource: 'none',
     // Fixture provider names on EVERY arm (realtime included) — keeps
     // isRealRecord false so Results/aggregates never see fixture data.
     providers: { stt: 'fixture', mt: 'fixture', tts: 'fixture' },

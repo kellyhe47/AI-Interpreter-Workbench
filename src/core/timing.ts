@@ -96,11 +96,18 @@ export function deriveRealtimeIntervals(t: RealtimeTimestamps): RealtimeInterval
 // rescue a record into carrying a figure its transport cannot produce.
 // ---------------------------------------------------------------------------
 
-/** Loosest read-only view of a timings map, as the ledger stores them. */
-export type TimingMarks = Readonly<Record<string, number | null | undefined>>;
+/**
+ * Loosest read-only view of a timings map. Every caller's shape is accepted —
+ * the ledger's `Record<string, number | null>`, the two named stamp interfaces,
+ * and an absent map — because the anchor rule is one rule everywhere.
+ */
+export type TimingMarks =
+  | Readonly<Record<string, number | null | undefined>>
+  | CascadeTimestamps
+  | RealtimeTimestamps;
 
 function mark(t: TimingMarks | undefined, name: string): number | undefined {
-  const v = t?.[name];
+  const v = (t as Record<string, number | null | undefined> | undefined)?.[name];
   return typeof v === 'number' ? v : undefined;
 }
 
@@ -113,33 +120,72 @@ export function detectedEndOfSpeechMs(t: TimingMarks | undefined): number | unde
 }
 
 /**
- * The one perceived-latency sample for a record, under whichever anchor the
- * record actually carries. Corpus ground truth first (REPLAY, unmoved), the
- * endpointer's decision second (LIVE), null otherwise.
+ * ROUND 2 (R2-1) — THE OTHER END OF THE INTERVAL IS NOT ONE EVENT EITHER.
+ *
+ * `audio_queued` means DIFFERENT THINGS in the two architectures:
+ *   cascade  — re-stamped on every synthesized chunk, last chunk wins
+ *              (`orchestrator.ts`) -> the LAST audio, which grows with how long
+ *              the sentence is
+ *   realtime — stamped ONCE at `output_audio_buffer.started` (`realtime.ts`)
+ *              -> the FIRST audio
+ * Rendering both under one label, or pooling both into one percentile, compares
+ * response time against playout duration: a long cascade utterance then looks
+ * several times slower than a short Arm A one, and most of the gap is sound
+ * still playing.
+ *
+ * So the interval ENDS AT THE FIRST AUDIO: `tts_first_byte` when the record
+ * carries it, `audio_queued` otherwise (realtime has no synthesis stage to
+ * stamp, and its `audio_queued` already IS the first audio).
  */
-export function anchoredLatencyMs(t: TimingMarks | undefined): number | null {
-  const audioQueued = mark(t, 'audio_queued');
-  if (audioQueued === undefined) return null;
-  const anchor = mark(t, 'speech_end') ?? detectedEndOfSpeechMs(t);
-  if (anchor === undefined) return null;
-  return audioQueued - anchor;
+export function firstAudioMs(t: TimingMarks | undefined): number | undefined {
+  return mark(t, 'tts_first_byte') ?? mark(t, 'audio_queued');
+}
+
+/** Which end-of-speech instant a record's latency sample is anchored on. */
+export type LatencyAnchor = 'corpus' | 'detected';
+
+/**
+ * The anchor this record's sample WOULD use, or null when it carries none.
+ * Exposed so a pool can refuse to mix two quantities under one percentile.
+ */
+export function latencyAnchorOf(t: TimingMarks | undefined): LatencyAnchor | null {
+  if (mark(t, 'speech_end') !== undefined) return 'corpus';
+  return detectedEndOfSpeechMs(t) === undefined ? null : 'detected';
 }
 
 /**
- * Live's cascade spans — the three the client can actually observe, plus the
- * total they sum to. `tts_first_byte` is deliberately NOT a boundary here: the
- * observable span is "translated text -> audio ready", and splitting it at the
- * first synthesized byte would put a row on screen that names no event the
- * operator can reason about.
+ * The one perceived-latency sample for a record: FIRST AUDIO minus whichever
+ * end-of-speech anchor the record actually carries. Corpus ground truth first
+ * (REPLAY, unmoved), the endpointer's decision second (LIVE), null otherwise.
+ */
+export function anchoredLatencyMs(t: TimingMarks | undefined): number | null {
+  const firstAudio = firstAudioMs(t);
+  if (firstAudio === undefined) return null;
+  const anchor = mark(t, 'speech_end') ?? detectedEndOfSpeechMs(t);
+  if (anchor === undefined) return null;
+  return firstAudio - anchor;
+}
+
+/**
+ * Live's cascade spans — the four the client can actually observe, plus the
+ * headline they lead to.
+ *
+ * ROUND 2 — `tts_first_byte` IS a boundary: the server stamps it, Replay
+ * already renders it, and it is the ONLY mark from which cascade's
+ * time-to-first-audio — the quantity commensurable with Arm A's — can be
+ * recovered. `deliver` (the tail of synthesis) stays visible as its own row
+ * because it is real information; it is simply not the headline.
  */
 export interface LiveCascadeIntervals {
   /** stt_final - vad_fired — detected end of speech -> transcript */
   transcribe: number | null;
   /** mt_first_token - stt_final — transcript -> translated text */
   translate: number | null;
-  /** audio_queued - mt_first_token — translated text -> audio ready */
-  speak: number | null;
-  /** audio_queued - vad_fired — the sum of the three */
+  /** tts_first_byte - mt_first_token — translated text -> audio starts */
+  synthesize: number | null;
+  /** audio_queued - tts_first_byte — audio starts -> audio complete */
+  deliver: number | null;
+  /** the headline: first audio - the record's anchor (anchoredLatencyMs) */
   total: number | null;
 }
 
@@ -150,9 +196,9 @@ export interface LiveCascadeIntervals {
  * here at ALL — `response.output_audio.delta` does not exist on this transport.
  */
 export interface LiveRealtimeIntervals {
-  /** audio_queued - server_speech_stopped — detected end of speech -> audio ready */
+  /** audio_queued - server_speech_stopped — detected end of speech -> audio starts */
   model: number | null;
-  /** identical to `model`: one observable span means one figure */
+  /** the headline: first audio - the record's anchor (anchoredLatencyMs) */
   total: number | null;
 }
 
@@ -160,14 +206,21 @@ export function deriveLiveCascadeIntervals(t: CascadeTimestamps): LiveCascadeInt
   return {
     transcribe: diff(t.stt_final, t.vad_fired),
     translate: diff(t.mt_first_token, t.stt_final),
-    speak: diff(t.audio_queued, t.mt_first_token),
-    total: diff(t.audio_queued, t.vad_fired),
+    synthesize: diff(t.tts_first_byte, t.mt_first_token),
+    deliver: diff(t.audio_queued, t.tts_first_byte),
+    // R2-5 — THE SAME QUANTITY THE FOOTER REPORTS. The card's total and the
+    // ledger's p50 sit under one label, so they must be one number: a record
+    // carrying both anchors used to render `audio_queued − vad_fired` on the
+    // card and `audio_queued − speech_end` in the footer.
+    total: anchoredLatencyMs(t),
   };
 }
 
 export function deriveLiveRealtimeIntervals(t: RealtimeTimestamps): LiveRealtimeIntervals {
-  const model = diff(t.audio_queued, t.server_speech_stopped);
-  return { model, total: model };
+  return {
+    model: diff(t.audio_queued, t.server_speech_stopped),
+    total: anchoredLatencyMs(t),
+  };
 }
 
 export type Mode = 'cascade' | 'realtime';
@@ -185,7 +238,15 @@ export interface UtteranceRecord {
   audioState: string;
   audioDurationMs: number;
   timings: CascadeTimestamps | RealtimeTimestamps;
-  speechEndSource: 'corpus' | 'vad';
+  /**
+   * TICKET 051 R2-4 — which kind of `speech_end` this record carries.
+   * 'corpus' = the manifest's ground truth; 'vad' = an endpointer-derived
+   * `speech_end` mark; 'none' = THERE IS NO `speech_end` ON THIS RECORD, which
+   * is every Live record: option (c) deliberately never back-derives one. This
+   * field is persisted and exported, so 'vad' on a record with no mark is a
+   * false claim that outlives the session that wrote it.
+   */
+  speechEndSource: 'corpus' | 'vad' | 'none';
   providers: { stt: string; mt: string; tts: string };
   /**
    * TICKET 052 — metered USD for this utterance, or `null` when it could NOT

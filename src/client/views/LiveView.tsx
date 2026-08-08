@@ -67,8 +67,13 @@
  *
  * TICKET 051 — the stage rows are measured from marks the LIVE transports
  * actually produce, and every row NAMES THE TWO EVENTS IT SPANS:
- *   Arm A  — ONE row, `model` (opaque): detected end of speech → audio ready
- *   Cascade — `transcribe` / `translate` / `speak`
+ *   Arm A  — ONE row, `model` (opaque): detected end of speech → audio starts
+ *   Cascade — `transcribe` / `translate` / `synthesize` / `deliver`
+ * The HEADLINE of both arms is time-to-FIRST-audio (round 2, R2-1): cascade's
+ * `audio_queued` is re-stamped per synthesized chunk while Arm A's is stamped
+ * once when audio begins on the track, so `deliver` — the tail of synthesis —
+ * stays on the card as its own row but sits outside the total, and both arms'
+ * total labels are byte-identical.
  * There is NO `endpointing` row anywhere in Live (it needs corpus ground truth
  * for when the human stopped, which Live has none of) and no Arm A `queue`
  * (over WebRTC nothing is observable between "model produced audio" and "audio
@@ -397,6 +402,16 @@ function formatSeconds(ms: number | null): string {
  */
 const DETECTED_END = 'detected end of speech';
 
+/**
+ * ROUND 2 (R2-1) — the instant both architectures END on. Cascade's
+ * `audio_queued` is re-stamped per synthesized chunk (time-to-LAST-audio) while
+ * Arm A's is stamped once when audio begins on the media track
+ * (time-to-FIRST-audio), so the headline of both arms is anchored on the FIRST
+ * audio and both totals carry this same wording. Two labels would invite the
+ * comparison; one label makes it honest.
+ */
+const FIRST_AUDIO = 'audio starts';
+
 interface StageRowData {
   label: string;
   /** The two events this row spans, in plain language. No glossary needed. */
@@ -430,7 +445,10 @@ function stageRowsFor(
       rows: [
         { label: 'transcribe', span: `${DETECTED_END} → transcript`, ms: iv.transcribe },
         { label: 'translate', span: 'transcript → translated text', ms: iv.translate },
-        { label: 'speak', span: 'translated text → audio ready', ms: iv.speak },
+        { label: 'synthesize', span: `translated text → ${FIRST_AUDIO}`, ms: iv.synthesize },
+        // Real information, deliberately OUTSIDE the headline: this tail is the
+        // rest of synthesis and it grows with how long the sentence is.
+        { label: 'deliver', span: `${FIRST_AUDIO} → audio complete`, ms: iv.deliver },
       ],
       total: iv.total,
     };
@@ -438,7 +456,7 @@ function stageRowsFor(
   const iv = deriveLiveRealtimeIntervals(target.timings as RealtimeTimestamps);
   return {
     rows: [
-      { label: 'model', span: `${DETECTED_END} → audio ready`, ms: iv.model, opaque: true },
+      { label: 'model', span: `${DETECTED_END} → ${FIRST_AUDIO}`, ms: iv.model, opaque: true },
     ],
     total: iv.total,
   };
@@ -492,6 +510,8 @@ function TargetCard({
   const archLabel = architecture === 'realtime' ? 'Realtime' : 'Cascade';
   const { rows, total } = stageRowsFor(architecture, target);
   const showDetails = !failed && !inFlight && target.hasData;
+  /** R2-7 — one row has no proportion to show. */
+  const showBars = rows.length > 1;
 
   return (
     <div
@@ -588,18 +608,21 @@ function TargetCard({
           }}
         >
           {rows.map((row) => {
-            const totalMs = total ?? rows.reduce((sum, r) => sum + (r.ms ?? 0), 0);
+            // The bars are PROPORTIONS OF THE ROWS SHOWN — including `deliver`,
+            // which sits outside the headline — so they always sum to the full
+            // width of what is on screen.
+            const barTotal = rows.reduce((sum, r) => sum + (r.ms ?? 0), 0);
             const pct =
-              row.ms === null || totalMs <= 0
+              row.ms === null || barTotal <= 0
                 ? 0
-                : Math.max(1, Math.round((row.ms / totalMs) * 100));
+                : Math.max(1, Math.round((row.ms / barTotal) * 100));
             return (
               <div
                 key={row.label}
                 data-stage-row={row.label}
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: '104px 220px 1fr 62px',
+                  gridTemplateColumns: showBars ? '104px 220px 1fr 62px' : '104px 1fr 62px',
                   gap: '0 10px',
                   alignItems: 'center',
                   font: '400 11.5px var(--font-sans)',
@@ -615,25 +638,31 @@ function TargetCard({
                     figure needs no glossary and cannot be mistaken for Replay's
                     differently-anchored one. */}
                 <span data-stage-span style={{ color: 'var(--text-muted)' }}>{row.span}</span>
-                <span
-                  style={{
-                    height: 5,
-                    background: 'var(--gray-100)',
-                    borderRadius: 3,
-                    overflow: 'hidden',
-                    display: 'block',
-                  }}
-                >
-                  <i
+                {/* R2-7 — a proportion bar compares this row against the others.
+                    With ONE row there are no others: it would render 100% wide
+                    on every utterance and say nothing. */}
+                {showBars && (
+                  <span
+                    data-stage-bar
                     style={{
-                      display: 'block',
                       height: 5,
+                      background: 'var(--gray-100)',
                       borderRadius: 3,
-                      background: 'var(--accent)',
-                      width: `${pct}%`,
+                      overflow: 'hidden',
+                      display: 'block',
                     }}
-                  />
-                </span>
+                  >
+                    <i
+                      style={{
+                        display: 'block',
+                        height: 5,
+                        borderRadius: 3,
+                        background: 'var(--accent)',
+                        width: `${pct}%`,
+                      }}
+                    />
+                  </span>
+                )}
                 <span style={{ textAlign: 'right', ...monoStyle }}>{formatSeconds(row.ms)}</span>
               </div>
             );
@@ -658,7 +687,7 @@ function TargetCard({
               stopped); this one starts where the endpointer DECIDED they had.
               Two different quantities must never share one name. */}
           <span data-live-total>
-            {`total from ${DETECTED_END} `}
+            {`total ${DETECTED_END} → ${FIRST_AUDIO} `}
             <b
               style={{
                 color: 'var(--text-body)',
@@ -671,7 +700,7 @@ function TargetCard({
             </b>
           </span>
           <span style={{ color: 'var(--text-muted)' }}>
-            {architecture === 'cascade' ? '3 intervals · all visible' : '1 interval · opaque'}
+            {architecture === 'cascade' ? '4 intervals · all visible' : '1 interval · opaque'}
           </span>
         </div>
       )}
