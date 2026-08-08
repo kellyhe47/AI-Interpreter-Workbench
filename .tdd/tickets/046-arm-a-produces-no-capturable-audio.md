@@ -120,3 +120,71 @@ silently corrupt a figure that currently works.
   rather than attaching two consumers to one track.
 - Do not reintroduce a PCM-delta expectation; it does not exist on this transport.
 - Do not run `prettier` — this repo has no config and it reformats unrelated regions.
+
+---
+
+## ROUND 2 — code review findings (independent reviewer, against `905907a`)
+
+The implementation was green (1726/1726, both typechecks) and AC3/AC4/AC5 were verified genuine by
+mutation. Four things must change before this ships.
+
+### R2-1 (BLOCKER, test falsifiability) — the production wiring is not pinned
+`browserDeps.inboundTap.test.ts` splits the source on `export function buildBrowserDeps` and asserts
+`replayHalf.includes('createInboundAudioTap')` — which the IMPORT LINE alone satisfies. Verified:
+deleting the whole `createInboundAudioTap` property from `buildReplayDeps` leaves 1726/1726 green.
+There is no lint script to catch the orphaned import. Assert on the CONSTRUCTED object, the way the
+Live half already correctly does.
+
+### R2-2 (BLOCKER, test falsifiability) — the Web Audio graph connectivity is not pinned
+The fake calls `onaudioprocess` directly, so no test depends on any node being connected. Verified:
+deleting ALL THREE `connect()` calls leaves the suite green. In a real browser an unconnected
+ScriptProcessor is never pulled -> zero frames -> Arm A silently uploads nothing. Assert the edges:
+source -> processor -> gain -> `ctx.destination`, which also makes the AC7 gain-0 test non-vacuous.
+
+### R2-3 (MAJOR, real-browser risk) — Replay never sinks the remote stream to an element
+`buildReplayDeps` wires no `remoteAudioSink`, so the remote `MediaStream` goes straight into
+`createMediaStreamSource`. Chromium has a long history of delivering SILENCE from a remote WebRTC
+stream into Web Audio unless the stream is also sunk to a media element.
+**DECIDED:** reuse the seam that already exists rather than adding a second one — wire a **muted**
+`remoteAudioSink` into `buildReplayDeps`. Muted satisfies "nothing autoplays in Replay" (§7: no
+sound is produced) while keeping the stream pulled. This is what the ticket's own Notes anticipated:
+one seam serving both purposes.
+
+### R2-4 (MAJOR, spec) — matching FORMAT is not enough; the CONTENT unblinds the comparison
+The tap runs continuously from track-attach to `stop()`, so an Arm A file is the whole ~45 s run —
+leading silence, inter-utterance gaps, comfort noise. Cascade's is the concatenation of TTS chunks
+only: gapless speech, a few seconds. `BlindCompare` plays the whole stored WAV, so an evaluator
+tells the arms apart in the first second — AC2's wording is met, its PURPOSE is defeated. It is also
+~2 MB per run, ~130 MB per 60-run arm.
+**DECIDED:** gate capture to the model's speaking windows. The transport already receives
+`output_audio_buffer.started` / `.stopped`; it toggles the tap, and captured windows concatenate.
+- The tap gains an explicit capture gate; frames outside a window are DROPPED, not buffered
+- A **tail grace** after `.stopped` (250 ms, a named constant) so the last syllable is not clipped —
+  this also covers the truncation the reviewer flagged separately
+- **This must not touch AC3.** The gate READS the same two events; it must not change when, whether,
+  or in what order `audio_queued` is stamped. Keep the tapped-vs-no-tap timing-identity test and
+  extend it to cover the gated path.
+
+### R2-5 (MINOR) — reuse `floatTo16`
+`inboundAudio.ts` reimplements `src/client/audio/pcm.ts:floatTo16` with a DIFFERENT scale convention
+(`v*32768` clamped vs pcm.ts's asymmetric `v<0 ? v*32768 : v*32767`). Two client capture paths that
+can drift apart by 1 LSB and then independently. Use `floatTo16`; if a locked expectation encodes
+the other convention, the test-writer changes the expectation.
+
+### R2-6 (MINOR) — the runner's fallback condition is unpinned
+`runner.ts:578`'s `audioChunks.length === 0` guard can be replaced with `if (true)` and the suite
+stays green. The condition is CORRECT (cascade defines no `takeOutputAudio`) but unprotected. Pin
+it: a transport yielding BOTH `onAudio` chunks and a `takeOutputAudio()` uploads only the decoded
+chunks.
+
+### R2-7 (MINOR) — await the context close
+`void ctx.close()` is fire-and-forget and a realtime Replay run builds TWO AudioContexts (outbound
+sink + inbound tap). Chrome caps concurrent hardware contexts (~6); across a 60-run sweep a lagging
+close can make construction throw and kill a run. Await it, or state why not.
+
+### ACCEPTED, NOT FIXED
+- ScriptProcessorNode is deprecated and main-thread; a starved main thread can drop frames. It does
+  NOT affect measurement (`audio_queued` is a data-channel event). Revisit only if a real capture
+  comes back short.
+- AC1 is not fully provable in vitest. It stays unproven until a real Arm A Replay run in Chrome
+  returns audible speech from `GET /api/runs/:id/audio` — an operator smoke test, not a unit test.
