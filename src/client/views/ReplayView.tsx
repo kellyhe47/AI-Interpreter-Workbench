@@ -389,6 +389,24 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   const [blindOpen, setBlindOpen] = useState(false);
   /** Ticket 036 — the record flow is OPENED, never standing: no panel, no mic. */
   const [recordOpen, setRecordOpen] = useState(false);
+  /**
+   * TICKET 049 ROUND 2 (R2-5) — the browser's error from a play press that
+   * could not build an AudioContext, or null. Replay shares ONE context per
+   * deps bag, so a press that cannot build it is otherwise a silent no-op —
+   * and on this screen "I pressed play and heard nothing" is how the operator
+   * diagnoses a run whose stored output audio is empty. Two very different
+   * findings must not look identical.
+   */
+  const [playbackError, setPlaybackError] = useState<unknown>(null);
+
+  /** Every play press goes through here, so no seam can forget to report. */
+  const playRun = useCallback(
+    (runId: string): void => {
+      setPlaybackError(null);
+      deps.playRun(runId, (error) => setPlaybackError(error));
+    },
+    [deps],
+  );
 
   const refreshRuns = useCallback(async (): Promise<void> => {
     setRuns(await deps.runs.list());
@@ -562,7 +580,7 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
           evaluatorLanguage={evaluatorLanguage}
           now={deps.now}
           newId={deps.newId}
-          onPlay={(runId) => deps.playRun(runId)}
+          onPlay={playRun}
           onSubmit={recordBlindComparison}
         />
       );
@@ -676,11 +694,34 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
           {blindTrigger}
           {blindCard}
 
-          <RunsList
-            recording={selectedRecording}
-            runs={selectedRuns}
-            onPlay={(runId) => deps.playRun(runId)}
-          />
+          {/* TICKET 049 R2-5 — a press that produced no sound, and WHY. It sits
+              with the runs it belongs to and carries the browser's own words,
+              so "no output audio stored" ([data-run-no-audio]) and "this
+              browser refused an audio context" read differently. A readout: it
+              offers no retry, which could not work while the cap is full and
+              would need a fresh gesture anyway. */}
+          {playbackError !== null && (
+            <div
+              data-replay-playback-notice
+              role="status"
+              style={{
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                padding: '9px 12px',
+                font: '400 12px/1.6 var(--font-sans)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              No audio output — this browser refused a new audio context.{' '}
+              <span data-replay-playback-reason style={{ fontFamily: 'var(--font-mono)' }}>
+                {playbackError instanceof Error
+                  ? `${playbackError.name}: ${playbackError.message}`
+                  : String(playbackError)}
+              </span>
+            </div>
+          )}
+
+          <RunsList recording={selectedRecording} runs={selectedRuns} onPlay={playRun} />
         </div>
       </div>
     </div>

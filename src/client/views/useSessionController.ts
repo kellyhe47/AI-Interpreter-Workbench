@@ -199,9 +199,14 @@ export interface SessionController {
   footer: SessionFooterData;
   elapsedMs: number;
   /**
-   * TICKET 049 — true once translated audio could not be sounded because
-   * the AudioContext could not be constructed. A SURFACED, non-fatal state: the
+   * TICKET 049 — true while translated audio cannot be sounded because the
+   * AudioContext could not be constructed. A SURFACED, non-fatal state: the
    * session keeps running and keeps measuring; only the sound is missing.
+   *
+   * ROUND 2 — "while", not "once". This is the latch GATED by the session on
+   * screen: false for a realtime session (whose audio is audible on the
+   * `remoteAudioSink` element) and false once the session has stopped, because
+   * the notice's own copy would be a lie in both. See `playbackNotice`.
    */
   playbackUnavailable: boolean;
   /**
@@ -295,6 +300,19 @@ interface ControllerStore {
   level: number;
   /** Metrics-only utterance rows for the saved LiveSession (NO audio). */
   utterances: LiveSessionUtterance[];
+  /**
+   * TICKET 049 R2-3 — the BROWSER'S own words for the playback failure,
+   * `${name}: ${message}`. It exists ONLY on the error `onPlaybackUnavailable`
+   * carries, which is what makes that seam load-bearing: `onAudio` bumps the
+   * render either way, so without this the wiring could be deleted unnoticed.
+   */
+  playbackFailureReason: string | null;
+}
+
+/** The browser's own words, never ours. */
+function describePlaybackError(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  return String(error);
 }
 
 export function useSessionController(deps: SessionDeps): SessionController {
@@ -333,7 +351,14 @@ export function useSessionController(deps: SessionDeps): SessionController {
       // state, never a silent swallow and never a thrown error out of the
       // transport's onAudio callback. Re-render so LiveView raises the notice;
       // nothing about the session, the ledger or the timings changes.
-      onPlaybackUnavailable: () => bump(),
+      //
+      // ROUND 2 (R2-3) — and CAPTURE THE BROWSER'S REASON. This callback is the
+      // only place the error object exists, so the reason row on screen is what
+      // makes this wiring load-bearing rather than decorative.
+      onPlaybackUnavailable: (error) => {
+        store.playbackFailureReason = describePlaybackError(error);
+        bump();
+      },
     };
     const store: ControllerStore = {
       router: new TransportRouter(),
@@ -353,6 +378,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
       disconnects: 0,
       level: 0,
       utterances: [],
+      playbackFailureReason: null,
     };
     storeRef.current = store;
 
@@ -715,6 +741,14 @@ export function useSessionController(deps: SessionDeps): SessionController {
       const now = depsRef.current.now();
       store.runId = `session-${now}`;
       resetSessionStore();
+      // TICKET 049 R2-6 — a new session is the operator saying "try again", and
+      // it is the ONLY place the playback latch is dropped. A context cap frees
+      // when some other context closes and Safari's policy state changes, so a
+      // transient failure must not require reloading the tab; but `reset()` —
+      // the next utterance — still retries nothing, because between two
+      // sentences of one session nothing has changed.
+      store.playback.clearPlaybackFailure();
+      store.playbackFailureReason = null;
       store.router.stop();
       store.transportKey = null;
       dispatch({ type: 'NEW_SESSION', now });
@@ -793,6 +827,27 @@ export function useSessionController(deps: SessionDeps): SessionController {
   const elapsedMs =
     state.startedAt === null ? 0 : (state.stoppedAt ?? depsRef.current.now()) - state.startedAt;
 
+  /**
+   * TICKET 049 ROUND 2 — the notice must not outlive the thing it describes.
+   * The latch says "a chunk was dropped"; whether that is still TRUE OF THE
+   * SESSION ON SCREEN is a separate question, and it is answered here rather
+   * than in the view because it is made of session facts the controller owns.
+   *
+   * - `mode === 'cascade'` (R2-1). Live's mode buttons are never disabled and a
+   *   switch at 'ready' applies immediately. Realtime audio rides the
+   *   `remoteAudioSink` element and is AUDIBLE, so the notice is simply false
+   *   there. This is a GATE, not a latch reset: switching back to cascade must
+   *   restore it, because the context is still unbuildable and cascade audio is
+   *   still silent. (Clearing the latch on a mode switch loses it for good.)
+   * - a STOPPABLE status (R2-2). The copy says the session "is still running
+   *   and still being measured"; once status is 'stopped' or 'idle' that is a
+   *   falsehood, and the stopped summary is what the operator reads instead.
+   */
+  const playbackNotice =
+    store.playback.playbackUnavailable &&
+    state.mode === 'cascade' &&
+    STOPPABLE_STATUSES.includes(state.status);
+
   return {
     state,
     sourceText: store.sourceText,
@@ -802,8 +857,8 @@ export function useSessionController(deps: SessionDeps): SessionController {
     target: store.target,
     footer,
     elapsedMs,
-    playbackUnavailable: store.playback.playbackUnavailable,
-    playbackUnavailableReason: null,
+    playbackUnavailable: playbackNotice,
+    playbackUnavailableReason: playbackNotice ? store.playbackFailureReason : null,
     actions,
   };
 }

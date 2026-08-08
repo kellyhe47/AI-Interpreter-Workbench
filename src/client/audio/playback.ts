@@ -53,6 +53,10 @@
  *   `onPlaybackUnavailable` exactly once per instance, across chunks and
  *   across reset()s;
  * - play() never reports (see its own comment).
+ * ROUND 2 — "once" means once per FAILURE, not once per page:
+ * `clearPlaybackFailure()` drops the latch so the next attempt is made afresh.
+ * The controller calls it from `newSession` only; `reset()` still clears none
+ * of it.
  * ==========================================================================
  */
 
@@ -150,11 +154,26 @@ export class ArmPlayback {
   }
 
   /**
-   * TICKET 049 ROUND 2 (STUB — see playback.degraded.test.ts) — drop the
-   * one-shot latch so the next enqueue attempts the factory again. Called by
-   * the controller from `newSession` ONLY, never from `reset()`.
+   * TICKET 049 ROUND 2 (R2-6) — drop the one-shot latch so the next enqueue
+   * attempts the factory again. Called by the controller from `newSession`
+   * ONLY, never from `reset()`.
+   *
+   * The failure this class latches is not always permanent: a per-document
+   * context cap frees when some other context closes, and Safari's policy
+   * state changes. Without this the only cure was reloading the tab. Between
+   * two sentences of ONE session, though, nothing has changed — which is why
+   * `reset()` still clears none of it (retrying there is one throw per 20 ms
+   * frame).
+   *
+   * `reported` is cleared too, so a NEW failure in the new session is reported
+   * afresh rather than leaving the operator reading a stale reason.
    */
-  clearPlaybackFailure(): void {}
+  clearPlaybackFailure(): void {
+    this.contextFailed = false;
+    this.contextError = null;
+    this.unavailable = false;
+    this.reported = false;
+  }
 
   /** TICKET 049 — true once a chunk was dropped for want of a context. */
   get playbackUnavailable(): boolean {
@@ -233,11 +252,14 @@ export class ArmPlayback {
     // suspended context; a realtime session then enqueues nothing, so saying
     // "no audio output" here would slander a perfectly audible session. The
     // first chunk that is actually dropped reports instead.
+    //
+    // ROUND 2 (R2-4) — and it discards NOTHING. A queue can only exist if a
+    // context was built, and a built context is cached, so there is nothing
+    // here to drop; clearing `buffered` on this branch would read as "throw
+    // the queued audio away and say nothing", the one thing this ticket
+    // forbids. The honest failure path is a bare return.
     const ctx = this.getContext();
-    if (ctx === null) {
-      this.buffered = [];
-      return;
-    }
+    if (ctx === null) return;
     void ctx.resume();
     const pending = this.buffered;
     this.buffered = [];

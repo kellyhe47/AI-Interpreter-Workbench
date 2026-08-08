@@ -1097,6 +1097,18 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
             >
               No audio output — this browser refused a new audio context. The session is still
               running and still being measured; only the sound is missing.
+              {/* The BROWSER'S own words, not ours — this is what tells the
+                  operator a filled context cap apart from a policy refusal. It
+                  reaches the view only through the controller's
+                  `onPlaybackUnavailable` callback (ticket 049 R2-3). */}
+              {controller.playbackUnavailableReason !== null && (
+                <div
+                  data-playback-notice-reason
+                  style={{ ...monoStyle, color: 'var(--text-muted)', marginTop: 6 }}
+                >
+                  {controller.playbackUnavailableReason}
+                </div>
+              )}
             </div>
           )}
         </>

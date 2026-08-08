@@ -369,11 +369,18 @@ export function buildReplayDeps(): ReplayDeps {
     // ON DEMAND ONLY. Fetches the stored WAV and plays it through the bag's ONE
     // reused context (ticket 049); nothing in Replay ever autoplays, so this is
     // reachable from a click and from nowhere else.
-    playRun: (runId: string): void => {
+    // TICKET 049 ROUND 2 (R2-5) — `onUnavailable` is how a press that produced
+    // NO SOUND says why. Reuse fixed the leak and, on its own, made the failure
+    // quieter: before it `playTake` threw out of the click handler and at least
+    // reached the console; after it a press whose context cannot be built is a
+    // silent no-op, indistinguishable from a run whose stored audio is empty —
+    // which is a real diagnosis the operator makes on this screen.
+    playRun: (runId: string, onUnavailable?: (error: unknown) => void): void => {
       void runs.getAudio(runId).then((bytes) => {
         const playback = new ArmPlayback({
           audioContextFactory: replayPlaybackContextFactory,
           autoplay: false,
+          onPlaybackUnavailable: onUnavailable,
         });
         playback.enqueue(readWav(bytes).samples);
         playback.play();
@@ -394,10 +401,11 @@ export function buildReplayDeps(): ReplayDeps {
     segmentTake,
     // ON DEMAND ONLY, like playRun: the same ONE reused context, never at
     // render.
-    playTake: (take: RecordedTake): void => {
+    playTake: (take: RecordedTake, onUnavailable?: (error: unknown) => void): void => {
       const playback = new ArmPlayback({
         audioContextFactory: replayPlaybackContextFactory,
         autoplay: false,
+        onPlaybackUnavailable: onUnavailable,
       });
       playback.enqueue(take.samples);
       playback.play();
