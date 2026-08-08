@@ -87,8 +87,31 @@
 
 import type { RunOrigin } from '../../core/protocol';
 import type { RunsClient } from '../replay/recordingsClient';
-import { runOnce, type RunOnceConfig, type RunOnceResult, type RunnerDeps } from '../replay/runner';
+import {
+  abandonedRunStub,
+  runOnce,
+  type RunOnceConfig,
+  type RunOnceResult,
+  type RunnerDeps,
+} from '../replay/runner';
 import type { Run } from '../state/ledger';
+
+/**
+ * TICKET 048 ROUND 2 — the abort REASON the per-run budget raises, so a listener
+ * downstream can tell "the sweep gave up on this attempt" from "the operator
+ * stopped the sweep".
+ *
+ * The two must not be conflated: an abandoned attempt leaves a hole in the
+ * provenance denominator that has to be filled with a failed Run (see
+ * `createRunOnceExecutor`), whereas a CANCELLED run is deliberately never
+ * POSTed at all — "a cancelled sweep is a short sweep, not a discarded one", and
+ * a stored failure would be the sweep blaming the pipeline for the operator's
+ * decision.
+ */
+export const RUN_BUDGET_EXCEEDED = 'run-budget-exceeded';
+
+/** The reason a stub carries: the attempt was abandoned, not measured. */
+export const RUN_ABANDONED = 'run abandoned: the sweep exceeded its per-run budget';
 
 /** One selectable configuration in the sweep matrix. */
 export interface BatchConfiguration {
@@ -330,9 +353,13 @@ export function startBatch(options: BatchOptions): BatchHandle {
         origin: cell.warmup ? 'manual' : 'sweep',
         signal: controller.signal,
       });
-      // An abandoned attempt usually fails on its own long afterwards. Without a
-      // handler of its own that late failure is an unhandled rejection per
-      // bounded-out run.
+      // An abandoned attempt usually fails on its own long afterwards. What keeps
+      // that from being an unhandled rejection is the SHAPE below — `pending` is
+      // an operand of the race, and `Promise.race` attaches a rejection handler
+      // to every operand. ROUND 2 (R2-6): this line is belt-and-braces against a
+      // future refactor away from `race`; it is not what makes today's version
+      // safe. What WOULD leak is a fulfilment-only bound (`pending.then(...)`
+      // beside a bare timer), which is the shape this deliberately avoids.
       void pending.catch(() => undefined);
 
       const raced = await Promise.race([
@@ -340,7 +367,10 @@ export function startBatch(options: BatchOptions): BatchHandle {
         new Promise<{ value?: undefined }>((resolve) => {
           timer = setTimeout(() => {
             timedOut = true;
-            controller.abort();
+            // ROUND 2 — the reason is load-bearing: it is what tells the executor
+            // this attempt was ABANDONED (and so owes the ledger a failed Run)
+            // rather than CANCELLED (which is never stored).
+            controller.abort(RUN_BUDGET_EXCEEDED);
             resolve({});
           }, runTimeoutMs);
         }),
@@ -520,8 +550,53 @@ export function startBatch(options: BatchOptions): BatchHandle {
 export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
   return async (request: BatchExecutorRequest): Promise<RunOnceResult> => {
     let stamped: Run | undefined;
+    /** True once SOMETHING has been written for this execution — real or stub. */
+    let wrote = false;
+
+    // TICKET 048 ROUND 2 (R2-3) — A REP THE BUDGET ABANDONS STILL OWES THE
+    // LEDGER A ROW.
+    //
+    // `derive.ts` builds `intendedReps` from the distinct `annotations.repIndex`
+    // over the arm's sweep Runs of ANY status, so a rep abandoned before
+    // `runOnce` produced a Run at all is absent from the DENOMINATOR and a sweep
+    // that lost rep 2 renders "2 of 2 reps completed" — provenance reporting a
+    // lossy sweep as clean. The stub carries the real arm, the real rep index
+    // and `status: 'failed'`, so it counts as attempted and is kept out of every
+    // figure by `isAggregatableRun`'s existing status clause and nothing else.
+    //
+    // WRITTEN FROM THE ABORT, NOT AFTER `await runOnce(...)`. The abandoning
+    // cases include seams that never answer at all (a `recordings.getAudio` that
+    // hangs), so a stub written on return would never be written.
+    //
+    // ONLY FOR THE BUDGET'S OWN ABORT. A cancelled run is deliberately never
+    // POSTed, and a failure row for it would be the sweep blaming the pipeline
+    // for the operator's decision.
+    const onAbandoned = (): void => {
+      if (request.signal.reason !== RUN_BUDGET_EXCEEDED) return;
+      if (wrote) return;
+      wrote = true;
+      const stub: Run = {
+        ...abandonedRunStub({
+          id: deps.newId(),
+          recordingId: request.recordingId,
+          config: request.config,
+          createdAt: deps.now(),
+          reason: RUN_ABANDONED,
+        }),
+        origin: request.origin,
+        annotations: { repIndex: request.repIndex },
+      };
+      // Fire and forget, and never allowed to reject: the attempt it belongs to
+      // has already been written off, so a store that refuses the stub must not
+      // surface as an unhandled rejection in an unattended sweep.
+      void Promise.resolve(deps.runs.create(stub)).catch(() => undefined);
+    };
+    if (request.signal.aborted) onAbandoned();
+    else request.signal.addEventListener('abort', onAbandoned, { once: true });
+
     const runs: RunsClient = {
       create: async (run: Run) => {
+        wrote = true;
         stamped = {
           ...run,
           origin: request.origin,

@@ -117,6 +117,36 @@
  * with no `corpusVersion` key at all: the ledger is append-only, so inventing a
  * version here would write a claim the corpus never made and it could never be
  * retracted.
+ *
+ * ------------------- TICKET 048: WHICH WAITS ARE BOUNDED, AND WHY ----------
+ * `runOnce` bounds the three waits in the TAIL of a run — after the last point
+ * at which a caller could still be watching a progress bar and after the
+ * measurement is (or has failed to become) real:
+ *
+ *   `finished`          RUN_COMPLETION_TIMEOUT_MS   FATAL — see the constant
+ *   `transport.stop()`  TRANSPORT_CLOSE_TIMEOUT_MS  costs a leaked context (046)
+ *   `runs.uploadAudio`  AUDIO_UPLOAD_TIMEOUT_MS     costs the artifact (045)
+ *
+ * THE REMAINING AWAITS ARE DELIBERATELY LEFT TO `runTimeoutMs`, not overlooked:
+ * `recordings.get`, `recordings.getAudio`, `transport.start()` and the final
+ * `runs.create`. Each is a SETUP or a STORE call whose failure has no run-level
+ * verdict to record — a run that never got its audio has no measurement to keep
+ * honest and no Run to write, so a fourth and fifth ad-hoc deadline here would
+ * buy nothing that `startBatch`'s per-run budget does not already buy, and would
+ * add two more numbers to keep ordered against it. ROUND 2 made that delegation
+ * real in both directions: the budget now RACES the attempt rather than merely
+ * aborting a signal, `runOnce` re-reads `signal` after every bounded wait so an
+ * abandoned attempt stops writing and gives its transport back, and the batch
+ * executor persists a FAILED stub for a rep abandoned before any Run existed so
+ * the provenance denominator still counts it.
+ *
+ * A LATE ABORT IS A CANCELLATION, NOT A TIMEOUT. `cancelled` is re-read at every
+ * bounded wait rather than snapshotted once after pacing: an abort raised while
+ * the run is parked on `finished` or on its upload means the CALLER stopped
+ * waiting, so the run uploads nothing further and POSTs nothing at all. A Run
+ * written after that point is a second, aggregatable sample of a repetition the
+ * sweep has already retried — silent double-weighting that `derive.ts`'s
+ * distinct-repIndex provenance would report as clean.
  * ==========================================================================
  */
 
@@ -198,11 +228,24 @@ export const TRANSPORT_CLOSE_TIMEOUT_MS = 2_000;
  *
  * `runs.uploadAudio` is a bare browser `fetch` with no timeout, so a server that
  * accepts the connection and never answers hangs the run forever — and nothing
- * races it (`startBatch`'s `runTimeoutMs` only aborts a signal `runOnce` reads
- * nowhere after pacing). This is the ARTIFACT side-effect, not the measurement:
- * giving up on it must cost the bytes and never the run.
+ * races it (`startBatch`'s `runTimeoutMs` bounds the ATTEMPT, not this wait).
+ * This is the ARTIFACT side-effect, not the measurement: giving up on it must
+ * never cost the run's numbers.
+ *
+ * ROUND 2 (R2-4) — 30 s, NOT 10 s. The output WAV is 24 kHz mono PCM16 (48 kB/s),
+ * so a 45 s PRD §9 take is ~2.2 MB; clearing that inside 10 s demands ~1.7 Mbps
+ * SUSTAINED, which is free against a localhost dev server and marginal against
+ * the planned EC2 deploy. A budget that expires on HEALTHY uploads is worse than
+ * no budget, because it fails silently.
+ *
+ * AND WHAT IT COSTS IS NOT "THE BYTES". A Run with no stored output audio is
+ * ineligible for BLIND COMPARE, which is playback-only — so an upload budget
+ * tuned for localhost quietly shrinks the pool the pairwise judgements can draw
+ * from. That is a PRD §8 deliverable, not a cache. The latency figures survive
+ * (which is why this deadline is still not fatal), but the qualitative half of
+ * the experiment loses samples it can never get back from an append-only ledger.
  */
-export const AUDIO_UPLOAD_TIMEOUT_MS = 10_000;
+export const AUDIO_UPLOAD_TIMEOUT_MS = 30_000;
 
 /**
  * TICKET 048 — how long a run waits on `finished` before declaring the
@@ -326,9 +369,15 @@ const DEADLINE: unique symbol = Symbol('deadline');
  *
  * - A THUNK, not a promise (R4-2): the CALL is inside the caller's guard too, so
  *   a seam that throws synchronously is handled like one that rejects.
- * - THE ABANDONED PROMISE KEEPS A REJECTION HANDLER. A `fetch` the deadline gave
- *   up on typically fails on its own much later; without this that becomes an
- *   unhandled rejection per run, i.e. 60 of them in a sweep.
+ * - THE SHAPE IS WHAT KEEPS AN ABANDONED PROMISE FROM LEAKING. A `fetch` the
+ *   deadline gave up on typically fails on its own much later; that is only an
+ *   unhandled rejection if nothing is listening. `Promise.race` attaches a
+ *   rejection handler to EVERY operand, so passing `pending` in directly is the
+ *   guarantee — what would leak is a fulfilment-only bound
+ *   (`pending.then(resolve)` beside a timer), which is precisely the shape this
+ *   avoids. ROUND 2 (R2-6): the explicit `void pending.catch()` below is
+ *   BELT-AND-BRACES against a future refactor away from `race`; it is not what
+ *   makes today's version safe, and deleting it changes nothing.
  * - THE TIMER IS CLEARED ON EVERY PATH, rejection included. A race that leaves
  *   its handle armed is a live timer per run and a fake-timer teardown that lies
  *   about what is still pending.
@@ -338,6 +387,7 @@ async function withDeadline<T>(
   timeoutMs: number,
 ): Promise<T | typeof DEADLINE> {
   const pending = begin();
+  // Belt-and-braces only — the race below already listens for this rejection.
   void pending.catch(() => undefined);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -350,6 +400,87 @@ async function withDeadline<T>(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/**
+ * TICKET 048 ROUND 2 (R2-1/R2-2) — settles when `pending` settles OR when the
+ * caller gives up, whichever comes first.
+ *
+ * `runOnce` used to read `signal` exactly once, immediately after pacing, and
+ * every decision downstream keyed on that SNAPSHOT — so an abort raised later,
+ * which is exactly what `startBatch`'s budget raises when it abandons an
+ * attempt, was invisible. The abandoned run then held its transport (for Arm A,
+ * two AudioContexts) beside the retry's own for the rest of its completion
+ * budget, and finished by POSTing a Run the sweep had already written off.
+ *
+ * Making the abort an OPERAND of the wait — rather than a third gate bolted on
+ * after it — is what lets the run honour a late abort at its next await: the
+ * caller recomputes `cancelled` once the wait returns, and that single re-read
+ * covers the upload skip, the POST gate and the reported `cancelled` alike.
+ */
+function untilSettledOrAborted(pending: Promise<unknown>, signal?: AbortSignal): Promise<true> {
+  if (signal === undefined) return pending.then(() => true as const);
+  if (signal.aborted) return Promise.resolve(true as const);
+  return new Promise<true>((resolve) => {
+    const onAbort = (): void => resolve(true);
+    signal.addEventListener('abort', onAbort, { once: true });
+    void pending.then(
+      () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(true);
+      },
+      () => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(true);
+      },
+    );
+  });
+}
+
+/**
+ * TICKET 048 ROUND 2 (R2-3) — the Run a caller writes for an execution it
+ * ABANDONED before `runOnce` could produce one of its own.
+ *
+ * `startBatch`'s budget can abandon an attempt arbitrarily early — a
+ * `recordings.getAudio` that never answers means the run never reaches a Run at
+ * all. Round 1 recorded that as harmless ("there is no Run, so nothing needs
+ * excluding"), which is true of the NUMERATOR and wrong about the DENOMINATOR:
+ * `derive.ts` builds `intendedReps` from the distinct `annotations.repIndex` over
+ * the arm's sweep Runs of ANY status, so a rep that produced no Run is absent
+ * from what the sweep claims to have attempted and a sweep that lost rep 2
+ * renders "2 of 2 reps completed". That is provenance reporting a lossy sweep as
+ * clean — the failure AGENTS.md names verbatim.
+ *
+ * IT IS EXCLUDED BY THE EXISTING GATE AND NOTHING ELSE. `status: 'failed'` is
+ * the whole mechanism; flip it and `isAggregatableRun` changes its mind. The
+ * derived arm, the provider triple and the model snapshots are real so the stub
+ * lands in the RIGHT arm's denominator — a stub that derived 'ad-hoc' would be
+ * invisible in exactly the way this exists to fix.
+ */
+export function abandonedRunStub(args: {
+  id: string;
+  recordingId: string;
+  config: RunOnceConfig;
+  createdAt: number;
+  reason: string;
+}): Run {
+  const config = resolveConfig(args.config);
+  return {
+    id: args.id,
+    recordingId: args.recordingId,
+    architecture: config.architecture,
+    providerTriple: config.providers,
+    modelSnapshots: modelSnapshotsFor(config),
+    armTag: deriveArmTag(config),
+    // The caller stamps the origin it ran under, exactly as it stamps a real one.
+    origin: 'manual',
+    status: 'failed',
+    timings: {},
+    transcripts: {},
+    cost: 0,
+    errors: [args.reason],
+    createdAt: args.createdAt,
+  };
 }
 
 /**
@@ -731,7 +862,11 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   if (failed) pacer.cancel();
   await pacer.start();
 
-  const cancelled = signal?.aborted ?? false;
+  // TICKET 048 ROUND 2 (R2-1) — a SNAPSHOT, and deliberately re-taken below.
+  // Every later decision (upload, POST, the reported verdict) reads the signal
+  // again at the instant it decides, because an abort raised after this line is
+  // the caller writing this attempt off.
+  let cancelled = signal?.aborted ?? false;
   // TICKET 031 — the idle deadline is armed HERE, once the clip has finished
   // playing, so it caps the WAIT for outstanding completions and can never
   // truncate pacing. Manifest-backed runs only: a mic run's termination is
@@ -766,15 +901,23 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // IT IS ITS OWN BUDGET, NOT A WRAPPER. The close deadline below runs after it
   // IN SERIES rather than nested inside it, so a run wedged on both pays both
   // and neither budget silently absorbs the other.
+  //
+  // ROUND 2 (R2-1/R2-2) — AND THE ABORT IS AN OPERAND OF IT, so a caller that
+  // gives up while the run is parked here gets the transport back at its next
+  // await instead of at this budget's end. An aborted wait is a CANCELLATION,
+  // never a timeout: no named reason is recorded for it.
   if (!cancelled && !failed) {
     const completed = await withDeadline(
-      () => finished.then(() => true as const),
+      () => untilSettledOrAborted(finished, signal),
       RUN_COMPLETION_TIMEOUT_MS,
     );
     if (completed === DEADLINE) {
       failed = true;
       errors.push(`${RUN_COMPLETION_TIMED_OUT} after ${RUN_COMPLETION_TIMEOUT_MS} ms`);
     }
+    // THE RE-READ. One line, covering the upload skip, the POST gate and the
+    // verdict this run reports — not three gates that could drift apart.
+    cancelled = signal?.aborted ?? false;
   }
   // Belt and braces for the paths that never awaited `finished` at all.
   disarm();
@@ -868,8 +1011,6 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const markedAudioQueued = typeof timings.audio_queued === 'number' ? timings.audio_queued : null;
   timings.audio_queued = firstAudioAt ?? markedAudioQueued;
 
-  if (cancelled) errors.push('run cancelled');
-
   // TICKET 031 — segmentation is checked in BOTH directions, and a disagreement
   // is a run-level failure with NO partial attribution: a run whose segmentation
   // disagrees with the manifest is not evidence. A cancelled run is exempt —
@@ -902,6 +1043,17 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     skip: cancelled,
     errors,
   });
+
+  // TICKET 048 ROUND 2 (R2-1) — THE LAST RE-READ, at the instant the decision to
+  // WRITE is taken. The upload is the longest wait left in a run, so an abort
+  // very often lands inside it; a run that treated "I already have the numbers"
+  // as licence to POST would put a second aggregatable sample of this repetition
+  // in an append-only ledger beside the one its retry writes.
+  cancelled = cancelled || (signal?.aborted ?? false);
+  // Recorded HERE rather than earlier so a late cancellation says so too. It is
+  // ordered after the upload line for the same reason, and the two can only
+  // co-occur on this late path — a run cancelled before the upload skips it.
+  if (cancelled) errors.push('run cancelled');
 
   const run: Run = {
     id,
