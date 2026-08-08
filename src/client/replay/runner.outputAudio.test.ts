@@ -20,10 +20,12 @@
  * itself, and the play control must gate on audio actually existing), so it is
  * inverted here deliberately.
  *
- * SCOPE IS CASCADE. Arm A's audio arrives on the WebRTC media track and
- * `onAudio` never fires, so `audioChunks` is empty and there is nothing to
- * upload — ticket 046. Nothing here fakes it; the "produced no audio" case
- * below is exactly what an Arm A run looks like today.
+ * SCOPE IS CASCADE — the `onAudio` path. Arm A's audio arrives on the WebRTC
+ * media track and never reaches `onAudio` at all; ticket 046 captures it through
+ * a separate transport seam (`takeOutputAudio`) and is pinned in
+ * replayArmA.test.ts. Nothing here fakes that seam, so the "produced no audio"
+ * case below stays what it always was: a transport that yielded no samples by
+ * EITHER route uploads nothing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 

@@ -1263,6 +1263,11 @@ describe('runOnce — Arm A audio_queued survives when audio rides the media tra
     expect(samples[0]!.arm).toBe('A');
   });
 
+  // TICKET 046 NOTE: still true, and still about the DATA CHANNEL. A transport
+  // with no capture seam (FixtureTransport has none) yields no samples; Arm A's
+  // real media-track capture rides `takeOutputAudio` and is pinned in
+  // replayArmA.test.ts, deliberately away from the `onAudio` path that stamps
+  // `audio_queued`.
   it('the run still buffers no PCM — nothing on the data channel carried audio', async () => {
     const h = makeHarness({ kind: 'realtime', script: trackAudioScript() });
     const done = start(h, REALTIME_CONFIG);

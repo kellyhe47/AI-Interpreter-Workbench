@@ -23,10 +23,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { REALTIME_MODEL } from '../../core/arms';
 import type { CorpusUtterance } from '../../core/corpus';
 import { SAMPLE_RATE } from '../../core/protocol';
-import { writeWav } from '../../harness/wav';
+import { readWav, writeWav } from '../../harness/wav';
 import type { Recording, Run } from '../state/ledger';
 import {
   RealtimeTransport,
+  type InboundAudioTap,
   type OutboundAudioSink,
   type RtcDataChannelLike,
   type RtcPeerConnectionLike,
@@ -72,6 +73,9 @@ const clip = Int16Array.from({ length: (SAMPLE_RATE * DURATION_MS) / 1000 }, (_,
   Math.round(8000 * Math.sin(i / 12)),
 );
 
+/** The model's inbound stream — the only place Arm A's output audio exists. */
+const REMOTE_STREAM = { tag: 'remote', getAudioTracks: () => [{ kind: 'audio' }] };
+
 /** A peer connection fake with the production media surface. */
 class E2ePc implements RtcPeerConnectionLike {
   channel: FakeChannel | null = null;
@@ -87,7 +91,14 @@ class E2ePc implements RtcPeerConnectionLike {
     return { type: 'offer', sdp: 'v=0 offer' };
   }
   async setLocalDescription(): Promise<void> {}
-  async setRemoteDescription(): Promise<void> {}
+  /**
+   * TICKET 046 — applying the answer is what creates the receiver, so the
+   * model's audio track arrives HERE, exactly as a real RTCPeerConnection
+   * raises it (see FakeTrackPc in transport/realtime.test.ts).
+   */
+  async setRemoteDescription(): Promise<void> {
+    this.ontrack?.({ track: { kind: 'audio' }, streams: [REMOTE_STREAM] });
+  }
   addTrack(track: unknown): unknown {
     this.added.push(track);
     return {};
@@ -133,9 +144,24 @@ function fakeFetch(): typeof fetch {
   }) as typeof fetch;
 }
 
+/** Samples the fake model puts on the media track per answered utterance. */
+const TRACK_SAMPLES_PER_UTTERANCE = 6;
+
 interface ArmAHarnessOptions {
   /** Frames the model needs before it responds at all. Default: every frame. */
   deaf?: boolean;
+  /**
+   * TICKET 046 — omit `createInboundAudioTap` entirely, i.e. the shipped Arm A:
+   * the model's audio rides the track and nothing captures it.
+   */
+  noTap?: boolean;
+  /**
+   * TICKET 046 falsifiability control — the model answers on the DATA CHANNEL
+   * exactly as always, but puts NOTHING on the media track. Captured audio must
+   * then be empty. If a run still uploads bytes here, the capture is coming from
+   * a timer or from the connect, not from the model's audio.
+   */
+  mute?: boolean;
 }
 
 function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
@@ -144,6 +170,14 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
   /** Every paced frame the outbound sink received, with its virtual clock. */
   const written: { length: number; at: number }[] = [];
   const sinks: { closed: number }[] = [];
+  /** TICKET 046 — the inbound taps built, and what the track carried. */
+  const taps: { attached: unknown[]; closed: number }[] = [];
+  const trackAudio: number[] = [];
+  /** Clock at each `output_audio_buffer.started` the model sent. */
+  const queuedAt: number[] = [];
+  /** What `uploadAudio` was given, by run id. */
+  const uploads: { id: string; wav: Uint8Array }[] = [];
+  const stored = new Map<string, Uint8Array>();
 
   const recordings: RecordingsClient = {
     list: async () => [RECORDING],
@@ -159,9 +193,15 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
       return run;
     },
     list: async () => posted,
-    getAudio: async () => new Uint8Array(0),
-    // TICKET 045 — the output-audio upload seam; these suites produce no assertions on it.
-    uploadAudio: async (id: string) => ({ id, outputAudioPath: `runs/${id}.out.wav`, bytes: 0 }),
+    // TICKET 046 — a REAL read-back: GET /api/runs/:id/audio must return the
+    // very bytes the run uploaded, or "Arm A produces capturable output" is
+    // only a claim about a function call.
+    getAudio: async (id: string) => stored.get(id) ?? new Uint8Array(0),
+    uploadAudio: async (id: string, wavBytes: Uint8Array) => {
+      uploads.push({ id, wav: wavBytes });
+      stored.set(id, wavBytes);
+      return { id, outputAudioPath: `runs/${id}.out.wav`, bytes: wavBytes.length };
+    },
   };
 
   /**
@@ -178,7 +218,15 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
     if (heard < boundaryFrames) return;
     answered += 1;
     channel.emit({ type: 'input_audio_buffer.speech_stopped' });
+    queuedAt.push(Date.now());
     channel.emit({ type: 'output_audio_buffer.started' });
+    // TICKET 046 — and THE AUDIO ITSELF, on the media track and nowhere else.
+    // There is no `response.output_audio.delta` on this transport (040).
+    if (opts.mute !== true) {
+      for (let i = 0; i < TRACK_SAMPLES_PER_UTTERANCE; i++) {
+        trackAudio.push(i % 2 === 0 ? answered * 100 + i : -(answered * 100 + i));
+      }
+    }
     channel.emit({
       type: 'response.output_audio_transcript.done',
       transcript: `translation ${answered}`,
@@ -214,6 +262,24 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
             },
           };
         },
+        // TICKET 046 — the INBOUND capture seam. jsdom has no AudioContext and
+        // no MediaStream, so this is the injected recorder; the production one
+        // is audio/inboundAudio.ts and is tested there.
+        ...(opts.noTap === true
+          ? {}
+          : {
+              createInboundAudioTap: (): InboundAudioTap => {
+                const entry = { attached: [] as unknown[], closed: 0 };
+                taps.push(entry);
+                return {
+                  attach: (stream: unknown) => entry.attached.push(stream),
+                  take: () => Int16Array.from(trackAudio),
+                  close: () => {
+                    entry.closed += 1;
+                  },
+                };
+              },
+            }),
       },
     );
   };
@@ -226,17 +292,25 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
     newId: () => 'run-arm-a',
   };
 
-  return { deps, posted, pcs, written, sinks };
+  return { deps, posted, pcs, written, sinks, taps, trackAudio, queuedAt, uploads, runs };
 }
+
+/** TICKET 046 — nothing in Replay autoplays, so nothing may build a context. */
+let audioContextSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(0);
+  audioContextSpy = vi.fn();
+  (globalThis as Record<string, unknown>).AudioContext = audioContextSpy;
+  (globalThis as Record<string, unknown>).webkitAudioContext = audioContextSpy;
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  delete (globalThis as Record<string, unknown>).AudioContext;
+  delete (globalThis as Record<string, unknown>).webkitAudioContext;
 });
 
 describe('Replay Arm A end to end (ticket 043)', () => {
@@ -306,5 +380,147 @@ describe('Replay Arm A end to end (ticket 043)', () => {
     expect(result.run.timings.audio_queued).toBeNull();
     expect(result.run.status).toBe('failed');
     expect(result.run.utterances).toBeUndefined();
+  });
+});
+
+/* ===========================================================================
+ * TICKET 046 — Arm A must produce CAPTURABLE output audio.
+ *
+ * 045 gave runs an upload path, which fixed cascade playback and could not fix
+ * Arm A: over WebRTC the model's audio is on the media track only, so `onAudio`
+ * never fires, `outputAudio.length === 0`, there is nothing to upload and blind
+ * compare — playback-only by design (PRD §10) — has nothing to play for any
+ * pair involving Arm A.
+ *
+ * The fake model above now puts its audio EXACTLY where the real one does: on
+ * the track, never on the data channel.
+ * ======================================================================== */
+
+/** Every sample the fake model put on the track, as the run should have stored. */
+const capturedFor = (h: ReturnType<typeof makeArmAHarness>): number[] => [...h.trackAudio];
+
+describe('Replay Arm A output audio is captured and stored (ticket 046)', () => {
+  it('produces NON-EMPTY output audio, uploads it, and GET /api/runs/:id/audio returns it', async () => {
+    const h = makeArmAHarness();
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    // The tap saw the one inbound stream the connection produced.
+    expect(h.taps).toHaveLength(1);
+    expect(h.taps[0]!.attached).toEqual([REMOTE_STREAM]);
+
+    // THE criterion: Arm A produced audio.
+    expect(result.outputAudio.length).toBeGreaterThan(0);
+    expect(Array.from(result.outputAudio)).toEqual(capturedFor(h));
+    expect(result.audioReady).toBe(true);
+
+    // ...uploaded by 045's path, before the Run was POSTed...
+    expect(h.uploads).toHaveLength(1);
+    expect(h.uploads[0]!.id).toBe(result.run.id);
+    expect(result.run.outputAudioPath).toBe(`runs/${result.run.id}.out.wav`);
+    expect(h.posted[0]!.outputAudioPath).toBe(result.run.outputAudioPath);
+
+    // ...and readable back out.
+    const fetched = await h.runs.getAudio(result.run.id);
+    expect(fetched.length).toBeGreaterThan(0);
+    expect(Array.from(readWav(fetched).samples)).toEqual(capturedFor(h));
+  });
+
+  it('the stored audio is 24 kHz PCM16 MONO — cascade format, indistinguishable in blind compare', async () => {
+    const h = makeArmAHarness();
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    const decoded = readWav(await h.runs.getAudio(result.run.id));
+    expect(decoded.rate).toBe(SAMPLE_RATE);
+    expect(SAMPLE_RATE).toBe(24_000);
+    // Int16Array IS the PCM16 mono claim: one channel, 16 bits, in order.
+    expect(decoded.samples).toBeInstanceOf(Int16Array);
+    expect(Array.from(decoded.samples)).toEqual(capturedFor(h));
+  });
+
+  it('CAPTURE DOES NOT MOVE THE MEASUREMENT: audio_queued is byte-identical to the same run with no tap', async () => {
+    // `audio_queued` comes from `output_audio_buffer.started` (040), not from
+    // bytes. A tap that routed its samples through `onAudio` would silently
+    // re-anchor Arm A's headline latency to the moment audio was DECODED.
+    const tapped = makeArmAHarness();
+    const tappedDone = runOnce({
+      recordingId: RECORDING.id,
+      config: REALTIME_CONFIG,
+      deps: tapped.deps,
+    });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const withTap = await tappedDone;
+
+    vi.setSystemTime(0);
+    const plain = makeArmAHarness({ noTap: true });
+    const plainDone = runOnce({
+      recordingId: RECORDING.id,
+      config: REALTIME_CONFIG,
+      deps: plain.deps,
+    });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const noTap = await plainDone;
+
+    // The tapped run really did capture (else this proves nothing)...
+    expect(withTap.outputAudio.length).toBeGreaterThan(0);
+    // ...and the measurement is untouched by it.
+    expect(withTap.run.timings.audio_queued).toBe(noTap.run.timings.audio_queued);
+    expect(withTap.run.timings.speech_end).toBe(noTap.run.timings.speech_end);
+    // Straight from the model's own event, not from any byte.
+    expect(withTap.run.timings.audio_queued).toBe(tapped.queuedAt.at(-1));
+    expect(
+      (withTap.run.utterances ?? []).map((u) => u.timings.audio_queued),
+    ).toEqual(tapped.queuedAt);
+    expect((withTap.run.utterances ?? []).map((u) => u.timings.audio_queued)).toEqual(
+      (noTap.run.utterances ?? []).map((u) => u.timings.audio_queued),
+    );
+    // ...and only the no-tap run is the one that stores nothing.
+    expect(noTap.outputAudio).toHaveLength(0);
+    expect(noTap.run.outputAudioPath).toBeUndefined();
+  });
+
+  it('FALSIFIABILITY CONTROL: a model that sends its events but NO track audio stores nothing', async () => {
+    // Same connect, same tap, same four utterances, same measurements — the
+    // ONLY difference is that nothing came down the media track. If this run
+    // ever uploads bytes, the capture above is coming from the connect or a
+    // timer rather than from the model's audio.
+    const h = makeArmAHarness({ mute: true });
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    expect(h.taps).toHaveLength(1);
+    expect(result.run.status).toBe('complete');
+    expect(result.run.timings.audio_queued).not.toBeNull();
+    expect(result.outputAudio).toHaveLength(0);
+    expect(result.audioReady).toBe(false);
+    expect(h.uploads).toEqual([]);
+    expect(result.run.outputAudioPath).toBeUndefined();
+    expect(h.posted[0]!.outputAudioPath).toBeUndefined();
+  });
+
+  it('NOTHING AUTOPLAYS, and the run ends up judgeable in blind compare', async () => {
+    const h = makeArmAHarness();
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    // Capturing is not playing: no AudioContext was constructed by the run.
+    expect(audioContextSpy).not.toHaveBeenCalled();
+    // The tap is released with the transport, exactly like the outbound sink.
+    expect(h.taps[0]!.closed).toBe(1);
+
+    // The two gates a sample must pass to be judgeable: RunsList renders
+    // [data-run-play] iff `outputAudioPath !== undefined` (045), and blind
+    // compare pairs only COMPLETED runs. An Arm A sample now passes both, so an
+    // A-vs-B pair can be played and scored.
+    const run = h.posted[0]!;
+    expect(run.status).toBe('complete');
+    expect(run.armTag).toBe('A');
+    expect(run.outputAudioPath).not.toBeUndefined();
+    expect(result.run.outputAudioPath).toBe(run.outputAudioPath);
   });
 });

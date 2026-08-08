@@ -10,6 +10,7 @@ import {
   REALTIME_OPAQUE_ERROR_MESSAGE,
   RealtimeTransport,
   TOKEN_ENDPOINT,
+  type InboundAudioTap,
   type OutboundAudioSink,
   type RemoteAudioSink,
   type RtcDataChannelLike,
@@ -180,9 +181,42 @@ function audioTrackEvent(stream: RtcMediaStreamLike): RtcTrackEventLike {
   return { track: { kind: 'audio' }, streams: [stream] };
 }
 
+/**
+ * TICKET 046 — records every stream the INBOUND tap was handed, and lets a test
+ * feed it the samples a real media track would have carried. `feed` is the
+ * falsifiability control: the transport reports audio only because the tap
+ * captured some, never because a connect happened.
+ */
+function makeFakeInboundTap(calls: string[] = []) {
+  const attached: RtcMediaStreamLike[] = [];
+  const captured: number[] = [];
+  const state = { built: 0, closed: 0 };
+  const tap: InboundAudioTap = {
+    attach: (stream) => {
+      calls.push('tap.attach');
+      attached.push(stream);
+    },
+    take: () => Int16Array.from(captured),
+    close: () => {
+      state.closed += 1;
+    },
+  };
+  return {
+    tap,
+    calls,
+    attached,
+    state,
+    /** Pretend the media track delivered these samples. */
+    feed: (...samples: number[]) => captured.push(...samples),
+    factory: (): InboundAudioTap => {
+      state.built += 1;
+      return tap;
+    },
+  };
+}
+
 /** Records every call the transport makes on the output sink, in order. */
-function makeFakeSink() {
-  const calls: string[] = [];
+function makeFakeSink(calls: string[] = []) {
   const attached: RtcMediaStreamLike[] = [];
   const sink: RemoteAudioSink = {
     attach: (stream) => {
@@ -240,6 +274,8 @@ interface HarnessOptions {
   getMediaStream?: () => RtcMediaStreamLike | null;
   /** TICKET 043 — the outbound sink factory. Omitted by default. */
   createOutboundAudioSink?: () => OutboundAudioSink;
+  /** TICKET 046 — the inbound capture tap factory. Omitted by default. */
+  createInboundAudioTap?: () => InboundAudioTap;
 }
 
 function makeHarness(opts: HarnessOptions = {}) {
@@ -283,6 +319,7 @@ function makeHarness(opts: HarnessOptions = {}) {
       remoteAudioSink: opts.remoteAudioSink,
       getMediaStream: opts.getMediaStream,
       createOutboundAudioSink: opts.createOutboundAudioSink,
+      createInboundAudioTap: opts.createInboundAudioTap,
     },
   );
 
@@ -1008,5 +1045,193 @@ describe('RealtimeTransport ticket 043 REGRESSION GUARDS', () => {
     expect(h.timings).toContainEqual(
       expect.objectContaining({ event: 'audio_queued', t: 9100, utt: 0 }),
     );
+  });
+});
+
+/* ===========================================================================
+ * TICKET 046 — the INBOUND tap. Arm A's output audio exists only on the media
+ * track, so without a tap `takeOutputAudio()` is empty, ticket 045's upload has
+ * nothing to upload, and blind compare has nothing to play for any pair
+ * involving Arm A.
+ *
+ * THE ONE THING THIS MUST NOT DO IS MOVE THE MEASUREMENT. `audio_queued` comes
+ * from `output_audio_buffer.started` (040) and not from bytes; the tap's samples
+ * must never reach `onAudio`, which is what the runner stamps from.
+ * ======================================================================== */
+
+describe('RealtimeTransport inbound audio tap (ticket 046)', () => {
+  it('captures the model media track: takeOutputAudio() returns the tap’s 24 kHz PCM16', async () => {
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    await startConnected(h);
+
+    const stream = fakeStream('remote');
+    trackPc(h).emitTrack(audioTrackEvent(stream));
+    expect(inbound.state.built).toBe(1);
+    expect(inbound.attached).toEqual([stream]);
+
+    inbound.feed(7, -8, 9);
+    expect(Array.from(h.transport.takeOutputAudio())).toEqual([7, -8, 9]);
+  });
+
+  it('FALSIFIABILITY CONTROL: a connected session whose track carried NO audio reports none', async () => {
+    // The tap is built and attached exactly as above; the only difference is
+    // that nothing was ever captured. If this ever returns samples, the tests
+    // above are measuring a connect rather than the audio.
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    await startConnected(h);
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('remote')));
+
+    expect(inbound.attached).toHaveLength(1);
+    expect(h.transport.takeOutputAudio()).toHaveLength(0);
+  });
+
+  it('captured audio NEVER reaches onAudio, and audio_queued does not shift', async () => {
+    // THE constraint. `onAudio` is what the runner stamps `audio_queued` from;
+    // routing tapped samples there would move Arm A's headline latency off
+    // `output_audio_buffer.started` and quietly invalidate every figure.
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    const ch = await startConnected(h);
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('remote')));
+    inbound.feed(1, 2, 3, 4);
+
+    h.clock.t = 8123;
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    h.clock.t = 8999;
+    inbound.feed(5, 6);
+
+    expect(h.audio).toHaveLength(0);
+    expect(h.timings.filter((t) => t.event === 'audio_queued')).toEqual([
+      expect.objectContaining({ event: 'audio_queued', t: 8123, utt: 0 }),
+    ]);
+    expect(h.transport.takeOutputAudio()).toHaveLength(6);
+  });
+
+  it('does not delay or reorder the inbound path: the PLAYBACK sink is attached first, from ONE stream', async () => {
+    // 040's sink is what Live hears. Capture is bolted onto the same event and
+    // the same stream — never a second negotiation, and never ahead of playback.
+    const calls: string[] = [];
+    const sink = makeFakeSink(calls);
+    const inbound = makeFakeInboundTap(calls);
+    const h = makeHarness({
+      trackCapable: true,
+      remoteAudioSink: sink.sink,
+      createInboundAudioTap: inbound.factory,
+    });
+    await startConnected(h);
+
+    const stream = fakeStream('remote');
+    trackPc(h).emitTrack(audioTrackEvent(stream));
+
+    expect(calls).toEqual(['attach', 'tap.attach']);
+    expect(sink.attached).toEqual([stream]);
+    expect(inbound.attached).toEqual([stream]);
+    expect(inbound.attached[0]).toBe(sink.attached[0]);
+  });
+
+  it('the tap is built LAZILY and ONCE: a non-audio or streamless event builds nothing', async () => {
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    await startConnected(h);
+    // Connecting alone must construct no AudioContext.
+    expect(inbound.state.built).toBe(0);
+
+    trackPc(h).emitTrack({ track: { kind: 'video' }, streams: [fakeStream('video')] });
+    trackPc(h).emitTrack({ track: { kind: 'audio' }, streams: [] });
+    expect(inbound.state.built).toBe(0);
+    expect(inbound.attached).toEqual([]);
+  });
+
+  it('a RECONNECT re-attaches the SAME tap, so one run stays one recording', async () => {
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    const ch = await startConnected(h);
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('first')));
+    inbound.feed(1, 2);
+
+    ch.emitClose();
+    await vi.waitFor(() => {
+      expect(h.states.at(-1)?.state).toBe('connected');
+    });
+    trackPc(h, 1).emitTrack(audioTrackEvent(fakeStream('second')));
+    inbound.feed(3, 4);
+
+    // ONE tap (one AudioContext) for the whole transport, two attaches.
+    expect(inbound.state.built).toBe(1);
+    expect(inbound.attached).toHaveLength(2);
+    expect(Array.from(h.transport.takeOutputAudio())).toEqual([1, 2, 3, 4]);
+  });
+
+  it('stop() closes the tap ONCE and the captured audio survives, because the runner reads it after', async () => {
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    await startConnected(h);
+    const pc = trackPc(h);
+    pc.emitTrack(audioTrackEvent(fakeStream('remote')));
+    inbound.feed(11, -12);
+
+    h.transport.stop();
+    expect(inbound.state.closed).toBe(1);
+    h.transport.stop();
+    expect(inbound.state.closed).toBe(1);
+    expect(Array.from(h.transport.takeOutputAudio())).toEqual([11, -12]);
+
+    // A late track event after stop() attaches nothing.
+    pc.emitTrack(audioTrackEvent(fakeStream('late')));
+    expect(inbound.attached).toHaveLength(1);
+  });
+});
+
+describe('RealtimeTransport ticket 046 REGRESSION GUARDS', () => {
+  it('REGRESSION GUARD (LIVE): with NO tap factory nothing is captured and the 040 sink is untouched', async () => {
+    // Live's bag wires `remoteAudioSink` and no tap, and must persist no audio
+    // at all (§17 19h). Adding the seam must not make Live start storing.
+    const sink = makeFakeSink();
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: sink.sink });
+    await startConnected(h);
+
+    const stream = fakeStream('remote');
+    trackPc(h).emitTrack(audioTrackEvent(stream));
+
+    expect(sink.calls).toEqual(['attach']);
+    expect(sink.attached).toEqual([stream]);
+    expect(h.transport.takeOutputAudio()).toHaveLength(0);
+  });
+
+  it('REGRESSION GUARD: a fake implementing NEITHER ontrack NOR media APIs still connects with a tap wired', async () => {
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ createInboundAudioTap: inbound.factory }); // default FakePc
+    const ch = await startConnected(h);
+
+    expect(h.states.map((s) => s.state)).toContain('connected');
+    expect(inbound.state.built).toBe(0);
+
+    ch.emitEvent({ type: 'response.output_audio_transcript.done', transcript: 'Hola' });
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    ch.emitEvent({ type: 'response.done', response: { usage: {} } });
+    expect(h.target).toHaveLength(1);
+    expect(h.completes).toHaveLength(1);
+    expect(h.errors).toHaveLength(0);
+    expect(h.transport.takeOutputAudio()).toHaveLength(0);
+  });
+
+  it('REGRESSION GUARD: the tap does not reintroduce a PCM-delta expectation', async () => {
+    // There is no `response.output_audio.delta` on this transport (040). The
+    // data-channel path stays exactly as it was, and is NOT the tap's business.
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    const ch = await startConnected(h);
+    const pcm = new Int16Array([5, -6, 7]);
+    h.clock.t = 4242;
+    ch.emitEvent({ type: 'response.output_audio.delta', delta: pcmToBase64(pcm) });
+
+    expect(Array.from(h.audio[0]!.pcm)).toEqual(Array.from(pcm));
+    expect(h.timings).toContainEqual(
+      expect.objectContaining({ event: 'first_audio_delta', t: 4242, utt: 0 }),
+    );
+    // ...and the tap captured nothing, because nothing came off a track.
+    expect(h.transport.takeOutputAudio()).toHaveLength(0);
   });
 });

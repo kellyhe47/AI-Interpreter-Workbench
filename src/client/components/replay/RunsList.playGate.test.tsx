@@ -7,12 +7,13 @@
  * only in fixtures — status was the best proxy available. It is now false in
  * both directions:
  *
- *   - A COMPLETE run may have no stored audio. Arm A produces exactly that
- *     today (its audio rides the WebRTC media track and never reaches
- *     `onAudio`, so nothing is uploaded — ticket 046), and every such card
- *     offered a play button that answered 404 `run-audio-missing`. That is the
- *     defect tickets 024 and 044 both ruled on: a control that cannot act must
- *     not look actionable.
+ *   - A COMPLETE run may have no stored audio — every Arm A run did, until
+ *     ticket 046 tapped the WebRTC media track its audio rides (Arm A now
+ *     uploads like any other arm; a run whose output audio is genuinely empty,
+ *     or whose upload failed, still lands here). Every such card offered a play
+ *     button that answered 404 `run-audio-missing`. That is the defect tickets
+ *     024 and 044 both ruled on: a control that cannot act must not look
+ *     actionable.
  *   - A FAILED run may HAVE stored audio. A run that lost a stage after some
  *     output was synthesized keeps that partial audio, and it is diagnostic
  *     (PRD §12) — refusing to play it hides real information.
