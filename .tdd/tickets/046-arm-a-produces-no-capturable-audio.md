@@ -1,7 +1,7 @@
 ---
 id: 046
 title: Arm A produces no capturable output audio — its audio is a live media track, so nothing can be saved or replayed
-status: tests-locked
+status: green
 source: qa-live
 depends_on: [045]
 touches: [src/client/transport/realtime.ts, src/client/replay/runner.ts, src/client/browserDeps.ts]
