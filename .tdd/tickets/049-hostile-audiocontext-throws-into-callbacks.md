@@ -210,3 +210,55 @@ reading the reason alone would get a stale non-null value on a stopped or realti
 2. The page stays under Chrome's per-document cap across a long QA pass, once capture contexts and the realtime in/outbound taps are counted WITH their async closes settling
 3. `response.output_audio.delta` truly never arrives on the WebRTC data channel (040's finding — the mode gate now depends on it in a second place)
 4. NEW: that a REAL transient recovery works — press New session after the cap frees and confirm cascade audio returns. `clearPlaybackFailure()` has only ever been exercised against a fake factory.
+
+---
+
+## ROUND 4 — re-review verdict: GREEN, two items landing anyway
+
+34 mutations, **30 caught**. All three round-2 slips are closed (R2i by the second-session guard,
+R2o by the blind-compare guard, R2p by the controller-level guard). R3-1's fix is verified genuinely
+wired: `RecordTake` still calls `playTake?.(take)` with ONE argument, so the second argument the
+seam receives can only come from the funnel's closure — with the raw forward, index `[1]` is
+`undefined` and the locked assertion goes red.
+
+**R3s was confirmed a genuine equivalent mutant, by enumeration rather than by failing to falsify
+it:** `store.playbackFailureReason` has exactly one read site, always behind `playbackNotice`, which
+requires `playbackUnavailable === true`; that flag has exactly one write site, and the callback
+overwriting the reason runs in the same synchronous statement sequence inside `enqueue`, before
+React can render. No render can observe the notice with a stale reason. Leaving it unpinned was
+right. (The equivalence is a CONSEQUENCE of `clearPlaybackFailure()` clearing `reported`, which the
+R3-2 guard now pins — so the coupling is safe.)
+
+### R4-1 (MINOR, demonstrated) — the Replay notice can OUTLIVE what it describes
+`ReplayView.tsx:416` and `:423` each open with `setPlaybackError(null)`. Removing it from EITHER
+funnel leaves 1859/1859 green — neither is defended.
+Demonstrated against the real `ReplayView` (press 1 fails, cap frees, press 2 sounds):
+- HEAD: notice gone after the recovered press. Correct.
+- Without the line: **the notice is still up, reading "No audio output — …" while the run is audibly
+  playing.**
+This is the Replay analogue of R2-1/R2-2, which were graded MAJOR on the LIVE side. And recovery is
+MORE reachable here, not less: `replayPlaybackContextFactory` uses `??=`, so it retries
+`new AudioContext()` on every press and each press builds a fresh `ArmPlayback` with a fresh latch —
+so the first successful press after a Live capture context closes hits exactly this path.
+**DECIDED:** land it. One test — fail, then succeed, assert the notice clears — closes both funnels.
+
+### R4-2 (MINOR) — a comment that misnames its own reason
+`RecordTake.tsx:117` claims the prop is *"Typed as the SEAM ITSELF … so this prop cannot drift back
+out of step."* Refuted two ways: narrowing the prop straight back to one argument **compiles clean
+and leaves all 1859 tests green**, and restoring `playTake={deps.playTake}` raw **also compiles
+clean**. TypeScript's fewer-parameter function assignability makes both legal, so the type is not a
+barrier in the dangerous direction.
+Seam-typing IS a real single-source-of-truth improvement and does propagate changes to the seam's
+first parameter — but **the funnel is what prevents R3-1 from returning**, and that is properly
+defended (raw forward CAUGHT; funnel-drops-the-callback CAUGHT).
+This repo's own precedent applies: the `browserDeps` comment nit got a source guard precisely
+because *"a comment that misnames its own reason sends the next reader to delete the wrong half."*
+**DECIDED:** correct the sentence — the funnel is the guarantee, the typing is hygiene. Also record
+the corollary: with the funnel in place `RecordTake`'s prop arity is INERT, the reporter lives
+entirely in the host. That is the right architecture and should be stated, not inferred.
+
+### NOTED, no change — the `undefined`-preserving ternary is inert
+Dropping it leaves the suite green, correctly: `[data-record-play]` renders unconditionally and the
+funnel no-ops when the seam is absent. Defensible forward-looking defence if that button is ever
+gated on the prop, but the stated rationale ("a host wiring no playback keeps its old prop shape")
+describes nothing observable. Keep it; do not claim it does something.
