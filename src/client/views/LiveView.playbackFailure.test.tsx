@@ -34,7 +34,7 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
@@ -42,9 +42,11 @@ import type { UtteranceRecord } from '../../core/timing';
 import type { PlaybackAudioContextLike } from '../audio/playback';
 import type { RunLedger } from '../state/ledger';
 import { matchingLines, readCode } from '../testSource';
+import { useSessionController } from './useSessionController';
 import {
   advance,
   cascadeUtteranceScript,
+  flushMicrotasks,
   clickStartMicrophone,
   makeDeps,
   makeFakePlaybackContext,
@@ -414,5 +416,110 @@ describe('a transient failure is RECOVERABLE by a new session (round 2, R2-6)', 
     expect(rec.started).toEqual([50_400]);
     expect(notice()).toBeNull();
     expect(targetCard()).toHaveAttribute('data-target-status', 'ready');
+  });
+});
+
+/* ===========================================================================
+ * ROUND 3
+ * ======================================================================== */
+
+/**
+ * R3-2 — a SECOND session with a DIFFERENT failure must show ITS OWN reason.
+ *
+ * `clearPlaybackFailure()` clears four fields; deleting just `this.reported =
+ * false` left all 1853 tests green. It opens no "told more than once" hole —
+ * the method is reachable only from `newSession` — so the round-2 one-shot test
+ * is still exactly right and simply cannot see this. What it costs is the
+ * REASON: session two renders "no audio output" with the reason row absent
+ * entirely, for a failure it has never described.
+ */
+describe('GUARD: a second session reports its OWN failure (round 3, R3-2)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  // Green at HEAD (`clearPlaybackFailure()` already clears `reported`) and so a
+  // GUARD — mutation-proven: dropping that ONE line renders session two's
+  // notice with no reason row at all (mutation R2i).
+  it('the reason row changes with the new cause, and is never blank', async () => {
+    const kit = startSession({ hostile: true });
+    await clickStartMicrophone();
+    await advance(1300);
+    expect(text(reason())).toBe(
+      'NotSupportedError: the number of hardware contexts reached the maximum',
+    );
+
+    // A NEW session, and the browser now fails for a different reason.
+    kit.deps.playbackContextFactory = hostileFactory(() => {
+      const err = new Error('audio hardware is unavailable');
+      err.name = 'InvalidStateError';
+      return err;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
+    await advance(10);
+    fireEvent.click(screen.getByRole('button', { name: 'Start new session' }));
+    await advance(1300);
+
+    const el = reason();
+    expect(el, 'session two says "no audio output" and no reason at all').not.toBeNull();
+    expect(text(el)).toBe('InvalidStateError: audio hardware is unavailable');
+    expect(notice()).not.toBeNull();
+  });
+});
+
+/**
+ * R3-4 — the reason shares the notice's gate, pinned on the CONTROLLER.
+ *
+ * The view only ever renders the reason INSIDE the notice, so an ungated
+ * `playbackUnavailableReason` is invisible through the DOM and the suite stays
+ * green — while any other consumer reading the property alone gets a stale
+ * non-null value on a stopped or realtime session.
+ */
+describe('GUARD: playbackUnavailableReason shares the notice gate (round 3, R3-4)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  // Green at HEAD, and a GUARD for the same reason the two above are: the view
+  // renders the reason only INSIDE the notice, so an ungated property is
+  // invisible through the DOM (mutation R2o).
+  it('both properties fall together on a mode switch and on stop', async () => {
+    const capture = makeGrantingCapture();
+    const kit = makeDeps({
+      initialState: { mode: 'cascade' },
+      scripts: { cascade: cascadeUtteranceScript() },
+      capture: capture.fn,
+    });
+    kit.deps.playbackContextFactory = hostileFactory();
+    const { result } = renderHook(() => useSessionController(kit.deps));
+
+    act(() => result.current.actions.start());
+    await flushMicrotasks();
+    await advance(1300);
+
+    expect(result.current.state.status).not.toBe('idle');
+    expect(result.current.playbackUnavailable).toBe(true);
+    expect(result.current.playbackUnavailableReason).toBe(
+      'NotSupportedError: the number of hardware contexts reached the maximum',
+    );
+
+    // REALTIME: audible through the remoteAudioSink, so neither property may
+    // still be describing a lost sound.
+    act(() => result.current.actions.requestMode('realtime'));
+    await advance(10);
+    expect(result.current.state.mode).toBe('realtime');
+    expect(result.current.playbackUnavailable).toBe(false);
+    expect(result.current.playbackUnavailableReason).toBeNull();
+
+    // ...and back on cascade both return together.
+    act(() => result.current.actions.requestMode('cascade'));
+    await advance(10);
+    expect(result.current.playbackUnavailable).toBe(true);
+    expect(result.current.playbackUnavailableReason).not.toBeNull();
+
+    // STOPPED: the session it described is over.
+    act(() => result.current.actions.stop());
+    await advance(10);
+    expect(result.current.state.status).toBe('stopped');
+    expect(result.current.playbackUnavailable).toBe(false);
+    expect(result.current.playbackUnavailableReason).toBeNull();
   });
 });
