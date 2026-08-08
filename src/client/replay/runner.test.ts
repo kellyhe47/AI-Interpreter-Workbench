@@ -34,6 +34,8 @@ import type { TransportConfig, TransportKind } from '../transport/types';
 import { FRAME_MS, FRAME_SAMPLES } from './pacer';
 import { ApiError, type RecordingsClient, type RunsClient } from './recordingsClient';
 import {
+  RUN_COMPLETION_TIMED_OUT,
+  RUN_COMPLETION_TIMEOUT_MS,
   SEGMENTATION_IDLE_MS,
   SEGMENTATION_SETTLE_MS,
   runOnce,
@@ -1159,9 +1161,17 @@ describe('runOnce — no timer leaks past a run (ticket 031)', () => {
 // ---------------------------------------------------------------------------
 
 describe('runOnce — the idle deadline is MANIFEST-ONLY (ticket 031 REGRESSION GUARD)', () => {
-  it("REGRESSION: a manifest-less run whose transport never completes still hangs — termination is unchanged", async () => {
-    // The strongest available proof that no idle deadline is armed for a
-    // manifest-less run: if one were, this would resolve and fail.
+  it('REGRESSION: a manifest-less run arms NO 031 deadline — it outlives the idle window (updated by 048)', async () => {
+    // TICKET 048 UPDATE. This test used to assert the manifest-less run "still
+    // hangs", i.e. never settles at all. That was 031's true statement about
+    // 031's deadlines, but 048 gives such a run a deadline of its OWN
+    // (RUN_COMPLETION_TIMEOUT_MS) precisely because an unbounded `await finished`
+    // freezes a sweep. Asserting the hang would now lock in the defect.
+    //
+    // What 031's rule actually claims is preserved verbatim and is what is
+    // asserted here: NEITHER 031 timer is armed for a manifest-less run, so the
+    // run is still alive well past SEGMENTATION_IDLE_MS. The 048 deadline is
+    // deliberately longer than 031's, which is what leaves this window to observe.
     const h = makeHarness({
       recording: { origin: 'mic', durationMs: 1000, speechEndMs: 900 },
       transportFactory: () =>
@@ -1175,7 +1185,8 @@ describe('runOnce — the idle deadline is MANIFEST-ONLY (ticket 031 REGRESSION 
     });
 
     let settled = false;
-    void start(h).then(
+    const done = start(h);
+    void done.then(
       () => {
         settled = true;
       },
@@ -1184,9 +1195,24 @@ describe('runOnce — the idle deadline is MANIFEST-ONLY (ticket 031 REGRESSION 
       },
     );
 
+    // PAST_IDLE_MS * 2 is 20 s — four times 031's idle window and still inside
+    // 048's completion budget. A manifest-less run that armed 031's deadline
+    // would have failed with a segmentation reason by now.
     await vi.advanceTimersByTimeAsync(PAST_IDLE_MS * 2);
+    expect(PAST_IDLE_MS * 2).toBeLessThan(RUN_COMPLETION_TIMEOUT_MS);
     expect(settled).toBe(false);
     expect(h.posted).toHaveLength(0);
+
+    // ...and then 048's deadline — NOT 031's — ends it, with its own named
+    // reason and no segmentation claim (there is no manifest to disagree with).
+    await vi.advanceTimersByTimeAsync(RUN_COMPLETION_TIMEOUT_MS);
+    expect(settled).toBe(true);
+    const { run } = await done;
+    expect(run.status).toBe('failed');
+    expect(run.errors.some((e) => e.startsWith(RUN_COMPLETION_TIMED_OUT))).toBe(true);
+    expect(run.errors.some((e) => e.startsWith('segmentation:'))).toBe(false);
+    expect(run.utterances).toBeUndefined();
+    expect(h.posted).toHaveLength(1);
   });
 
   it('REGRESSION: the same transport WITH a 1-entry manifest fails on the deadline instead of hanging', async () => {
