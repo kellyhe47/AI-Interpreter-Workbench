@@ -116,8 +116,15 @@ export interface BrowserDeps extends SessionDeps {
   remoteAudioSink: RemoteAudioSink;
 }
 
-/** A batch run that over-runs this is aborted and recorded as a failure. */
-const RUN_TIMEOUT_MS = 120_000;
+/**
+ * A batch run that over-runs this is aborted and recorded as a failure.
+ *
+ * TICKET 048 ROUND 2 (R2-8) — EXPORTED so the ordering guard that keeps
+ * `runOnce`'s own deadlines strictly inside it (runner.unboundedWaits.test.ts)
+ * imports the real number instead of hardcoding a copy that rots the day this
+ * moves.
+ */
+export const RUN_TIMEOUT_MS = 120_000;
 
 /** ScriptProcessor-based capture pipeline (source -> processor -> emit). */
 const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
