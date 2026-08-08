@@ -180,8 +180,16 @@ export interface ReplayDeps {
   runs: RunsClient;
   runOnce: (request: ReplayRunRequest) => Promise<RunOnceResult>;
   startBatch: (request: ReplayBatchRequest) => BatchHandle;
-  /** On-demand playback of a run's output audio. NEVER called at render. */
-  playRun: (runId: string) => void;
+  /**
+   * On-demand playback of a run's output audio. NEVER called at render.
+   *
+   * TICKET 049 ROUND 2 — `onUnavailable` (OPTIONAL, so every existing host and
+   * test bag still typechecks) is how a press that could not build an
+   * AudioContext says so. Without it the press is a silent no-op, which is
+   * indistinguishable from a run whose stored audio is empty — a real
+   * diagnosis the operator makes on this screen.
+   */
+  playRun: (runId: string, onUnavailable?: (error: unknown) => void) => void;
   now: () => number;
   newId: () => string;
 
@@ -234,8 +242,9 @@ export interface ReplayDeps {
   startTake?: (options: ReplayTakeOptions) => Promise<TakeRecorder | CaptureDenied>;
   /** Splits a finished take into utterances the operator then confirms. */
   segmentTake?: (samples: Int16Array) => SegmentedUtterance[];
-  /** On-demand playback of the recorded take. NEVER called at render. */
-  playTake?: (take: RecordedTake) => void;
+  /** On-demand playback of the recorded take. NEVER called at render.
+   *  TICKET 049 ROUND 2 — same optional failure report as `playRun`. */
+  playTake?: (take: RecordedTake, onUnavailable?: (error: unknown) => void) => void;
   /**
    * The corpus version stamped onto a Recording saved as corpus. It is the
    * HOST's fact, not the view's: provenance belongs to whoever assembled the
@@ -380,6 +389,42 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   const [blindOpen, setBlindOpen] = useState(false);
   /** Ticket 036 — the record flow is OPENED, never standing: no panel, no mic. */
   const [recordOpen, setRecordOpen] = useState(false);
+  /**
+   * TICKET 049 ROUND 2 (R2-5) — the browser's error from a play press that
+   * could not build an AudioContext, or null. Replay shares ONE context per
+   * deps bag, so a press that cannot build it is otherwise a silent no-op —
+   * and on this screen "I pressed play and heard nothing" is how the operator
+   * diagnoses a run whose stored output audio is empty. Two very different
+   * findings must not look identical.
+   */
+  const [playbackError, setPlaybackError] = useState<unknown>(null);
+
+  /**
+   * Every play press on this screen goes through one of these two, so no arm
+   * can forget to report. THREE arms feed them: the runs list, blind compare
+   * (where an unexplained silence is scored as a property of the run) and the
+   * record flow's "Play take".
+   *
+   * TICKET 049 R3-1 — `playTake` used to be handed to RecordTake RAW, which
+   * narrowed it straight back to one argument, so the reporter the bag accepts
+   * had no production caller at all. A press with the context cap full was a
+   * silent no-op, and a freshly recorded take has no "no audio stored"
+   * explanation available to fall back on.
+   */
+  const playRun = useCallback(
+    (runId: string): void => {
+      setPlaybackError(null);
+      deps.playRun(runId, (error) => setPlaybackError(error));
+    },
+    [deps],
+  );
+  const playTake = useCallback(
+    (take: RecordedTake): void => {
+      setPlaybackError(null);
+      deps.playTake?.(take, (error) => setPlaybackError(error));
+    },
+    [deps],
+  );
 
   const refreshRuns = useCallback(async (): Promise<void> => {
     setRuns(await deps.runs.list());
@@ -553,7 +598,7 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
           evaluatorLanguage={evaluatorLanguage}
           now={deps.now}
           newId={deps.newId}
-          onPlay={(runId) => deps.playRun(runId)}
+          onPlay={playRun}
           onSubmit={recordBlindComparison}
         />
       );
@@ -579,10 +624,21 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
 
   const recordPanel =
     recordOpen && startTake !== undefined && segmentTake !== undefined ? (
+      /* R3-1 — `playTake` here is the FUNNEL, never `deps.playTake` raw. The
+         raw forward was re-narrowed to one argument inside RecordTake and
+         stranded the reporter; THIS line is what prevents that, not the prop's
+         type (see RecordTake's own note).
+
+         The `undefined` ternary is forward-looking defence only, and today it
+         is INERT: [data-record-play] renders unconditionally and the funnel
+         already no-ops when `deps.playTake` is absent, so passing the funnel
+         unconditionally would behave identically. It is kept so the prop stays
+         a truthful signal of "this host can play a take", in case that button
+         is ever gated on it. */
       <RecordTake
         startTake={startTake}
         segmentTake={segmentTake}
-        playTake={deps.playTake}
+        playTake={deps.playTake === undefined ? undefined : playTake}
         corpusVersion={deps.corpusVersion}
         now={deps.now}
         newId={deps.newId}
@@ -667,11 +723,34 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
           {blindTrigger}
           {blindCard}
 
-          <RunsList
-            recording={selectedRecording}
-            runs={selectedRuns}
-            onPlay={(runId) => deps.playRun(runId)}
-          />
+          {/* TICKET 049 R2-5 — a press that produced no sound, and WHY. It sits
+              with the runs it belongs to and carries the browser's own words,
+              so "no output audio stored" ([data-run-no-audio]) and "this
+              browser refused an audio context" read differently. A readout: it
+              offers no retry, which could not work while the cap is full and
+              would need a fresh gesture anyway. */}
+          {playbackError !== null && (
+            <div
+              data-replay-playback-notice
+              role="status"
+              style={{
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                padding: '9px 12px',
+                font: '400 12px/1.6 var(--font-sans)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              No audio output — this browser refused a new audio context.{' '}
+              <span data-replay-playback-reason style={{ fontFamily: 'var(--font-mono)' }}>
+                {playbackError instanceof Error
+                  ? `${playbackError.name}: ${playbackError.message}`
+                  : String(playbackError)}
+              </span>
+            </div>
+          )}
+
+          <RunsList recording={selectedRecording} runs={selectedRuns} onPlay={playRun} />
         </div>
       </div>
     </div>

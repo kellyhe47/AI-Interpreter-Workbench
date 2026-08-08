@@ -1074,6 +1074,43 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
 
           {/* THE single target card — no grid, no add pill, no audible selector */}
           <TargetCard architecture={state.mode} recipe={recipe} target={target} />
+
+          {/* TICKET 049 — the degraded-playback READOUT. It appears only once
+              sound was ACTUALLY lost (a chunk the ArmPlayback could not sound),
+              which is why a realtime session — whose audio rides the
+              remoteAudioSink element and which enqueues no PCM at all — never
+              raises it. It is deliberately NOT a control: ticket 047 deleted
+              Live's play/pause on purpose, and a "retry playback" button would
+              need a fresh user gesture and could not un-fill a context limit. */}
+          {controller.playbackUnavailable && (
+            <div
+              data-playback-notice
+              role="status"
+              style={{
+                background: 'var(--warning-soft, var(--gray-100))',
+                color: 'var(--text-secondary)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                padding: '9px 12px',
+                font: '400 12px/1.6 var(--font-sans)',
+              }}
+            >
+              No audio output — this browser refused a new audio context. The session is still
+              running and still being measured; only the sound is missing.
+              {/* The BROWSER'S own words, not ours — this is what tells the
+                  operator a filled context cap apart from a policy refusal. It
+                  reaches the view only through the controller's
+                  `onPlaybackUnavailable` callback (ticket 049 R2-3). */}
+              {controller.playbackUnavailableReason !== null && (
+                <div
+                  data-playback-notice-reason
+                  style={{ ...monoStyle, color: 'var(--text-muted)', marginTop: 6 }}
+                >
+                  {controller.playbackUnavailableReason}
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
 

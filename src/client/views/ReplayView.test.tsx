@@ -913,7 +913,12 @@ describe('RunsList — NOTHING autoplays (PRD §7)', () => {
     fireEvent.click(within(runCard(RUN_REALTIME.id)).getByRole('button', { name: 'play' }));
 
     await waitFor(() => expect(fakes.playRun).toHaveBeenCalledTimes(1));
-    expect(fakes.playRun).toHaveBeenCalledWith(RUN_REALTIME.id);
+    // TICKET 049 R2-5 — asserted on the FIRST ARGUMENT rather than the whole
+    // call: the seam now takes an optional second argument, the callback a
+    // press that could not build an AudioContext reports through
+    // (ReplayView.playbackFailure.test.tsx). Which run was played is what this
+    // test is about, and that is unchanged.
+    expect(fakes.playRun.mock.calls[0]![0]).toBe(RUN_REALTIME.id);
   });
 });
 
