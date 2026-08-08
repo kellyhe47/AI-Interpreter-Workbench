@@ -65,6 +65,8 @@ import {
   AUDIO_UPLOAD_TIMEOUT_MS,
   RUN_COMPLETION_TIMED_OUT,
   RUN_COMPLETION_TIMEOUT_MS,
+  RUN_POST_TIMED_OUT,
+  RUN_POST_TIMEOUT_MS,
   SEGMENTATION_IDLE_MS,
   TRANSPORT_CLOSE_TIMEOUT_MS,
   runOnce,
@@ -134,6 +136,8 @@ interface HarnessOptions {
   uploadRejectsAfterMs?: number;
   /** Make `transport.stop()` hang, to prove the two deadlines are not nested. */
   wedgeClose?: boolean;
+  /** ROUND 3 (R3-1) — the ledger POST never answers. */
+  postHangs?: boolean;
 }
 
 function makeHarness(opts: HarnessOptions = {}) {
@@ -144,6 +148,8 @@ function makeHarness(opts: HarnessOptions = {}) {
   let uploadStartedAt: number | null = null;
   /** Virtual clock at which `transport.stop()` was entered. */
   let stopStartedAt: number | null = null;
+  /** Virtual clock at which `runs.create` was entered. */
+  let postStartedAt: number | null = null;
 
   const recordings: RecordingsClient = {
     list: async () => [RECORDING],
@@ -155,10 +161,15 @@ function makeHarness(opts: HarnessOptions = {}) {
   };
 
   const runs: RunsClient = {
-    create: async (run: Run) => {
+    create: (run: Run) => {
       calls.push('create');
+      postStartedAt = Date.now();
+      // ROUND 3 (R3-1) — a server that accepted the POST and never answered. The
+      // row is recorded only when the client really resolves, so a POST the
+      // deadline gave up on does not count as stored.
+      if (opts.postHangs) return new Promise<Run>(() => {});
       posted.push(run);
-      return run;
+      return Promise.resolve(run);
     },
     list: async () => posted,
     getAudio: async () => new Uint8Array(0),
@@ -214,6 +225,9 @@ function makeHarness(opts: HarnessOptions = {}) {
     },
     get stopStartedAt() {
       return stopStartedAt;
+    },
+    get postStartedAt() {
+      return postStartedAt;
     },
   };
 }
@@ -513,6 +527,33 @@ describe('the deadlines relate to the ones already in place (ticket 048, guard)'
     expect(TRANSPORT_CLOSE_TIMEOUT_MS).toBeLessThan(AUDIO_UPLOAD_TIMEOUT_MS);
   });
 
+  it('ROUND 3 (R3-1): EVERY budget a run can spend still fits inside the sweeps patience', () => {
+    // This is the property that makes a duplicate sample IMPOSSIBLE rather than
+    // merely unlikely, so it is worth an assertion of its own.
+    //
+    // The POST is the one wait that cannot be guarded by re-reading the abort
+    // signal — the last re-read is immediately BEFORE `runs.create`, so an abort
+    // landing while the POST is in flight is too late to stop it, and the retry
+    // the sweep then starts writes a SECOND aggregatable Run for the same rep.
+    // The window disappears entirely when every budget `runOnce` can spend in one
+    // run adds up to less than the sweep's per-run patience: the attempt then
+    // always RETURNS before the sweep abandons it, so no retry can ever race a
+    // live POST.
+    //
+    // Worst case for one run, in series: park on `finished` for its whole budget,
+    // wedge the close, hang the upload, then hang the POST.
+    const worstCase =
+      RUN_COMPLETION_TIMEOUT_MS +
+      TRANSPORT_CLOSE_TIMEOUT_MS +
+      AUDIO_UPLOAD_TIMEOUT_MS +
+      RUN_POST_TIMEOUT_MS;
+    expect(worstCase).toBeLessThan(RUN_TIMEOUT_MS);
+    // ...and the POST budget is strictly shorter than the patience on its own,
+    // which is the clause the decision names.
+    expect(RUN_POST_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(RUN_POST_TIMEOUT_MS).toBeLessThan(RUN_TIMEOUT_MS);
+  });
+
   it('ROUND 2 (R2-4): the upload budget is sized for a real link, not for localhost', () => {
     // The output WAV is 24 kHz mono PCM16 — 48 kB/s, so a 45 s PRD §9 take is
     // ~2.2 MB. Clearing that inside 10 s demands ~1.7 Mbps SUSTAINED, which is
@@ -624,5 +665,73 @@ describe('runOnce — an abort that lands AFTER pacing still stops the write (ti
     expect(h.calls).toEqual(['uploadAudio', 'create']);
     expect(h.posted).toHaveLength(1);
     expect(run.status).toBe('complete');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ROUND 3 (R3-1) — THE LEDGER POST IS THE LAST UNBOUNDED WAIT, and the only one
+// that cannot be rescued by re-reading the abort signal.
+//
+// `runs.create` is a bare browser `fetch`. A server that accepts the POST and
+// never answers parks the run there forever; the sweep's budget then abandons
+// the attempt, retries it, and the abandoned POST lands afterwards — two
+// `origin: 'sweep'` Runs carrying the same `annotations.repIndex`, both passing
+// `isAggregatableRun`. That is pinned end to end in batch/runTimeout.test.ts;
+// what is pinned here is the deadline itself and the verdict it records.
+//
+// THE VERDICT IS 045's, NOT THE COMPLETION DEADLINE'S. A POST that went
+// unacknowledged is a STORE failure, and the measurement it was carrying is
+// complete and correct: every mark is stamped, the transcripts are final, the
+// cost is computed. So `status` stays `complete` and the reason rides `errors`,
+// exactly as a refused upload does. The completion deadline is fatal for the
+// opposite reason — there the MEASUREMENT is what is missing.
+// ---------------------------------------------------------------------------
+
+describe('runOnce — the ledger POST is BOUNDED (ticket 048, R3-1)', () => {
+  it('a POST that never answers still lets the run return, inside its own budget', async () => {
+    const h = makeHarness({ postHangs: true });
+    const started = launch(h);
+
+    await vi.advanceTimersByTimeAsync(RUN_POST_TIMEOUT_MS * 3);
+
+    // THE criterion: the run returned at all. Without this the attempt is still
+    // in flight when the sweep gives up on it, which is what makes the duplicate.
+    expect(started.resolvedAt).not.toBeNull();
+    expect(h.postStartedAt).not.toBeNull();
+    const waited = started.resolvedAt! - h.postStartedAt!;
+    // It really WAITED for the acknowledgement...
+    expect(waited).toBeGreaterThanOrEqual(RUN_POST_TIMEOUT_MS);
+    // ...and really gave up on it.
+    expect(waited).toBeLessThanOrEqual(RUN_POST_TIMEOUT_MS + TOLERANCE_MS);
+
+    const { run } = await started.done;
+    // The MEASUREMENT is intact — this is a store failure, not a lost run.
+    expect(run.status).toBe('complete');
+    expect(run.timings.audio_queued).toBe(30);
+    expect(run.timings.speech_end).toBe(RECORDING.speechEndMs);
+    expect(run.transcripts).toEqual({ source: 'hello', target: 'hola' });
+    // ...and the run SAYS the row never landed, naming the budget.
+    const line = run.errors.find((e) => e.startsWith(RUN_POST_TIMED_OUT));
+    expect(line).toBeDefined();
+    expect(line).toContain(String(RUN_POST_TIMEOUT_MS));
+    // The store never acknowledged, so nothing counts as stored.
+    expect(h.posted).toEqual([]);
+    // No timer outlives the run.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('CONTROL: a POST that answers normally costs the run nothing and records no reason', async () => {
+    // Without this, a runner that gave up on every POST — or never awaited one —
+    // would satisfy the test above.
+    const h = makeHarness();
+    const started = launch(h);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const { run } = await started.done;
+
+    expect(started.resolvedAt! - h.postStartedAt!).toBeLessThan(RUN_POST_TIMEOUT_MS);
+    expect(run.errors.some((e) => e.startsWith(RUN_POST_TIMED_OUT))).toBe(false);
+    expect(run.errors).toEqual([]);
+    expect(h.posted).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

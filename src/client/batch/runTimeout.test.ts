@@ -31,11 +31,13 @@ import { ApiError, type RecordingsClient, type RunsClient } from '../replay/reco
 import {
   RUN_COMPLETION_TIMED_OUT,
   RUN_COMPLETION_TIMEOUT_MS,
+  RUN_POST_TIMEOUT_MS,
   type RunOnceConfig,
   type RunOnceResult,
   type RunnerDeps,
 } from '../replay/runner';
 import {
+  RUN_ABANDONED,
   createRunOnceExecutor,
   startBatch,
   type BatchConfiguration,
@@ -385,6 +387,15 @@ interface Stall {
   uploadMs?: number;
   /** True: `recordings.getAudio` NEVER answers, so no Run can ever exist. */
   getAudioForever?: boolean;
+  /**
+   * ROUND 3 (R3-1) — ms the ledger POST stalls before the row really lands.
+   * The row is recorded WHEN IT LANDS, not when the call is made: a POST the
+   * caller gave up on has still been accepted by the server, which is precisely
+   * why a retry beside it produces two rows for one rep.
+   */
+  createMs?: number;
+  /** ROUND 3 (R3-3) — `transport.start()` NEVER resolves. */
+  startForever?: boolean;
 }
 
 interface TransportRecord {
@@ -398,12 +409,22 @@ interface TransportRecord {
  * overlap once the first is abandoned, and a bag shared between them could not
  * tell them apart.
  */
+/** A transport whose `start()` never resolves — a handshake that never lands. */
+class WedgedStartTransport extends FixtureTransport {
+  override async start(config: Parameters<FixtureTransport['start']>[0]): Promise<void> {
+    await super.start(config);
+    return new Promise<void>(() => {});
+  }
+}
+
 function realHarness(opts: {
   script?: FixtureScriptEvent[];
+  scriptFor?: (req: BatchExecutorRequest) => FixtureScriptEvent[];
   stallFor?: (req: BatchExecutorRequest) => Stall;
 }) {
   const wav = writeWav(ramp(SAMPLE_RATE / 20), SAMPLE_RATE);
   const posted: Run[] = [];
+  const createCalls: { id: string; at: number }[] = [];
   const uploads: string[] = [];
   const transports: TransportRecord[] = [];
   /** Virtual clock at which each attempt's signal aborted. */
@@ -431,9 +452,19 @@ function realHarness(opts: {
     };
 
     const runs: RunsClient = {
-      create: async (created: Run) => {
-        posted.push(created);
-        return created;
+      create: (created: Run) => {
+        createCalls.push({ id: created.id, at: Date.now() });
+        if (!stall.createMs) {
+          posted.push(created);
+          return Promise.resolve(created);
+        }
+        return new Promise<Run>((resolve) => {
+          setTimeout(() => {
+            // The server DID accept it; it simply answered late.
+            posted.push(created);
+            resolve(created);
+          }, stall.createMs);
+        });
       },
       list: async () => posted,
       getAudio: async () => new Uint8Array(0),
@@ -455,12 +486,15 @@ function realHarness(opts: {
         transports.push(record);
         live += 1;
         maxLive = Math.max(maxLive, live);
-        const transport = new FixtureTransport({
+        const transportOpts = {
           armId: 'fx',
-          kind: 'cascade',
-          script: opts.script ?? completeScript(),
+          kind: 'cascade' as const,
+          script: opts.scriptFor?.(req) ?? opts.script ?? completeScript(),
           costPerMinUsd: COST_PER_MIN,
-        });
+        };
+        const transport = stall.startForever
+          ? new WedgedStartTransport(transportOpts)
+          : new FixtureTransport(transportOpts);
         const stop = transport.stop.bind(transport);
         vi.spyOn(transport, 'stop').mockImplementation(() => {
           if (record.stoppedAt === null) {
@@ -492,6 +526,7 @@ function realHarness(opts: {
   return {
     execute,
     posted,
+    createCalls,
     uploads,
     transports,
     abortedAt,
@@ -756,5 +791,231 @@ describe('a bounded-out attempt during a CANCELLED sweep is not a failure (ticke
       { repIndex: 1, attempt: 1 },
       { repIndex: 1, attempt: 2 },
     ]);
+  });
+});
+
+// ===========================================================================
+// TICKET 048 ROUND 3.
+//
+// R3-1 — THE DUPLICATE-RUN DEFECT SURVIVED, at the one stall point round 2
+// never probed. Round 2's guard is a re-read of the abort signal, and the last
+// re-read sits immediately BEFORE `deps.runs.create(run)`. An abort landing
+// while the POST is IN FLIGHT is therefore too late: the run POSTs anyway, the
+// sweep retries the attempt it abandoned, and both rows reach the append-only
+// ledger with `origin: 'sweep'` and the same `annotations.repIndex`. Worse, the
+// executor's stub guard sets `wrote = true` at CALL time, so the rep is not even
+// accounted — the guard converts this case into the duplicate rather than the
+// accounted one. Probing upload / `recordings.getAudio` / `transport.start()`
+// gives 1 aggregatable Run each; probing `runs.create` gives 2, under a
+// provenance line that renders a clean "1 of 1".
+//
+// R3-2 — THE TWO MECHANISMS ROUND 2 INVENTED ARE UNPINNED. Three separate
+// deletions each leave the whole suite green, and each writes a FALSE ROW into
+// an append-only stream:
+//   * drop the `reason !== RUN_BUDGET_EXCEEDED` guard -> operator CANCEL writes a
+//     sweep/failed stub, permanently recording the operator's decision as a
+//     pipeline failure and contradicting "a cancelled run is never POSTed";
+//   * drop `if (wrote) return;`      -> a stub beside the real Run, same execution;
+//   * drop `wrote = true` in `create` -> the same double-write.
+// The ordering that makes them correct today is protected by nothing.
+//
+// R3-3 — R2-2's teardown only covers aborts landing at a wait `runOnce`
+// OBSERVES. `transport.start()` is awaited bare, so an abort there leaves the
+// transport live until the handshake resolves on its own — forever, if it never
+// does. Ticket 046's premise is that Chrome caps concurrent AudioContexts at
+// about six.
+// ===========================================================================
+
+describe('a stalled ledger POST cannot produce a second sample (ticket 048, R3-1)', () => {
+  it('the rep is measured ONCE: no retry races the POST, and provenance renders 1 of 1 over n=1', async () => {
+    // The sweep's patience is set ABOVE the POST budget, exactly as production
+    // does (120 s against 15 s). That ordering is the whole mechanism: `runOnce`
+    // gives up on the acknowledgement first, so the attempt RETURNS and is never
+    // abandoned mid-POST — and an attempt that is never abandoned is never
+    // retried, so no second row can exist.
+    const h = realHarness({
+      stallFor: (req) =>
+        req.repIndex === 1 && req.attempt === 1
+          ? { createMs: RUN_POST_TIMEOUT_MS * 4 }
+          : {},
+    });
+
+    const handle = handleOf({
+      execute: h.execute,
+      reps: 1,
+      runTimeoutMs: RUN_POST_TIMEOUT_MS * 2,
+    });
+    const { settled, summary } = await drain(handle, RUN_POST_TIMEOUT_MS * 20);
+    // ...and let the stalled POST land afterwards, which is what creates the
+    // duplicate when a retry has been started beside it.
+    await vi.advanceTimersByTimeAsync(RUN_POST_TIMEOUT_MS * 8);
+
+    expect(settled).toBe(true);
+    expect(summary!.status).toBe('complete');
+
+    // THE criterion, stated as the reviewer's probe states it.
+    const rep1 = sweepRunsOfRep(h.posted, 1);
+    expect(rep1.filter((r) => isAggregatableRun(r))).toHaveLength(1);
+
+    // ...and the figures, which is where the dishonesty actually shows: on the
+    // defect this line reads "1 of 1 reps completed" over an `n` of 2 — the
+    // summary is clean, the provenance is clean, and one repetition is weighted
+    // twice in p50/p95.
+    const arm = deriveExperimentAggregates(ledgerOf(h.posted)).perArm['B']!;
+    expect(arm.n).toBe(1);
+    expect(arm.provenance.line).toContain('1 of 1 reps completed');
+
+    // ...because it was NEVER RETRIED. The attempt returned under its own budget,
+    // so the sweep had no reason to start a second one — and a second one is the
+    // only way a second row for this rep can be written.
+    expect(h.createCalls).toHaveLength(2); // the warmup and rep 1, once each
+  });
+
+  it('CONTROL: a healthy POST is not bounded out and the rep still reads 1 of 1 (guard)', async () => {
+    const h = realHarness({});
+    const handle = handleOf({
+      execute: h.execute,
+      reps: 1,
+      runTimeoutMs: RUN_POST_TIMEOUT_MS * 2,
+    });
+    const { settled, summary } = await drain(handle, RUN_POST_TIMEOUT_MS * 8);
+
+    expect(settled).toBe(true);
+    expect(summary!.completedRuns).toBe(1);
+    expect(h.createCalls).toHaveLength(2);
+    const arm = deriveExperimentAggregates(ledgerOf(h.posted)).perArm['B']!;
+    expect(arm.n).toBe(1);
+    expect(arm.provenance.line).toContain('1 of 1 reps completed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('what may be written for an abandoned execution (ticket 048, R3-2)', () => {
+  it('GUARD: an operator CANCEL writes no stub — a cancelled run is never POSTed', async () => {
+    // The `reason !== RUN_BUDGET_EXCEEDED` guard is deletable with the whole
+    // suite green, and deleting it puts a sweep/failed row in an APPEND-ONLY
+    // ledger for a run the operator stopped. There is no PATCH: that row is a
+    // permanent claim that the pipeline failed where in fact nothing did, and it
+    // would count toward the provenance denominator forever.
+    const h = realHarness({
+      // The warmup completes; rep 1 parks, so the cancel lands mid-run.
+      scriptFor: (req) => (req.repIndex === 0 ? completeScript() : quietScript()),
+    });
+    const handle = handleOf({
+      execute: h.execute,
+      reps: 1,
+      // Far above everything, so the BUDGET can never be the reason for the abort.
+      runTimeoutMs: RUN_COMPLETION_TIMEOUT_MS * 4,
+    });
+    let settled = false;
+    void handle.done.then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    handle.cancel();
+    await vi.advanceTimersByTimeAsync(RUN_COMPLETION_TIMEOUT_MS * 4);
+
+    expect(settled).toBe(true);
+    // Only the warmup's own Run was ever written.
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]!.origin).toBe('manual');
+    expect(sweepRunsOfRep(h.posted, 1)).toEqual([]);
+    // Named explicitly, so a stub carrying any other reason is caught too.
+    expect(h.posted.some((r) => r.errors.includes(RUN_ABANDONED))).toBe(false);
+  });
+
+  it('GUARD: a BUDGET abort writes exactly one stub per abandoned execution', async () => {
+    // The mirror of the guard above: the reason guard must not be satisfiable by
+    // never writing a stub at all.
+    const h = realHarness({ stallFor: (req) => (req.repIndex === 1 ? { getAudioForever: true } : {}) });
+    const handle = handleOf({ execute: h.execute, reps: 1, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled } = await drain(handle, RUN_BUDGET_MS * 20);
+
+    expect(settled).toBe(true);
+    // Two abandoned executions — the attempt and its retry — and exactly one row
+    // each. Not zero (the rep would vanish from the denominator) and not two.
+    const rep1 = sweepRunsOfRep(h.posted, 1);
+    expect(rep1).toHaveLength(2);
+    expect(rep1.every((r) => r.status === 'failed')).toBe(true);
+    expect(rep1.every((r) => r.errors.includes(RUN_ABANDONED))).toBe(true);
+  });
+
+  it('GUARD: an execution that already POSTed gets no stub beside its own Run', async () => {
+    // `wrote = true` is set at CALL time in the wrapper, before any await, so an
+    // abort landing while the POST is in flight finds it already set. That is
+    // what stops a stub being written beside a real row for the SAME execution —
+    // two rows for one attempt, one of them fabricated.
+    //
+    // Reaching that window needs a per-run budget SHORTER than the POST budget,
+    // which `runTimeoutMs` being caller-supplied makes reachable.
+    const h = realHarness({
+      stallFor: (req) =>
+        req.repIndex === 1 && req.attempt === 1
+          ? { createMs: RUN_POST_TIMEOUT_MS * 4 }
+          : {},
+    });
+    const handle = handleOf({
+      execute: h.execute,
+      reps: 1,
+      runTimeoutMs: Math.round(RUN_POST_TIMEOUT_MS / 3),
+    });
+    const { settled } = await drain(handle, RUN_POST_TIMEOUT_MS * 20);
+    await vi.advanceTimersByTimeAsync(RUN_POST_TIMEOUT_MS * 8);
+
+    expect(settled).toBe(true);
+    // The abandoned execution really did enter the POST before the abort landed.
+    expect(h.createCalls.length).toBeGreaterThanOrEqual(2);
+    // THE criterion: nothing fabricated was written for it.
+    expect(h.posted.some((r) => r.errors.includes(RUN_ABANDONED))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('a stalled handshake gives its transport back too (ticket 048, R3-3)', () => {
+  it('an abort inside transport.start() still tears the transport down', async () => {
+    // `await transport.start(...)` is the one wait left that is not abort-aware,
+    // and it is the WORST one to leave: the transport already exists, so an
+    // abandoned attempt holds it — for Arm A an outbound sink plus an inbound tap,
+    // two AudioContexts — until a handshake that may never land resolves. Four
+    // abandoned attempts in a row is four live transports beside the sweep's own,
+    // against Chrome's cap of roughly six.
+    const h = realHarness({ stallFor: (req) => (req.repIndex === 0 ? {} : { startForever: true }) });
+
+    const handle = handleOf({ execute: h.execute, reps: 2, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled } = await drain(handle, RUN_BUDGET_MS * 40);
+    await vi.advanceTimersByTimeAsync(RUN_BUDGET_MS * 10);
+
+    expect(settled).toBe(true);
+    // The warmup plus two attempts on each of the two reps.
+    expect(h.transports).toHaveLength(5);
+
+    // THE criterion: nothing is still holding a context when the sweep is over.
+    expect(h.live).toBe(0);
+    // ...and abandoned attempts never STACK, which is 046's premise restated.
+    expect(h.maxLive).toBeLessThanOrEqual(2);
+
+    // Each abandoned attempt let go AT the abort, not when its handshake landed
+    // (it never does), so the bound above is earned rather than incidental.
+    for (const [i, record] of h.transports.entries()) {
+      const aborted = h.abortedAt[i];
+      if (aborted === null || aborted === undefined) continue;
+      expect(record.stoppedAt).not.toBeNull();
+      expect(record.stoppedAt! - aborted).toBeLessThanOrEqual(TOLERANCE_MS);
+    }
+  });
+
+  it('CONTROL: a healthy handshake keeps its transport for the run and stops it once (guard)', async () => {
+    const h = realHarness({});
+    const handle = handleOf({ execute: h.execute, reps: 2, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled } = await drain(handle, RUN_BUDGET_MS * 8);
+
+    expect(settled).toBe(true);
+    expect(h.transports).toHaveLength(3); // warmup + two reps, no retries
+    expect(h.abortedAt.every((a) => a === null)).toBe(true);
+    expect(h.maxLive).toBe(1);
+    expect(h.live).toBe(0);
   });
 });
