@@ -159,6 +159,13 @@ These exist because a violation would produce a number that looks fine and is wr
   have now lived entirely in that gap (ticket 021's port, ticket 037's env). Probe the real runtime
   — start the server clean and curl the endpoint — before believing a provider path works.
 - Commit in logical units with meaningful messages; never push without being asked.
+- **Do not run `prettier` on this repo** — there is no prettier config or dependency, so it
+  reformats unrelated regions and buries the real diff.
+- **Realtime audio is a MEDIA-track path in both directions.** Inbound arrives on the track
+  (`ontrack` -> `remoteAudioSink`, ticket 040) and outbound must ride a track too
+  (`OutboundAudioSink`, ticket 043) — `response.output_audio.delta` does NOT exist over WebRTC.
+  Live feeds that track from the mic; Replay feeds it from the pacer, and the sink belongs to
+  Replay's transport factory ONLY — adding one to Live doubles the microphone onto the wire.
 - **A lock commit stages ONLY the ticket's declared `test_files`** — never `git add -A`. A
   test-writer that runs a reference implementation first (a practice worth keeping: it has caught
   three real design problems) leaves source in the tree at exactly the moment the orchestrator
