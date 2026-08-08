@@ -204,6 +204,13 @@ export interface SessionController {
    * session keeps running and keeps measuring; only the sound is missing.
    */
   playbackUnavailable: boolean;
+  /**
+   * TICKET 049 ROUND 2 (STUB) — the BROWSER'S own words for why, as
+   * `${name}: ${message}`; null when playback is fine. It exists only on the
+   * error the `onPlaybackUnavailable` callback carries, which is what makes
+   * that seam load-bearing rather than decorative.
+   */
+  playbackUnavailableReason: string | null;
   actions: SessionActions;
 }
 
@@ -796,6 +803,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
     footer,
     elapsedMs,
     playbackUnavailable: store.playback.playbackUnavailable,
+    playbackUnavailableReason: null,
     actions,
   };
 }

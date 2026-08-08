@@ -149,6 +149,13 @@ export class ArmPlayback {
     this.opts.onPlaybackUnavailable?.(this.contextError);
   }
 
+  /**
+   * TICKET 049 ROUND 2 (STUB — see playback.degraded.test.ts) — drop the
+   * one-shot latch so the next enqueue attempts the factory again. Called by
+   * the controller from `newSession` ONLY, never from `reset()`.
+   */
+  clearPlaybackFailure(): void {}
+
   /** TICKET 049 — true once a chunk was dropped for want of a context. */
   get playbackUnavailable(): boolean {
     return this.unavailable;

@@ -180,8 +180,16 @@ export interface ReplayDeps {
   runs: RunsClient;
   runOnce: (request: ReplayRunRequest) => Promise<RunOnceResult>;
   startBatch: (request: ReplayBatchRequest) => BatchHandle;
-  /** On-demand playback of a run's output audio. NEVER called at render. */
-  playRun: (runId: string) => void;
+  /**
+   * On-demand playback of a run's output audio. NEVER called at render.
+   *
+   * TICKET 049 ROUND 2 — `onUnavailable` (OPTIONAL, so every existing host and
+   * test bag still typechecks) is how a press that could not build an
+   * AudioContext says so. Without it the press is a silent no-op, which is
+   * indistinguishable from a run whose stored audio is empty — a real
+   * diagnosis the operator makes on this screen.
+   */
+  playRun: (runId: string, onUnavailable?: (error: unknown) => void) => void;
   now: () => number;
   newId: () => string;
 
@@ -234,8 +242,9 @@ export interface ReplayDeps {
   startTake?: (options: ReplayTakeOptions) => Promise<TakeRecorder | CaptureDenied>;
   /** Splits a finished take into utterances the operator then confirms. */
   segmentTake?: (samples: Int16Array) => SegmentedUtterance[];
-  /** On-demand playback of the recorded take. NEVER called at render. */
-  playTake?: (take: RecordedTake) => void;
+  /** On-demand playback of the recorded take. NEVER called at render.
+   *  TICKET 049 ROUND 2 — same optional failure report as `playRun`. */
+  playTake?: (take: RecordedTake, onUnavailable?: (error: unknown) => void) => void;
   /**
    * The corpus version stamped onto a Recording saved as corpus. It is the
    * HOST's fact, not the view's: provenance belongs to whoever assembled the
