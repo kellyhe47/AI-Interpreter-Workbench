@@ -11,9 +11,18 @@ export interface ProviderCallOpts {
 /**
  * STT stream event. `type: 'final'` means TURN-final: the single closing
  * event for an utterance/turn (not a segment-final).
+ *
+ * TICKET 051 — `'speech_stopped'` is the endpointer announcing that the
+ * speaker has stopped, which happens BEFORE the closing transcript arrives.
+ * It is the cascade twin of realtime's `server_speech_stopped`, and it is the
+ * only mark from which "detected end of speech -> transcript" can be measured;
+ * without it `vad_fired` is a synthetic copy of `stt_final` and that stage is
+ * identically zero. It carries no text. A provider whose API exposes no such
+ * signal simply never emits it, and the orchestrator falls back to the
+ * turn-final instant — which is exactly today's behaviour.
  */
 export interface SttEvent {
-  type: 'partial' | 'final';
+  type: 'partial' | 'final' | 'speech_stopped';
   text: string;
   tStart: number;
   tEnd: number;

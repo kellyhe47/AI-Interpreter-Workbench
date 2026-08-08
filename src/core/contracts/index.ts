@@ -84,7 +84,11 @@ export function describeSttContract(
       const verdict = checkTurnFinalMapping(events);
       expect(verdict.ok, verdict.reason).toBe(true);
       for (const e of events) {
-        expect(['partial', 'final']).toContain(e.type);
+        // TICKET 051 — 'speech_stopped' joined the vocabulary: the endpointer's
+        // announcement, which precedes the closing transcript. It is optional
+        // (a provider without the signal never emits one), so the mapping
+        // check above still governs the partial/final shape of a turn.
+        expect(['partial', 'final', 'speech_stopped']).toContain(e.type);
         expect(typeof e.text).toBe('string');
         expect(typeof e.tStart).toBe('number');
         expect(typeof e.tEnd).toBe('number');
