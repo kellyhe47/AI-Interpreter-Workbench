@@ -123,3 +123,106 @@ analysis, with the operator's agreement, because it would cost more than it buys
 - Every existing capture test still passes with the widened type
 - No code path mutes or gates the microphone during output (source-level guard, same shape as the
   no-pause guard above)
+
+---
+
+## ROUND 2 — code review findings (independent reviewer, against `345fb6c`)
+
+Reviewed on a clean snapshot: 102 files / 1798 tests green, both typechecks clean. Every AC is
+satisfied in the SHIPPED behaviour — the reviewer could find no way Live still pauses, still renders
+a control, or still inherits an implicit constraint. Nine mutations run; two slipped.
+
+### R2-1 (MAJOR) — Part 2's headline claim is untested, and the anti-gating guard omits the only files holding a `MediaStreamTrack`
+**Mutation M6 SLIPPED, 1147/1147 green + typecheck green:** rewrote the Live forward in
+`browserDeps.ts` to `getUserMedia({ audio: true })` AND added
+`for (const t of stream.getAudioTracks()) t.enabled = false;`. The ticket's headline requirement
+silently reverted *and* the microphone hard-muted, with nothing red.
+The wiring is correct TODAY (`browserDeps.ts:428` forwards `LIVE_CAPTURE_CONSTRAINTS` verbatim, and
+`CaptureConstraints` is structurally assignable to `MediaStreamConstraints`) — but nothing pins it,
+and the mic-gating guard scans only `capture.ts`, `useSessionController.ts`, `LiveView.tsx`.
+`browserDeps.ts` was deliberately untouched by 047, so no reviewer looks there.
+**DECIDED:**
+- Extend the `.enabled =` / `.muted =` guard to `src/client/browserDeps.ts` and
+  `src/client/transport/realtime.ts`, with an explicit exemption for `el.muted = options.muted` —
+  that is ticket 046's Replay silent-sink on an AUDIO ELEMENT, not the microphone
+- Pin the production forward: stub `navigator.mediaDevices.getUserMedia`, call
+  `buildBrowserDeps().startCapture({...})`, assert the received argument deep-equals the constraint
+  object. Same shape as the existing "production Live sink PLAYS on attach" test.
+
+### R2-2 (MAJOR) — `SessionDeps.remoteAudioSink` is a dead field on the controller's surface
+`useSessionController.ts:154` is its ONLY occurrence in the file; never read. In production the sink
+Live actually hears is the one `browserDeps.ts:378` closes over and hands to the TRANSPORT factory.
+This is the same landmine the ticket deleted `togglePlay` to avoid — *"a dead action is a control
+someone re-wires later"* applies verbatim to a dead dependency. It also means
+`expect(audio.calls).not.toContain('pause')` in three tests can only ever catch
+CONTROLLER-originated pauses, never one introduced in `realtime.ts` or `browserDeps.ts`.
+**DECIDED:** delete it, with its `makeDeps` plumbing. Keeping a dead seam while deleting a dead
+action for the stated reason is incoherent. The extended source guards from R2-1 are what replace
+the (illusory) coverage.
+
+### R2-3 (MINOR, but the one with a user-visible failure mode) — autoplay-rejection recovery is gone
+Four stale comments in `browserDeps.ts` (`:131`, `:161`, `:173`, `:377`) describe a control that no
+longer exists. `:173` is not just prose — it is the JUSTIFICATION for
+`void node.play?.()?.catch(() => {})`: *"a rejected autoplay is not a failure worth surfacing: the
+operator still has the play button."* With the button gone, a rejected autoplay is swallowed with no
+recovery and no surfaced error — a silent realtime session with no affordance. Same class on the
+cascade side: `ArmPlayback.play()` is the only `ctx.resume()` in the client (`playback.ts:156`,
+documented at `:21` as the autoplay-policy recovery) and now has ZERO non-Replay callers, so a
+context that starts `suspended` never recovers.
+Low probability — "Start microphone" gives Chrome sticky activation first, and the mic grant exempts
+the element autoplay policy — and NOT a new failure, since autoplay already worked without the
+button. But the fallback is gone and the comments now assert a lie.
+**DECIDED:** fix all four comments, and call `store.playback.play()` once from the `start` action,
+inside the real user gesture, purely to force `ctx.resume()`. That reintroduces no control and trips
+no locked guard (the source greps target `pause`/`suspend`/`togglePlay`, never `play`).
+
+### R2-4 (MINOR) — `LiveView.tsx:62` still advertises `'playing'`
+The removal of the `playing` branch was traced hardest and is CORRECT: `status: 'playing'` is set at
+exactly one place (`sessionMachine.ts:280`, `case 'PLAY'`), `dispatch({type:'PLAY'})` occurs nowhere
+in `src/` outside tests, `RECONNECTED` cannot manufacture a status nothing can enter, and
+`TargetView.status` is only `'in-flight' | 'ready' | 'failed'`. Nothing outside `LiveView.tsx` and
+its tests reads the attribute. **Only the doc line lies.** Drop `'playing'` from line 62.
+
+### R2-5 (MINOR) — orphaned machine states: KEEP, and say so
+`PLAY` / `PLAYBACK_ENDED` / `status: 'playing'` are now unreachable, and `'playing'` remains in six
+lists (`ACTIVE_STATUSES`, `TRANSPORT_STATUSES`, `STOPPABLE_STATUSES`, `TICKING_STATUSES`,
+`LIVE_STATUSES`, the `REQUEST_SWITCH` queueing condition).
+**DECIDED: keep them.** Removing `'playing'` from the union breaks the locked state-table test that
+deliberately pins "no button even in `status: 'playing'`" — a hedge worth keeping, since it is what
+catches a reintroduction that goes through the machine. Document them as deliberately retained.
+**AGENTS.md convention applies instead:** add `togglePlay`, `onTogglePlay`, `PlayGlyph`, `PauseGlyph`
+to `src/client/deletions.test.ts` — *"Deleted code has no test of its own; that guard is what keeps
+it deleted."* 047 greps two files where the repo's stated mechanism is that manifest.
+
+### R2-6 (MINOR) — the anti-pause behavioural guard is single-chunk-shallow
+**Mutation M7 SLIPPED, 1147/1147 green:** `remoteAudioSink['pause']()` + `store.playback['pause']()`
+inserted at the top of `onAudio`, BEFORE `enqueue`. Bracket access dodges the `/\.pause\s*\(/`
+regex; the pre-enqueue placement dodges `rec.suspends === 0`, because on the first chunk
+`this.context` is still null and the cascade fixture emits exactly ONE chunk. Live would suspend its
+own context on every chunk after the first, suite green.
+The same edit AFTER `enqueue` IS caught (M8). **DECIDED:** give the cascade fixture >= 2 audio
+chunks and assert over multiple chunks. A regex guard alone cannot survive bracket access.
+
+### R2-7 (MINOR) — `LIVE_CAPTURE_CONSTRAINTS` also governs REPLAY's corpus recording
+`replay/capture.ts:136` forwards into `startCapture`, which now hardcodes the constant — so
+`startTake` requests the same three constraints. Behaviourally a no-op in Chrome and arguably
+correct (one microphone path), but the NAME says LIVE, and someone tuning "the Live mic control"
+would silently change how the CORPUS is recorded — upstream of every WER and latency number.
+**DECIDED:** keep the name (it is pinned by a locked test), and document the inheritance explicitly
+at `replay/capture.ts`.
+
+### R2-8 (MINOR) — test-file coupling
+`LiveView.autoplay.test.tsx:40` imports `../deletions.test`, re-executing all 11 `ticket-012 DELETE
+manifest` suites inside the autoplay file; only 25 of its 36 tests are 047's, and a deletions
+failure reports under an unrelated file. Move `stripComments` into a non-`.test` helper module.
+
+### VERIFIED CORRECT (reviewer, mutation-backed)
+`togglePlay` gone from the type AND the actions object, pinned by `Object.keys(actions).sort()`
+equality rather than a grep (M3 caught). Button/glyphs/props deleted, no orphaned styles, no unused
+imports. Duration readout kept and now renders after stop too (M2 caught, 8 failures). Cascade
+autoplay pinned behaviourally (`started === [50400]`, `suspends === 0`); realtime autoplay pinned
+against the PRODUCTION `buildBrowserDeps()` sink, not a fake. Replay/BlindCompare untouched — the
+`replay/capture.ts` change is type-only. The `play2.1 s` vacuity trap is properly handled: the
+leading-boundary-only matcher hits `play2.1 s` and correctly misses the `autoplay on` caption, and
+`readyTarget()` sets `hasData: true` so the table exercises the branch the button lived in (M1
+caught, 19 failures).
