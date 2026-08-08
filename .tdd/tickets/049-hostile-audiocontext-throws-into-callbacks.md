@@ -75,3 +75,76 @@ asserting they do not throw). The methods survive because they sit on the shared
 interface and ticket 047 explicitly permitted them on the seam, not because Replay drives them.
 
 One clause: *"because the seam is shared with Replay's muted sink"*.
+
+---
+
+## ROUND 2 — code review findings (independent reviewer, against `aa1e7c9`)
+
+16 of 18 mutations caught, including every one the test-writer claimed. Measurement really is
+untouched — `queuedAt`/`totalSamples` are stamped before `getContext()`, and ledger records, the
+duration readout and the footer are byte-identical between a healthy and a hostile run, pinned by a
+real cross-run equality test rather than a re-assertion of literals. Two mutations slipped and two
+operator-visible falsehoods were found.
+
+### R2-1 (MAJOR) — the notice stays up over an AUDIBLE realtime session after a mid-session mode switch
+`LiveView.tsx:1085`. The notice is gated only on `controller.playbackUnavailable` (latched for the
+App's lifetime) and `showSessionArea`. But Live's Realtime/Cascade buttons are never disabled and
+`requestMode` swaps the transport mid-session.
+**Reproduced against the real `App`:** start Cascade with a hostile factory -> chunk drops -> notice
+appears -> click **Realtime** -> transport swaps, audio now rides `remoteAudioSink` and is audible
+-> **the notice is still on screen.**
+This is precisely the "realtime shows the notice while audible" case the report-from-`enqueue`-only
+rule exists to prevent. That rule protects the START path and nothing else — the mode switch walks
+straight around it.
+**DECIDED:** gate the notice on `state.mode === 'cascade'` as well.
+
+### R2-2 (MAJOR) — the notice survives Stop and then states a falsehood
+Same site. `showSessionArea = !idleLike && !denied`, so `status === 'stopped'` still renders the
+session area. Confirmed by probe: after **Stop session** the notice remains, reading *"The session
+is still running and still being measured"* — it is not running.
+**DECIDED:** gate on the live/stoppable statuses too, so it cannot outlive the session it describes.
+
+### R2-3 (MAJOR, test gap) — the `onPlaybackUnavailable` wiring is UNOBSERVABLE
+`useSessionController.ts:329`. **Mutation M11 SLIPPED: deleting the wiring entirely leaves all 1839
+tests green.** `onAudio` already calls `bump()` immediately after `store.playback.enqueue(e.pcm)`,
+so the re-render happens regardless — the AC "the operator is TOLD" is currently satisfied
+INCIDENTALLY. A future refactor that moves or conditions that `bump()` kills the notice silently,
+and nothing pins the seam the stub commit introduced.
+**DECIDED:** pin the callback itself — drive `ArmPlayback` through a path with no other re-render
+source, or assert the controller callback fires.
+
+### R2-4 (MINOR) — a dead branch that advertises the one thing this ticket forbids
+`playback.ts:231`: `this.buffered = []` inside `play()`'s `ctx === null` branch. Unreachable
+(`buffered` is only pushed when `enqueue` obtained a context, and once obtained `getContext()` never
+returns null). **Mutation M13 SLIPPED** — deleting it leaves the suite green. Harmless today, but it
+reads as "drop queued audio without reporting", which is exactly what R2-2's rule prohibits.
+**DECIDED:** delete it.
+
+### R2-5 (MINOR) — Replay degrades COMPLETELY silently
+`browserDeps.ts:369/394` wire no `onPlaybackUnavailable`. If the bag's single `AudioContext` throws,
+`playRun` and `playTake` become no-ops with zero feedback anywhere — previously `playTake` at least
+threw out of the click handler. No AC covers it.
+**DECIDED:** fold it in. A press that produces no sound and no message is indistinguishable from a
+run with no audio, which is a real diagnosis the operator makes in Replay.
+
+### R2-6 (MINOR) — the latch is PAGE-lifetime, and a transient failure is unrecoverable
+The reviewer confirmed the store is built once at shell level (`App.tsx:144`), NOT per-LiveView
+mount — so the mount-leak concern is unfounded. But `contextFailed` can then never clear without a
+page reload, and `newSession` cannot recover. For the context-cap case never-retry is right. For a
+TRANSIENT failure — Safari policy state at the Start gesture, or a cap that frees when a capture or
+tap context closes — Live is permanently mute until reload.
+**DECIDED:** clear `contextFailed`/`reported` from `newSession`, NOT from `reset()`. One throw per
+session is a negligible price for recovering a transient failure; `reset()` must still not clear it,
+or the notice flickers per utterance (pinned by mutation M10).
+
+### R2-7 (accepted, no change) — the realtime guard tests an assumption, not the mechanism
+`realtime.ts:596` DOES call `h.onAudio?.()` on `response.output_audio.delta`, and the controller's
+`onAudio` is mode-agnostic; the REALTIME GUARD test strips the audio event with `dropAudio: true`,
+so it only proves "no enqueue -> no notice". The load-bearing claim — that WebRTC never delivers
+that event — is ticket 040's empirical finding recorded as a code comment, not something a fixture
+can prove. Accepted as-is; it is on the operator smoke list.
+
+## STILL UNPROVEN — operator's real-Chrome check
+- Replay's single reused context, once suspended by autoplay policy, actually RESUMES on the 2nd-10th press
+- The whole page stays under Chrome's cap across a long QA pass, once capture contexts and the realtime in/outbound taps are counted with their async closes
+- `response.output_audio.delta` truly never arrives on the WebRTC data channel (040's finding)
