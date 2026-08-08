@@ -34,8 +34,9 @@
  * RunConfigPanel, no Recording selected:
  *   button 'Run' and button 'Batch sweep…' both carry the `disabled`
  *   attribute and a non-empty `title` mentioning the Recording. With a
- *   Recording selected both are enabled, and stay enabled while a run this
- *   panel started is still in flight.
+ *   Recording selected both are enabled — until a run this panel started is in
+ *   flight, which ticket 044 makes a second, differently-explained reason the
+ *   control cannot act (contract in ReplayView.inflight.test.tsx).
  * ==========================================================================
  */
 
@@ -529,20 +530,35 @@ describe('ticket 024 — Run and Batch sweep have no affordance without a select
     expect(fakes.batchRequests[0]!.recordingIds).toContain(CORPUS_REC.id);
   });
 
-  /* ---- the disabled state is about SELECTION, not about being busy -------- */
+  /* ---- SUPERSEDED BY TICKET 044 -------------------------------------------
+   * This pin used to assert the opposite: that a run in flight left Run
+   * enabled, because "whether the operator may start a run is not a fact about
+   * the previous request". QA proved that wrong in the only way that counts —
+   * with no feedback at all the operator clicks again, and a second billable
+   * run starts. So 024's own principle now applies to the busy case too: while
+   * a run is in flight the button cannot act, therefore it does not look
+   * actionable. The reason it names is the RUN, never the selection; the full
+   * in-flight contract lives in ReplayView.inflight.test.tsx.
+   * ----------------------------------------------------------------------- */
 
-  it('a run still in flight does NOT disable Run — the gate is the selection', async () => {
+  it('a run still in flight disables Run, and says the run — not the selection — is why', async () => {
     const fakes = await mount({ recordings: [CORPUS_REC], runNeverSettles: true });
     await selectRecording(CORPUS_REC.id);
 
     fireEvent.click(actionButton(RUN));
     await waitFor(() => expect(fakes.runOnce).toHaveBeenCalledTimes(1));
 
-    // The request never settles. The button's state is not the request's.
-    expect(actionButton(RUN)).toBeEnabled();
-    // And whatever title it carries, it is not the no-selection explanation.
-    expect(actionButton(RUN).getAttribute('title') ?? '').not.toMatch(
-      /select a recording|no recording/i,
-    );
+    // The request never settles, so the guard is the only thing that can stop
+    // a second one.
+    await waitFor(() => expect(actionButton(RUN)).toBeDisabled());
+    fireEvent.click(actionButton(RUN));
+    fireEvent.click(actionButton(RUN));
+    await waitFor(() => expect(actionButton(RUN)).toBeDisabled());
+    expect(fakes.runOnce).toHaveBeenCalledTimes(1);
+
+    // A Recording IS selected — the explanation must not be the 024 gate's.
+    const title = actionButton(RUN).getAttribute('title') ?? '';
+    expect(title.length).toBeGreaterThan(0);
+    expect(title).not.toMatch(/select a recording|no recording/i);
   });
 });
