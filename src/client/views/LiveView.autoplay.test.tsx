@@ -594,24 +594,45 @@ describe('source-level guarantees — Live can never suspend its own audio', () 
   ];
 
   /**
-   * ROUND 3 (R3-2, R3-3) — WHAT THIS GUARD IS AND IS NOT.
+   * ROUND 3 (R3-2, R3-3, R3-4) — WHAT THIS GUARD IS AND IS NOT.
    *
    * It is a TRIPWIRE, not proof. Nothing drives a real `MediaStream` through
    * the Live capture path in jsdom, so there is no behavioural partner here the
-   * way the multi-chunk `suspends === 0` assertion partners the pause grep. A
-   * determined edit can still get past it (`Reflect.set`, a computed key, a
-   * helper in a file not on this list). It exists to make the OBVIOUS
-   * reintroduction loud, which is the failure mode that actually happened
-   * twice: `t.enabled = false` (M6b) and `t['enabled'] = false` (M10).
+   * way the multi-chunk `suspends === 0` assertion partners the pause grep. It
+   * exists to make the OBVIOUS reintroduction loud, which is the failure mode
+   * that actually happened: `t.enabled = false` (M6b), `t['enabled'] = false`
+   * (M10), and the CAST form below.
    *
-   * R3-2: bracket access is covered, because that is exactly how M10 slipped.
-   * R3-3: the RECEIVER must be track-ish. Keying on the property name alone
-   * meant an unrelated `this.enabled = false` anywhere in realtime.ts (~750
-   * lines) would fail a test whose message claims barge-in was killed — a guard
-   * that fails for a reason other than the one it states is worse than none.
+   * KNOWN ESCAPE ROUTES — written down rather than implied, so nobody reads a
+   * green suite here as a guarantee:
+   *   - a receiver this pattern does not recognise: `ts[0].enabled = false`
+   *     and `ts[0]!.enabled = false` ARE caught (the `]`, and the `!` this
+   *     codebase's strict indexing forces after it), but
+   *     `for (const m of list) m.enabled = false` and
+   *     `list.forEach((m) => { m.enabled = false; })` are NOT;
+   *   - `Reflect.set(track, 'enabled', false)`, or a computed key;
+   *   - a helper in a file outside TRACK_HOLDING_FILES.
+   *
+   * R3-2: bracket access is covered — that is how M10 slipped.
+   * R3-3: the RECEIVER must be track-ish, so an unrelated `this.enabled =
+   * false` in realtime.ts (~750 lines) does not fail a test whose message
+   * claims barge-in was killed. A guard that fails for a reason other than the
+   * one it states is worse than none.
+   * R3-4 (this round): `)` and `]` count as track-ish receivers too. Narrowing
+   * to NAMES alone reopened a hole round 2 did not have. `MediaTrackLike`
+   * declares only `stop()` and `RtcMediaStreamLike.getAudioTracks()` returns
+   * `unknown[]`, so inside capture.ts and realtime.ts a bare `track.enabled =`
+   * does not even typecheck — the form an implementer would ACTUALLY have to
+   * write is the cast, `(track as unknown as { enabled: boolean }).enabled =
+   * false`, and that ends in `)`. The name-only guard fired solely on code that
+   * could never compile. A non-null assertion may sit between the receiver and
+   * the property (`getAudioTracks()[0]!.enabled`) — `noUncheckedIndexedAccess`
+   * makes that the ordinary spelling here, so `!` is allowed through.
+   * `this.enabled` still passes: its receiver token is `this`, with no `)` or
+   * `]` before the property.
    */
   const GATES_A_TRACK =
-    /\b(\w*(?:track|stream|mic|audio)\w*|t|tr|trk)\s*(?:\.\s*enabled|\[\s*['"]enabled['"]\s*\])\s*=[^=]/i;
+    /(?:\b\w*(?:track|stream|mic|audio)\w*|\bt\b|\btr\b|\btrk\b|\)|\])\s*!?\s*(?:\.\s*enabled|\[\s*['"]enabled['"]\s*\])\s*=[^=]/i;
 
   for (const file of TRACK_HOLDING_FILES) {
     it(`${file} gates no microphone track — barge-in stays possible`, () => {
