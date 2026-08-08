@@ -136,12 +136,28 @@ const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
  * stream to the same element is exactly the reconnect story, and one element
  * per session keeps a stale one from playing under a fresh one.
  */
-function createRemoteAudioSink(): RemoteAudioSink {
+/**
+ * TICKET 046 ROUND 2 (R2-3) — `muted` is what makes this sink serve Replay too.
+ *
+ * Chromium has a long history of delivering SILENCE from a remote WebRTC stream
+ * into `createMediaStreamSource` unless that stream is ALSO sunk to a media
+ * element; without one, Arm A would upload a file of zeros that passes every
+ * format assertion. Muting keeps the stream PULLED while producing no sound at
+ * all, which is exactly what "nothing in Replay autoplays" (PRD §7) protects —
+ * so one seam serves both screens instead of two that can drift apart.
+ */
+interface RemoteAudioSinkOptions {
+  /** Replay: true (pulled, silent). Live: false — this is what the operator hears. */
+  muted: boolean;
+}
+
+function createRemoteAudioSink(options: RemoteAudioSinkOptions): RemoteAudioSink {
   let el: HTMLAudioElement | null = null;
   const element = (): HTMLAudioElement => {
     if (el === null) {
       el = document.createElement('audio');
       el.autoplay = true;
+      el.muted = options.muted;
       // Not a control surface: Live's own play/pause button drives it.
       el.controls = false;
       el.style.display = 'none';
@@ -149,17 +165,21 @@ function createRemoteAudioSink(): RemoteAudioSink {
     }
     return el;
   };
+  // `play()` returns a promise in browsers and UNDEFINED in jsdom, so the
+  // optional call has to be optional on BOTH halves — otherwise the seam throws
+  // in every test that touches it.
+  const attemptPlay = (node: HTMLAudioElement): void => {
+    // A rejected autoplay is not a failure worth surfacing: the operator
+    // still has the play button, which drives this same element.
+    void node.play?.()?.catch(() => {});
+  };
   return {
     attach: (stream) => {
       const node = element();
       node.srcObject = stream as unknown as MediaStream;
-      // A rejected autoplay is not a failure worth surfacing: the operator
-      // still has the play button, which drives this same element.
-      void node.play?.().catch(() => {});
+      attemptPlay(node);
     },
-    play: () => {
-      void element().play?.().catch(() => {});
-    },
+    play: () => attemptPlay(element()),
     pause: () => element().pause(),
   };
 }
@@ -210,10 +230,16 @@ export function buildReplayDeps(): ReplayDeps {
   // the mic already rides the media track and the session controller fans mic
   // frames into `sendAudio` — a sink there would double the microphone.
   //
-  // NO `remoteAudioSink` either, and deliberately: NOTHING IN REPLAY AUTOPLAYS
-  // (PRD §7), and a sink here would sound the model's track the moment it
-  // arrived. The measurement Replay needs comes from the transport's
-  // `audio_queued` mark, which is stamped whether or not anything is listening.
+  // ROUND 2 (R2-3) — and a MUTED `remoteAudioSink`. Replay used to wire none at
+  // all, on the grounds that nothing in Replay autoplays (PRD §7); the trouble
+  // is that Chromium may hand `createMediaStreamSource` pure silence for a
+  // remote WebRTC stream that is sunk nowhere else, so the tap above would
+  // faithfully capture a file of zeros that passes every format assertion.
+  // Muted keeps the stream pulled and produces no sound, which is what §7 is
+  // actually about. ONE sink for the bag, so a reconnect re-attaches to the
+  // same element instead of stacking them.
+  const remoteAudioSink: RemoteAudioSink = createRemoteAudioSink({ muted: true });
+
   const createTransport = (config: RunOnceConfig): InterpreterTransport => {
     if (config.architecture === 'realtime') {
       return new RealtimeTransport(
@@ -222,6 +248,9 @@ export function buildReplayDeps(): ReplayDeps {
           fetchImpl: browserFetch,
           rtcFactory: () => new RTCPeerConnection() as unknown as RtcPeerConnectionLike,
           now: () => Date.now(),
+          // R2-3 — the muted element that keeps the remote stream flowing into
+          // the tap. Silent, so Replay still autoplays nothing.
+          remoteAudioSink,
           createOutboundAudioSink: () =>
             createOutboundAudioSink({
               audioContextFactory: (o) =>
@@ -264,6 +293,13 @@ export function buildReplayDeps(): ReplayDeps {
     recordings,
     runs,
     blindComparisons,
+    // TICKET 046 ROUND 2 (R2-1) — PUBLISHED, though this view never calls it.
+    // The Replay transport wiring (outbound sink, inbound tap, muted remote
+    // sink) lives here and nowhere else, and an assertion that reads this
+    // module's SOURCE TEXT is satisfied by the import line alone — the whole
+    // property could be deleted with the suite green. Exposing the very factory
+    // `runOnce` is bound to makes the wiring assertable on the built object.
+    createTransport,
     runOnce: (request: ReplayRunRequest): Promise<RunOnceResult> =>
       runOnce({
         recordingId: request.recordingId,
@@ -339,7 +375,8 @@ export function buildBrowserDeps(): BrowserDeps {
   // the session: it is handed to every realtime transport the factory builds
   // (so a reconnect re-attaches to the same element) and to the controller, so
   // the play/pause control moves exactly the audio the operator is hearing.
-  const remoteAudioSink = createRemoteAudioSink();
+  // AUDIBLE, unlike Replay's: this is the sound the operator is listening to.
+  const remoteAudioSink = createRemoteAudioSink({ muted: false });
 
   // TICKET 041 — ONE live-sessions client, handed to BOTH seams: the write
   // seam the controller POSTs a finished session through, and the hydration

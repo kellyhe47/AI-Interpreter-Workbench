@@ -563,7 +563,13 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // Belt and braces for the paths that never awaited `finished` at all.
   disarm();
 
-  transport.stop();
+  // TICKET 046 ROUND 2 (R2-7) — AWAITED. A realtime run holds two AudioContexts
+  // (the outbound sink and the inbound tap) and Chrome caps concurrent ones at
+  // roughly six, so a sweep that starts the next run before this one's contexts
+  // are really gone eventually makes a construction throw and kills a run. Every
+  // transport that closes nothing still returns void, and awaiting void costs a
+  // microtask.
+  await transport.stop();
 
   // TICKET 046 — the transport's OWN captured output audio, for the arm whose
   // audio never reaches `onAudio` at all: over WebRTC the model's voice rides

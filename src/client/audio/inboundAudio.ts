@@ -44,6 +44,7 @@
 
 import { SAMPLE_RATE } from '../../core/protocol';
 import type { InboundAudioTap } from '../transport/realtime';
+import { floatTo16 } from './pcm';
 
 /** The tap's context rate. Derived from the wire rate, never re-literalled. */
 export const INBOUND_SAMPLE_RATE = SAMPLE_RATE;
@@ -111,26 +112,6 @@ export interface InboundAudioTapOptions {
  */
 const CAPTURE_BUFFER_SIZE = 2048;
 
-/** PCM16 full scale. `v * 32768` maps -1 -> -32768 and +1 -> 32768 (clamped). */
-const PCM16_SCALE = 32_768;
-const PCM16_MIN = -32_768;
-const PCM16_MAX = 32_767;
-
-/**
- * One float sample to PCM16, CLAMPED AT FULL SCALE.
- *
- * Web Audio permits samples outside [-1, 1] (a mixed or gained graph routinely
- * produces them), and 1.0 itself would wrap to -32768 under a bare 16-bit
- * truncation. Clamping keeps an over-range sample loud rather than turning it
- * into aliased garbage that blind compare would hear as a defect of the ARM.
- */
-function toPcm16(sample: number): number {
-  const scaled = Math.round(sample * PCM16_SCALE);
-  if (scaled > PCM16_MAX) return PCM16_MAX;
-  if (scaled < PCM16_MIN) return PCM16_MIN;
-  return scaled;
-}
-
 export function createInboundAudioTap(options: InboundAudioTapOptions): InboundAudioTap {
   // EAGER, exactly once — the mirror of the outbound sink. The FACTORY is what
   // keeps jsdom safe: a transport that never sees an audio track never calls
@@ -146,6 +127,31 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
   let processor: InboundProcessorLike | null = null;
   let gain: InboundGainLike | null = null;
   let closed = false;
+  /** The single in-flight (or settled) context close. Null until close(). */
+  let closing: Promise<void> | null = null;
+
+  /**
+   * ROUND 2 (R2-4) — THE CAPTURE GATE, and it is SHUT BY DEFAULT.
+   *
+   * The media track runs from the moment the answer is applied; only some of it
+   * is the model speaking. `capturing` is the model's own window
+   * (`output_audio_buffer.started` .. `.stopped`); `graceRemaining` is the
+   * SAMPLE BUDGET that survives the window's end, because `.stopped` marks the
+   * end of the output BUFFER and the last syllable is still on the wire. A
+   * budget rather than a frame count: whichever frame overruns it is truncated
+   * at exactly the sample where the grace runs out.
+   */
+  let capturing = false;
+  let graceRemaining = 0;
+
+  /** How many leading samples of this frame the gate lets through. */
+  const admit = (length: number): number => {
+    if (capturing) return length;
+    if (graceRemaining <= 0) return 0;
+    const kept = Math.min(length, graceRemaining);
+    graceRemaining -= kept;
+    return kept;
+  };
 
   /**
    * Tears down the graph of the PREVIOUS connection without touching `chunks`.
@@ -183,8 +189,14 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
       nextProcessor.onaudioprocess = (ev): void => {
         if (closed) return;
         const frame = ev.inputBuffer.getChannelData(0);
-        const pcm = new Int16Array(frame.length);
-        for (let i = 0; i < frame.length; i++) pcm[i] = toPcm16(frame[i] ?? 0);
+        const keep = admit(frame.length);
+        // DROPPED, never buffered: the gap between utterances must not be able
+        // to reach the file by any later decision.
+        if (keep === 0) return;
+        // ONE encoder for the whole client (R2-5). `floatTo16` is what the
+        // microphone path, the WAV writer and every stored recording already
+        // use — a second convention here would drift by an LSB and then freely.
+        const pcm = floatTo16(keep === frame.length ? frame : frame.subarray(0, keep));
         chunks.push(pcm);
         captured += pcm.length;
       };
@@ -197,9 +209,21 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
       processor = nextProcessor;
       gain = nextGain;
     },
-    // STUB (test-writer, round 2) — the capture gate. Implement R2-4 here.
-    startWindow(): void {},
-    endWindow(): void {},
+    startWindow(): void {
+      if (closed) return;
+      // Re-arming during the grace RESUMES full capture: the model is speaking
+      // again, and what follows is speech rather than tail.
+      capturing = true;
+      graceRemaining = 0;
+    },
+    endWindow(): void {
+      if (closed) return;
+      // Inert without an open window: a stray `.stopped` must not hand the gap
+      // a grace it never earned.
+      if (!capturing) return;
+      capturing = false;
+      graceRemaining = INBOUND_TAIL_GRACE_SAMPLES;
+    },
     take(): Int16Array {
       // NON-DESTRUCTIVE: the runner reads this AFTER stop() has closed the tap,
       // and a second read (upload, then playback) must see the same recording.
@@ -211,13 +235,27 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
       }
       return out;
     },
-    close(): void {
-      if (closed) return;
+    close(): Promise<void> {
+      // Idempotent AND still awaitable: a second caller gets the SAME close,
+      // never a second `ctx.close()` and never a promise that resolves early.
+      if (closing !== null) return closing;
       closed = true;
+      capturing = false;
+      graceRemaining = 0;
       release();
       // The recording itself is deliberately NOT cleared: `take()` runs after
       // this, and the bytes are the whole point of the tap.
-      void ctx.close();
+      //
+      // R2-7 — AWAITED, not fired and forgotten: a realtime Replay run holds two
+      // AudioContexts and Chrome caps concurrent ones (~6), so a lagging close
+      // is what makes construction throw part-way through a 60-run sweep. It
+      // never REJECTS — a wedged context is not something a run can act on, and
+      // failing the run over it would lose the measurement.
+      closing = Promise.resolve(ctx.close()).then(
+        () => undefined,
+        () => undefined,
+      );
+      return closing;
     },
   };
 }

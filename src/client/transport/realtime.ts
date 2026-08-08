@@ -329,6 +329,15 @@ export class RealtimeTransport implements InterpreterTransport {
    * transport has been stopped, so the closed tap has to outlive the connection.
    */
   private inboundTap: InboundAudioTap | null = null;
+  /**
+   * ROUND 2 (R2-4) — whether the model is currently speaking, per
+   * `output_audio_buffer.started` / `.stopped`. It belongs to the SESSION, not
+   * to the connection: a track that arrives mid-answer (a reconnect) must open
+   * its window immediately or that whole utterance records nothing.
+   */
+  private outputWindowOpen = false;
+  /** ROUND 2 (R2-7) — the single in-flight tap close, so stop() is awaitable. */
+  private closing: Promise<void> | null = null;
 
   /** Client-assigned utterance counter (0-based). */
   private utt = 0;
@@ -401,6 +410,10 @@ export class RealtimeTransport implements InterpreterTransport {
         if (buildTap !== undefined) {
           this.inboundTap ??= buildTap();
           this.inboundTap.attach(stream);
+          // A track that arrives WHILE the model is speaking (a reconnect
+          // mid-answer) opens its window here; otherwise the gate stays shut
+          // and that utterance would be lost to the next `.started`.
+          if (this.outputWindowOpen) this.inboundTap.startWindow();
         }
       };
 
@@ -554,13 +567,28 @@ export class RealtimeTransport implements InterpreterTransport {
       // this event is the instant that audio begins on the track, which is the
       // same quantity cascade calls "first audio queued".
       case 'output_audio_buffer.started': {
-        if (this.audioQueuedMarked) break;
-        this.audioQueuedMarked = true;
-        h.onTiming?.({ event: 'audio_queued', t: this.deps.now(), utt: this.utt });
+        // THE MEASUREMENT FIRST, and still exactly once per utterance. The gate
+        // below only READS this event; the stamp must not move because capture
+        // was added underneath it (AC3).
+        if (!this.audioQueuedMarked) {
+          this.audioQueuedMarked = true;
+          h.onTiming?.({ event: 'audio_queued', t: this.deps.now(), utt: this.utt });
+        }
+        // ROUND 2 (R2-4) — and THEN the capture gate, on EVERY `.started`
+        // including a duplicate the measurement suppresses: the suppression is
+        // about not re-timing an utterance, while a re-armed buffer really is
+        // more speech, and a gate that skipped it would record nothing.
+        this.outputWindowOpen = true;
+        this.inboundTap?.startWindow();
         break;
       }
       case 'output_audio_buffer.stopped': {
-        // Inert: the end of the buffer measures nothing this project reports.
+        // Still inert for MEASUREMENT: the end of the buffer times nothing this
+        // project reports. It closes the capture window (R2-4) and no more —
+        // the tap keeps a tail grace past it, because this event marks the end
+        // of the model's buffer and not the end of the sound on the wire.
+        this.outputWindowOpen = false;
+        this.inboundTap?.endWindow();
         break;
       }
       case 'response.done': {
@@ -603,9 +631,12 @@ export class RealtimeTransport implements InterpreterTransport {
     }
   }
 
-  stop(): void {
-    if (this.stopped) return;
+  stop(): void | Promise<void> {
+    // A second stop() returns the SAME close, so a caller that awaits it twice
+    // waits for the one real teardown rather than resolving early.
+    if (this.stopped) return this.closing ?? undefined;
     this.stopped = true;
+    this.outputWindowOpen = false;
     this.channel?.close();
     this.pc?.close();
     this.channel = null;
@@ -618,7 +649,18 @@ export class RealtimeTransport implements InterpreterTransport {
     // TICKET 046 — release the inbound context too. Closed EXACTLY ONCE (the
     // `stopped` guard above makes stop() single-shot) and NOT nulled: the
     // runner reads the captured audio after this returns.
-    this.inboundTap?.close();
+    //
+    // ROUND 2 (R2-7) — and the close is HANDED BACK, so `runOnce` can wait for
+    // the AudioContext to really go away before the next run builds two more.
+    // A transport with no tap has nothing to wait for and still returns void,
+    // which is what keeps Live's un-awaited `stop()` calls unchanged.
+    const closing = this.inboundTap?.close();
+    if (closing === undefined) return undefined;
+    this.closing = Promise.resolve(closing).then(
+      () => undefined,
+      () => undefined,
+    );
+    return this.closing;
   }
 
   /**
