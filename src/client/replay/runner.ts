@@ -668,11 +668,28 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // in real Chrome; a smoke test that cannot separate those two does not confirm
   // AC1, it only fails to contradict it.
   //
-  // The condition is `saw samples AND admitted none`, never "produced no audio":
-  // `{ 0, 0 }` is a DEAD TRACK (an honest, silent run) and `undefined` is a
-  // transport with no capture path at all — cascade, and every fixture. Reading
-  // an absent seam as "saw a track, admitted nothing" would stamp this on every
-  // cascade run that happened to fall silent.
+  // ROUND 4 (R4-1) — THE STATS ALONE DO NOT NAME THE FAULT, and the earlier
+  // condition (`saw samples AND admitted none`) assumed they did. It assumed an
+  // honestly-silent run reports `{ 0, 0 }` — true of the `mute` fixture, which
+  // hands the tap nothing, and FALSE in Chrome: once the ScriptProcessor is
+  // connected the graph is pulled continuously and the receiver renders silence
+  // frames whether or not any RTP arrives. `{ 0, 0 }` is therefore essentially
+  // unreachable for a connected run, and BOTH "the gate is stuck" and "the model
+  // never spoke" present as `{ n, 0 }` — the two cases this line exists to
+  // separate. Labelling the second one "capture" points the operator at the tap
+  // when the cause is the model.
+  //
+  // `timings.audio_queued` is what separates them, and it is still the
+  // transport's `output_audio_buffer.started` mark at this point (it is
+  // overwritten a few lines below). So the condition is: THE MODEL DEMONSTRABLY
+  // STARTED AN OUTPUT BUFFER AND NOTHING WAS ADMITTED. A cancelled run is exempt
+  // too — capture was still open for business when the run was taken away from
+  // it, so `{ n, 0 }` says nothing about the gate.
+  //
+  // `undefined` stays excluded for its own reason: a transport with no capture
+  // path at all — cascade, and every fixture. Reading an absent seam as "saw a
+  // track, admitted nothing" would stamp this on every cascade run that happened
+  // to fall silent.
   //
   // IT IS A DIAGNOSTIC, NOT A VERDICT. It rides `errors` exactly as 045's upload
   // failure does and leaves `status` alone: aggregation (exportResults,

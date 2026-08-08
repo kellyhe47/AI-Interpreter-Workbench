@@ -199,6 +199,23 @@ interface ArmAHarnessOptions {
    */
   gateStuck?: boolean;
   /**
+   * ROUND 4 (R4-1) — THE REAL-CHROME SILENT-MODEL SIGNATURE.
+   *
+   * The model answers on the data channel but NEVER sends
+   * `output_audio_buffer.started`, while the track keeps rendering frames. In a
+   * real browser this is what an honestly-silent connected run looks like: once
+   * the ScriptProcessor is connected the graph is pulled continuously and the
+   * receiver renders silence frames whether or not any RTP arrives, so `{0, 0}`
+   * is essentially unreachable and BOTH "the gate is stuck" and "the model never
+   * spoke" present as `{n, 0}`.
+   *
+   * The distinguishing fact is `audio_queued`: it is stamped from
+   * `output_audio_buffer.started`, so a model that demonstrably started an
+   * output buffer and admitted nothing is a STUCK GATE, while no mark at all is
+   * a model that never spoke — a fact about the MODEL, not about capture.
+   */
+  noStartedEvent?: boolean;
+  /**
    * ROUND 2 (R2-7) — hold the tap's context close open, so a run that does not
    * WAIT for it is visible. Two AudioContexts per realtime run against Chrome's
    * ~6-context cap is a 60-run sweep that dies part-way through.
@@ -295,8 +312,13 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
     // the model's FIRST word that is comfort noise, and it is not evidence.
     if (speaks && answered === 1) deliver(NOISE_MARK, NOISE_MARK);
 
-    queuedAt.push(Date.now());
-    channel.emit({ type: 'output_audio_buffer.started' });
+    // ROUND 4 (R4-1) — a model that never starts an output buffer. Everything
+    // else about the answer is unchanged; there is simply no `audio_queued` to
+    // stamp, which is what makes this a fact about the MODEL and not capture.
+    if (opts.noStartedEvent !== true) {
+      queuedAt.push(Date.now());
+      channel.emit({ type: 'output_audio_buffer.started' });
+    }
     // TICKET 046 — and THE AUDIO ITSELF, on the media track and nowhere else.
     // There is no `response.output_audio.delta` on this transport (040).
     if (speaks) {
@@ -776,10 +798,14 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
     const result = await done;
 
-    // The track really ran and the gate really refused all of it.
+    // The track really ran and the gate really refused all of it...
     expect(h.delivered.length).toBeGreaterThan(0);
     expect(h.trackAudio).toEqual([]);
     expect(result.outputAudio).toHaveLength(0);
+    // ...and — R4-1, the conjunct that makes this a CAPTURE fault rather than a
+    // silent model — the model demonstrably started an output buffer.
+    expect(result.run.timings.audio_queued).not.toBeNull();
+    expect(typeof result.run.timings.audio_queued).toBe('number');
 
     // THE criterion: the run SAYS SO, in the place the operator already reads.
     const line = result.run.errors.find((e) => e.startsWith(CAPTURE_GATE_NEVER_OPENED));
@@ -820,6 +846,66 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     expect(result.audioReady).toBe(false);
     expect(h.uploads).toEqual([]);
     expect(result.run.outputAudioPath).toBeUndefined();
+  });
+
+  it('A SILENT MODEL IS NOT A STUCK GATE: {n, 0} with no audio_queued gets NO line (round 4, R4-1)', async () => {
+    // R3-7's condition assumed an honestly-silent run yields `{ 0, 0 }`. That is
+    // true of the `mute` harness, which hands the fake tap nothing — and FALSE in
+    // Chrome: once the ScriptProcessor is connected the graph is pulled
+    // continuously and the receiver renders silence frames whether or not any RTP
+    // arrives. So in production `{ 0, 0 }` is essentially unreachable for a
+    // connected run, and BOTH failure modes present as `{ n, 0 }` — the two cases
+    // the diagnostic exists to separate. Labelling this one "capture" points the
+    // operator at the tap when the cause is the MODEL.
+    const h = makeArmAHarness({ noStartedEvent: true });
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    // The real-Chrome silent-model signature, exactly: a track that rendered
+    // frames, nothing admitted, and NO output buffer ever started.
+    expect(h.delivered.length).toBeGreaterThan(0);
+    expect(h.trackAudio).toEqual([]);
+    expect(h.queuedAt).toEqual([]);
+    expect(result.run.timings.audio_queued).toBeNull();
+    expect(result.outputAudio).toHaveLength(0);
+
+    // THE criterion: no capture diagnostic. The gate was never ASKED to open.
+    expect(result.run.errors.some((e) => e.startsWith(CAPTURE_GATE_NEVER_OPENED))).toBe(false);
+    expect(result.run.errors).toEqual([]);
+    // ...and the run is still the honest record of a model that said nothing.
+    expect(result.run.status).toBe('complete');
+    expect(result.run.outputAudioPath).toBeUndefined();
+  });
+
+  it('A CANCELLED run gets NO line, even with a stuck gate and a real audio_queued (round 4, R4-1)', async () => {
+    // The sharp version of "cancelled runs are exempt": the operator stopped this
+    // one mid-answer, so `{ n, 0 }` says nothing about the gate — capture was
+    // still open for business when the run was taken away from it. Every other
+    // conjunct holds here, so `!cancelled` is the only thing suppressing the line.
+    const h = makeArmAHarness({ gateStuck: true });
+    const controller = new AbortController();
+    const done = runOnce({
+      recordingId: RECORDING.id,
+      config: REALTIME_CONFIG,
+      deps: h.deps,
+      signal: controller.signal,
+    });
+    // Past the first utterance boundary, so `output_audio_buffer.started` really
+    // did arrive and the track really did carry samples...
+    await vi.advanceTimersByTimeAsync(1_500);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    expect(result.cancelled).toBe(true);
+    expect(h.queuedAt.length).toBeGreaterThan(0);
+    expect(h.delivered.length).toBeGreaterThan(0);
+    expect(h.trackAudio).toEqual([]);
+
+    // THE criterion: the cancellation is the only thing this run reports.
+    expect(result.run.errors.some((e) => e.startsWith(CAPTURE_GATE_NEVER_OPENED))).toBe(false);
+    expect(result.run.errors).toEqual(['run cancelled']);
   });
 
   it('A HEALTHY run carries NO diagnostic, and neither does a genuinely mute model (round 3, R3-7)', async () => {

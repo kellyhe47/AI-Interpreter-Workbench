@@ -154,15 +154,29 @@ export interface InterpreterTransport {
    * `undefined` for a transport with no capture path at all (cascade, Live,
    * every fake that omits the tap): absent is not the same as "saw nothing", and
    * only the second one is a symptom.
+   *
+   * ROUND 4 (R4-1) — THESE NUMBERS ALONE DO NOT NAME THE FAULT. In real Chrome a
+   * connected run cannot report `{ 0, 0 }`: once the ScriptProcessor is
+   * connected the graph is pulled continuously and the receiver renders silence
+   * frames whether or not any RTP arrives. So an honestly-silent model presents
+   * as `{ n, 0 }` — the same shape as a stuck gate. What separates them is
+   * `audio_queued`: stamped from `output_audio_buffer.started`, it says the model
+   * demonstrably began an output buffer, so `{ n, 0 }` WITH the mark is a capture
+   * fault and `{ n, 0 }` WITHOUT it is a model that never spoke.
    */
   outputAudioStats?(): OutputAudioStats | undefined;
 }
 
 /**
  * TICKET 046 ROUND 3 (R3-7) — the capture gate's own account of the track.
- * `admitted + dropped` is everything the capture node was handed, so
- * `{ admitted: 0, dropped: 0 }` (a dead track) and `{ admitted: 0, dropped: n }`
- * (a gate that never opened) are finally distinguishable.
+ * `admitted + dropped` is everything the capture node was handed.
+ *
+ * ROUND 4 (R4-1) — `{ admitted: 0, dropped: 0 }` is a DEAD TRACK, but it is a
+ * shape only a fixture produces: a real connected run renders silence frames
+ * continuously, so both "the model never spoke" and "the gate never opened"
+ * arrive here as `{ admitted: 0, dropped: n }`. Telling them apart takes the
+ * `audio_queued` mark as well, which is why this type is a symptom and not a
+ * verdict — see `outputAudioStats` above and `CAPTURE_GATE_NEVER_OPENED`.
  */
 export interface OutputAudioStats {
   /** Samples that reached the recording — always `takeOutputAudio().length`. */

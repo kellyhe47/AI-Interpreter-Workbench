@@ -107,6 +107,8 @@ interface HarnessOptions {
    * whole suite stayed green: no test ever gave a transport BOTH routes.
    */
   capturedOutput?: Int16Array;
+  /** ROUND 4 (R4-2) — how the transport's teardown fails, if at all. */
+  stopFails?: 'throw' | 'reject';
 }
 
 /** Everything cascade's data-channel path is plus a 046-style media tap. */
@@ -124,6 +126,30 @@ class DualSourceTransport extends FixtureTransport {
 
 /** A marker no cascade chunk contains, so its presence is unambiguous. */
 const TAP_SAMPLES = Int16Array.from([31_001, -31_002, 31_003]);
+
+/**
+ * ROUND 4 (R4-2) — a transport whose teardown fails, in each of the two shapes.
+ *
+ * `closeTransport` guards a close that REJECTS (`.catch`) and a close that HANGS
+ * (the race), but the CALL `transport.stop()` is evaluated at the call site,
+ * outside both. A close that throws SYNCHRONOUSLY — a mock, an older or patched
+ * implementation, an AudioContext method that throws on a closed device —
+ * therefore rejects `runOnce`, stores no Run and loses the measurement: exactly
+ * the trade the surrounding comments refuse twice.
+ */
+class FailingStopTransport extends FixtureTransport {
+  constructor(
+    opts: ConstructorParameters<typeof FixtureTransport>[0],
+    private readonly mode: 'throw' | 'reject',
+  ) {
+    super(opts);
+  }
+  override stop(): void | Promise<void> {
+    super.stop();
+    if (this.mode === 'throw') throw new Error('AudioContext.close threw');
+    return Promise.reject(new Error('AudioContext.close rejected'));
+  }
+}
 
 function makeHarness(opts: HarnessOptions = {}) {
   const wav = writeWav(ramp(FRAME_SAMPLES * 5), SAMPLE_RATE);
@@ -166,6 +192,9 @@ function makeHarness(opts: HarnessOptions = {}) {
         kind: 'cascade' as const,
         script: opts.script ?? scriptWithAudio(),
       };
+      if (opts.stopFails !== undefined) {
+        return new FailingStopTransport(transportOpts, opts.stopFails);
+      }
       return opts.capturedOutput === undefined
         ? new FixtureTransport(transportOpts)
         : new DualSourceTransport(transportOpts, opts.capturedOutput);
@@ -324,6 +353,44 @@ describe('runOnce — the output audio is UPLOADED, not merely returned', () => 
 
     expect(Array.from(result.outputAudio)).toEqual(Array.from(TAP_SAMPLES));
     expect(Array.from(readWav(h.uploads[0]!.wav).samples)).toEqual(Array.from(TAP_SAMPLES));
+  });
+
+  it('a transport whose stop() THROWS SYNCHRONOUSLY still stores the run (round 4, R4-2)', async () => {
+    // `closeTransport` guards a rejecting close and a hanging one, but the CALL
+    // is outside both guards, so a synchronous throw propagates straight out of
+    // `runOnce` — no Run POSTed, no audio uploaded, the measurement gone. That is
+    // the trade the comments around it refuse twice: giving up on a CONTEXT must
+    // never cost the RUN.
+    const h = makeHarness({ stopFails: 'throw' });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    // runOnce RESOLVES — it does not reject.
+    const result = await done;
+
+    expect(result.run.status).toBe('complete');
+    // The measurement survived intact...
+    expect(result.run.timings.audio_queued).not.toBeNull();
+    // ...and so did everything downstream of the close.
+    expect(h.calls).toEqual(['uploadAudio', 'create']);
+    expect(Array.from(readWav(h.uploads[0]!.wav).samples)).toEqual([...CHUNK_A, ...CHUNK_B]);
+    expect(h.posted).toHaveLength(1);
+    expect(result.run.outputAudioPath).toBe(`runs/${result.run.id}.out.wav`);
+  });
+
+  it('a transport whose stop() REJECTS is already safe — the other half of the same guard', async () => {
+    // The companion, and the reason the two are different code paths: a rejected
+    // promise is caught inside `closeTransport`, a synchronous throw never
+    // reaches it. Both must end the same way.
+    const h = makeHarness({ stopFails: 'reject' });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(result.run.status).toBe('complete');
+    expect(h.calls).toEqual(['uploadAudio', 'create']);
+    expect(result.run.outputAudioPath).toBe(`runs/${result.run.id}.out.wav`);
+    // A close that failed is not the run's business: it says nothing about it.
+    expect(result.run.errors).toEqual([]);
   });
 
   it('an upload failure does NOT fail the Run — the measurement is still recorded', async () => {
