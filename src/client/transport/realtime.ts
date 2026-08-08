@@ -103,6 +103,7 @@ import {
   MAX_TRANSPORT_RECONNECT_ATTEMPTS,
   type InterpreterTransport,
   type TransportConfig,
+  type OutputAudioStats,
   type TransportHandlers,
   type TransportKind,
 } from './types';
@@ -176,8 +177,15 @@ export interface OutboundAudioSink {
   readonly track: unknown;
   /** Write ONE frame of 24 kHz mono PCM16, as it is handed over. */
   write(pcm: Int16Array): void;
-  /** Release the sink (close the context). Idempotent. */
-  close(): void;
+  /**
+   * Release the sink (close the context). Idempotent.
+   *
+   * ROUND 3 (R3-6) — MAY return a promise that settles when the context is
+   * really closed, exactly like its inbound twin. A realtime Replay run holds
+   * TWO AudioContexts against Chrome's ~6-context cap; awaiting only one of them
+   * is a comment that claims protection the code does not give.
+   */
+  close(): void | Promise<void>;
 }
 
 /**
@@ -198,6 +206,19 @@ export interface OutboundAudioSink {
  * `onAudio`, because `onAudio` is what stamps `audio_queued` in the runner and
  * Arm A's `audio_queued` must keep coming from `output_audio_buffer.started`.
  */
+/**
+ * ROUND 3 (R3-3) — the tap's own account of the track it was given, in SAMPLES.
+ * `admitted` is what reached the recording; `dropped` is what the gate refused.
+ * `admitted + dropped` is everything the capture node was ever handed, so a
+ * silent Arm A run can be diagnosed without a debugger.
+ *
+ * ROUND 3 (R3-7) — the SAME shape the transport publishes as
+ * `outputAudioStats()`, and deliberately one type rather than two: the number a
+ * run reports has to be the number the tap counted, or the diagnostic is just a
+ * second thing that can be wrong.
+ */
+export type InboundAudioStats = OutputAudioStats;
+
 export interface InboundAudioTap {
   /** Begin capturing the model's inbound media stream. */
   attach(stream: RtcMediaStreamLike): void;
@@ -216,6 +237,16 @@ export interface InboundAudioTap {
   endWindow(): void;
   /** Everything captured so far, 24 kHz mono PCM16, in arrival order. */
   take(): Int16Array;
+  /**
+   * ROUND 3 (R3-3) — what the gate SAW, not merely what it kept.
+   *
+   * Capture now depends on a data-channel event. If `output_audio_buffer.started`
+   * ever stops arriving, Arm A stores nothing and the artifact is byte-identical
+   * to a model that never spoke. AC1 is explicitly deferred to an operator smoke
+   * test, and without this that smoke test cannot tell the two apart: "12 s of
+   * track seen, 0 admitted" is a broken gate, "0 s seen" is a dead track.
+   */
+  stats(): InboundAudioStats;
   /**
    * Release the tap (close the context). Idempotent; captured audio survives.
    *

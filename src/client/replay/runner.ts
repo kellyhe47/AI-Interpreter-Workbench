@@ -172,6 +172,45 @@ export const SEGMENTATION_SETTLE_MS = 250;
  */
 export const SEGMENTATION_IDLE_MS = 5_000;
 
+/**
+ * TICKET 046 ROUND 3 (R3-1) — how long a run waits for the transport's audio
+ * contexts to close before giving up on them.
+ *
+ * Round 2 made `transport.stop()` awaited, so a run no longer starts the next
+ * one while its two AudioContexts are still closing. Awaiting it UNBOUNDED
+ * traded that bounded leak for an unbounded stall: nothing races this wait —
+ * `startBatch`'s `runTimeoutMs` only calls `controller.abort()`, and `runOnce`
+ * reads the abort signal nowhere after pacing — so a wedged context (a device
+ * change or removal is the classic cause) whose `close()` never settles freezes
+ * the run "running" forever, stops the sweep advancing, stores no Run and
+ * reports no error.
+ *
+ * Two seconds is far longer than a healthy `AudioContext.close()` and far
+ * shorter than the 120 s per-run patience above, so a wedged context costs one
+ * leaked context and NOT the measurement — which is the trade the fire-and-
+ * forget version got backwards in the other direction.
+ */
+export const TRANSPORT_CLOSE_TIMEOUT_MS = 2_000;
+
+/**
+ * TICKET 046 ROUND 3 (R3-7) — the prefix of the line a run carries when the
+ * capture path SAW a track and admitted none of it.
+ *
+ * AC1 is the one criterion vitest cannot prove; the ticket concedes it to an
+ * operator smoke test. Since capture hangs off `output_audio_buffer.started`,
+ * a gate that never opened stores an artifact byte-identical to a model that
+ * never spoke — so without this the smoke test cannot confirm AC1, it can only
+ * fail to contradict it.
+ *
+ * It is a DIAGNOSTIC, NOT A FAILURE. It rides `run.errors` exactly as 045's
+ * upload failure does: `status` stays `complete`, the utterances stay attributed
+ * and every timing is untouched, because aggregation (exportResults,
+ * results/derive) gates on `status === 'complete'` and never on `errors`. A
+ * diagnostic that silently disqualified runs from aggregation would be far worse
+ * than the blind spot it replaces.
+ */
+export const CAPTURE_GATE_NEVER_OPENED = 'output audio capture: gate never opened';
+
 export interface RunOnceConfig extends RunConfig {
   /** Forwarded to the transport config. */
   languagePair?: string;

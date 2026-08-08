@@ -224,6 +224,10 @@ export function createInboundAudioTap(options: InboundAudioTapOptions): InboundA
       capturing = false;
       graceRemaining = INBOUND_TAIL_GRACE_SAMPLES;
     },
+    // STUB (test-writer, round 3) — R3-3's gate accounting. Implement here.
+    stats() {
+      return { admitted: 0, dropped: 0 };
+    },
     take(): Int16Array {
       // NON-DESTRUCTIVE: the runner reads this AFTER stop() has closed the tap,
       // and a second read (upload, then playback) must see the same recording.

@@ -141,4 +141,32 @@ export interface InterpreterTransport {
    * every existing fake keeps working untouched.
    */
   takeOutputAudio?(): Int16Array;
+  /**
+   * TICKET 046 ROUND 3 (R3-7, OPTIONAL) — what the capture path SAW, in samples.
+   *
+   * AC1 (an Arm A run returns audible speech from `GET /api/runs/:id/audio`) is
+   * the one criterion no vitest run can prove; the ticket concedes it to an
+   * operator smoke test in a real Chrome session. Capture hangs off a
+   * data-channel event, so "the gate never opened" stores an artifact BYTE-
+   * IDENTICAL to "the model never spoke" — and a smoke test that cannot tell
+   * those apart does not confirm AC1, it merely fails to contradict it.
+   *
+   * `undefined` for a transport with no capture path at all (cascade, Live,
+   * every fake that omits the tap): absent is not the same as "saw nothing", and
+   * only the second one is a symptom.
+   */
+  outputAudioStats?(): OutputAudioStats | undefined;
+}
+
+/**
+ * TICKET 046 ROUND 3 (R3-7) — the capture gate's own account of the track.
+ * `admitted + dropped` is everything the capture node was handed, so
+ * `{ admitted: 0, dropped: 0 }` (a dead track) and `{ admitted: 0, dropped: n }`
+ * (a gate that never opened) are finally distinguishable.
+ */
+export interface OutputAudioStats {
+  /** Samples that reached the recording — always `takeOutputAudio().length`. */
+  admitted: number;
+  /** Samples the gate refused: outside every window and past every grace. */
+  dropped: number;
 }
