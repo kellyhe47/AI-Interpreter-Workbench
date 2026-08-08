@@ -1,12 +1,12 @@
 ---
 id: 047
 title: Live always plays the translation immediately — remove the pause state entirely
-status: pending
+status: tests-locked
 source: operator
 depends_on: []
-touches: [src/client/views/LiveView.tsx, src/client/views/useSessionController.ts, src/client/browserDeps.ts, src/client/audio/capture.ts]
+touches: [src/client/views/LiveView.tsx, src/client/views/useSessionController.ts, src/client/audio/capture.ts, src/client/replay/capture.ts]
 iterations: 0
-test_files: []
+test_files: [src/client/views/LiveView.autoplay.test.tsx, src/client/views/LiveView.flow.test.tsx, src/client/audio/capture.test.ts]
 branch: ""
 ---
 
