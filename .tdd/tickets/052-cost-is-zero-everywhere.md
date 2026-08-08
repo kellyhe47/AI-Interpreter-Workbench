@@ -62,3 +62,57 @@ Give cost a real model, and make an unmeasured cost render as unmeasured rather 
 - `isAggregatableRun` stays the ONE place that decides aggregation. Do not add a cost gate beside it.
 - Check `src/server/storage/types.ts` and `src/server/routes/liveSessions.ts` — they were the only
   files matching a pricing-shaped grep, worth reading before designing the model.
+
+---
+
+## THE RATE TABLE ALREADY EXISTS — PRD §5 "Published rates"
+
+Do NOT invent prices. The PRD carries the rate card, headed *"verify at build time; cost model
+computes from metered usage"*:
+
+| Item | Rate |
+|---|---|
+| `gpt-realtime` | **$32/M audio-in tokens, $64/M audio-out tokens** |
+| `gpt-realtime-mini` | $10/M in, $20/M out — used for development |
+| `gpt-4o-transcribe` | ~$0.006/min |
+| `gpt-4o-mini` | $0.15/M in, $0.60/M out |
+| `gpt-4o-mini-tts` | $12/M audio-out tokens |
+| ElevenLabs Flash v2.5 | **$0.05 / 1k chars** |
+
+Note the shapes differ per provider and MUST NOT be collapsed: token-billed (realtime, MT, OpenAI
+TTS), per-minute (OpenAI STT), per-character (ElevenLabs). One blended $/min hides exactly the
+attribution this experiment is built to produce.
+
+**Input and output are billed at DIFFERENT rates** (2x for realtime). Collapsing them halves or
+doubles the figure depending on the direction of traffic.
+
+### The ElevenLabs trap — PRD §5, verbatim
+> **Known cost trap:** ElevenLabs bills a 1,000-character minimum per request. Because cascade
+> streams text in chunks, aggregate-vs-per-chunk billing must be verified before any Arm C cost
+> figure is reported.
+
+This is not a detail. Arm C streams translated text in chunks; if each chunk is billed at a 1,000
+character minimum, Arm C's real cost is a large multiple of the naive character count. **A cost
+model that multiplies total characters by the rate would report Arm C as cheap when it may be the
+most expensive arm in the study** — and Arm B vs Arm C is Experiment 2, whose whole question is what
+swapping providers buys.
+- [ ] Model per-request billing with the 1k-char minimum explicitly, and make the assumption VISIBLE
+      in the pricing module rather than buried in arithmetic
+- [ ] Until it is verified against a real invoice, an Arm C cost figure must be labelled as
+      **unverified**, not reported as fact
+
+### What §8 says cost MEANS
+- **Cost per minute** = *metered spend for the run ÷ audio duration*. A snapshot — a <=1-minute clip
+  accumulates almost no conversation context.
+- **Cost slope** (Live only) = $/min in minute 1 vs $/min in the final minute, under each context
+  policy. Realtime bills the accumulated conversation each turn, so cost per minute CLIMBS. A
+  <=1-minute clip cannot show it — this is a Live-only measurement and one of the reasons Live
+  exists at all (§17 21e files context policy under controllability).
+- [ ] `costPerMinUsd` is derived as metered spend / audio duration, not stored as an independent
+      figure that can drift from the spend it came from
+- [ ] Live reports the cost SLOPE, not just a total — the climb is the finding for Arm A
+
+### Versioning
+The rate table is a **declared control**, like `corpus-v1` and `wer-norm-v1`. Stamp it
+(`pricing-v1`), record it in provenance, and make a rate change visibly restate results rather than
+silently move them.
