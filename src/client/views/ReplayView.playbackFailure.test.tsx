@@ -293,3 +293,91 @@ describe('R3-3 GUARD: blind compare reports a press that produced no sound', () 
     expect(replayNotice()).toBeNull();
   });
 });
+
+/**
+ * R4-1 — the notice CLEARS on the next press that works.
+ *
+ * Both funnels open with `setPlaybackError(null)`, and removing that line from
+ * EITHER left 1859/1859 green. The consequence is the Replay analogue of the
+ * two MAJORs graded on the Live side (R2-1/R2-2): press 1 fails, the cap frees,
+ * press 2 succeeds — and the screen still reads "No audio output — …" while the
+ * audio is audibly playing. Recovery is MORE reachable here than in Live:
+ * `replayPlaybackContextFactory` uses `??=`, so every press retries
+ * `new AudioContext()`, and each press builds a fresh `ArmPlayback` with a
+ * fresh latch. The first successful press after a Live capture context closes
+ * walks exactly this path, so a QA pass will hit it.
+ *
+ * ONE test, BOTH funnels: a stale notice is the same falsehood whichever press
+ * cleared the failure.
+ */
+describe('GUARD: a successful press clears a previous failure (round 4, R4-1)', () => {
+  /** Fails the FIRST press of each seam and succeeds from the second on. */
+  function makeRecoveringDeps() {
+    let runPresses = 0;
+    let takePresses = 0;
+    const base = makeDeps(null);
+    const playRun = vi.fn((_runId: string, onUnavailable?: (error: unknown) => void) => {
+      runPresses += 1;
+      if (runPresses === 1) onUnavailable?.(contextLimitError());
+    });
+    const playTake = vi.fn((_take: RecordedTake, onUnavailable?: (error: unknown) => void) => {
+      takePresses += 1;
+      if (takePresses === 1) onUnavailable?.(contextLimitError());
+    });
+    const startTake = vi.fn(
+      async (_options: ReplayTakeOptions): Promise<TakeRecorder | CaptureDenied> =>
+        ({ stop: vi.fn(async () => TAKE), cancel: vi.fn() }) as unknown as TakeRecorder,
+    );
+    const deps: ReplayDeps = {
+      ...base.deps,
+      playRun,
+      startTake: startTake as unknown as ReplayDeps['startTake'],
+      segmentTake: vi.fn(() =>
+        SEGMENTS.map((seg) => ({ ...seg })),
+      ) as unknown as ReplayDeps['segmentTake'],
+      playTake,
+      corpusVersion: 'v3',
+    };
+    return { deps, playRun, playTake, startTake };
+  }
+
+  it('BOTH funnels: the second, working press takes the notice down', async () => {
+    const fakes = makeRecoveringDeps();
+    render(<ReplayView deps={fakes.deps} />);
+    const row = `[data-recording-row][data-recording="${REC.id}"]`;
+    await waitFor(() => expect(q(row)).not.toBeNull());
+    fireEvent.click(q(row)!);
+    await waitFor(() => expect(q('[data-run-play]')).not.toBeNull());
+
+    /* ---- the RUN funnel ---- */
+    fireEvent.click(q('[data-run-play]')!);
+    await waitFor(() => expect(replayNotice()).not.toBeNull());
+    expect(text(replayNotice()!)).toContain('the number of hardware contexts reached the maximum');
+
+    // The cap freed; this press really does sound.
+    fireEvent.click(q('[data-run-play]')!);
+    await waitFor(() => expect(fakes.playRun).toHaveBeenCalledTimes(2));
+    expect(
+      replayNotice(),
+      'the run is audibly playing while the screen says there is no audio output',
+    ).toBeNull();
+
+    /* ---- the TAKE funnel, on the same screen ---- */
+    fireEvent.click(screen.getByRole('button', { name: /Record new clip/ }));
+    await waitFor(() => expect(q('[data-record-take]')).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Start recording' }));
+    await waitFor(() => expect(fakes.startTake).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop recording' }));
+    await waitFor(() => expect(q('[data-record-play]')).not.toBeNull());
+
+    fireEvent.click(q('[data-record-play]')!);
+    await waitFor(() => expect(replayNotice()).not.toBeNull());
+
+    fireEvent.click(q('[data-record-play]')!);
+    await waitFor(() => expect(fakes.playTake).toHaveBeenCalledTimes(2));
+    expect(
+      replayNotice(),
+      'the take is audibly playing while the screen says there is no audio output',
+    ).toBeNull();
+  });
+});
