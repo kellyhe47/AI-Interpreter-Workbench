@@ -261,3 +261,71 @@ unobserved, while `runner.ts:566` explains the await by saying the run holds two
 protection the code does not give is worse than either. Mirror the awaited close in the outbound
 sink and have `stop()` await both via `Promise.all`, under the SAME `TRANSPORT_CLOSE_TIMEOUT_MS`
 bound from R3-1. `outboundAudio.test.ts` is ticket 043's lock — the test-writer updates it.
+
+---
+
+## ROUND 4 — final review verdict: GREEN, with two minor items to land first
+
+Regression battery: 17/17 rounds 1-2 mutations still fail, and the `.stopped`/`outputWindowOpen`
+mutation that SURVIVED round 2 is now killed (R3-4 landed). Round-3 battery: 12 of 14 fail. The two
+survivors — arming a timer when there is nothing to close, and dropping the `void` on the
+reconnect-time close — are unobservable by construction (the timer is cleared either way so nothing
+leaks; `void` is a lint marker on a promise that cannot reject). Left alone, as with the `stop()`
+reset.
+
+### R4-1 — the diagnostic's premise is FALSE in a real browser, and the smoke test is its consumer
+`runner.ts:683`, comments at `runner.ts:671` and `types.ts:158`. The condition
+`dropped > 0 && admitted === 0` assumes an honestly-silent run yields `{0,0}`. True of the `mute`
+harness, which delivers nothing to the fake tap — **not true of Chrome**: once the ScriptProcessor
+is connected the graph is pulled continuously and the receiver renders silence frames whether or not
+any RTP arrives. So in production `{0,0}` is essentially unreachable for a connected run, and BOTH
+"the gate is stuck" AND "the model never spoke" present as `{n, 0}`.
+The line stays literally accurate but its label points at capture when the cause may be the model —
+and R3-7 exists precisely so the operator can tell those apart. It also fires on a cancelled run
+stopped before the model spoke.
+No measurement risk (verified again: cannot fail a run, cannot touch `status`, and
+`isAggregatableRun` reads `armTag`/`origin`/`status`/realness, never `errors`).
+**DECIDED:** add the conjunct — the value is already in scope, immediately below the block.
+`stats.dropped > 0 && stats.admitted === 0 && typeof timings.audio_queued === 'number' && !cancelled`
+— i.e. "the model demonstrably started an output buffer and nothing was admitted", a genuinely stuck
+gate. Correct both comments: the real silent-run signature is `{n, 0}` with NO `audio_queued`, not
+`{0,0}`. Land BEFORE the smoke test.
+
+### R4-2 — `transport.stop()` is evaluated outside every guard
+`runner.ts:646`: `await closeTransport(transport.stop(), TRANSPORT_CLOSE_TIMEOUT_MS)`.
+`closeTransport` guards rejection (`.catch`) and hanging (the race) — but the CALL is outside both.
+A synchronous throw from a close (a mock, an older or patched implementation) rejects `runOnce` and
+stores no Run, losing the measurement — the exact trade the surrounding comments refuse twice.
+Pre-existing since round 2.
+**DECIDED:** take a thunk — `closeTransport(() => transport.stop(), …)` with the call inside the
+`try`.
+
+### R4-3 (no code change) — the diagnostic is invisible on screen, by design
+`RunsList.tsx:270` computes `failureOf(run)` only when `status === 'failed'`, so a COMPLETE run
+carrying `CAPTURE_GATE_NEVER_OPENED` renders nothing. That is correct — a complete run must not
+display a failure stage — but per AGENTS.md ("a derivation holding the right answer is not the same
+as a screen showing it") the smoke procedure must read `GET /api/runs/:id` or the exported ledger,
+NOT the screen. Record it in the smoke instructions.
+
+### R4-4 — filed separately, NOT in this ticket
+R3-1 bounds the close, but two unbounded waits remain in `runOnce`: `uploadOutputAudio` ->
+`runs.uploadAudio` is a bare `fetch` with no timeout (`runner.ts:264`), and `await finished` is
+unbounded for mic-shaped (manifest-less) runs. Same shape as the stall R3-1 fixed — `startBatch`'s
+`runTimeoutMs` still only aborts a signal nobody reads after pacing, so a hung upload freezes a
+sweep exactly as a wedged context would have. Both pre-existing and out of scope here.
+
+## WHAT REMAINS UNPROVEN — the operator smoke test in real Chrome
+
+Every test runs on fixtures by policy; the entire real-transport path is unexercised by
+construction. One Arm A Replay run answers all of this:
+
+1. **AC1 itself** — `GET /api/runs/:id/audio` returns AUDIBLE SPEECH
+2. **R2-3's premise** — that a MUTED `<audio>` element is enough to keep Chromium feeding real
+   samples into `createMediaStreamSource` from a remote WebRTC stream. **If the capture comes back
+   all zeros, this is the suspect.**
+3. **R3-2's 750 ms** — listen to the LAST WORD of each of the four utterances
+4. **The gate's real onset** — no speech onset lost, i.e. `output_audio_buffer.started` really does
+   lead its audio on the wire
+5. **Chrome's concurrent-AudioContext headroom across a full 60-run sweep**
+6. Check `run.errors` in the STORED JSON for `output audio capture: gate never opened` — it will not
+   appear on screen (R4-3)
