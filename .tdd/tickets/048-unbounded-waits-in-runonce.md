@@ -1,13 +1,13 @@
 ---
 id: 048
 title: runOnce still has two unbounded waits — a hung upload freezes a sweep exactly as a wedged context would have
-status: pending
+status: green
 source: code-review (046 round 3/4)
 depends_on: [046]
 touches: [src/client/replay/runner.ts, src/client/batch/runner.ts]
 iterations: 0
-test_files: []
-branch: ""
+test_files: [src/client/replay/runner.unboundedWaits.test.ts, src/client/batch/runTimeout.test.ts, src/client/replay/runner.test.ts]
+branch: "tdd/048"
 ---
 
 ## Why
