@@ -144,7 +144,10 @@ const browserPipeline: CapturePipeline = ({ context, stream, emit }) => {
  * `autoplay` is the WHOLE playback path — TICKET 047 deleted the play/pause
  * control from Live, so attaching the stream is what has to make it audible,
  * with no interaction of any kind. It keeps its play()/pause() methods because
- * Replay's muted sink is this same object; nothing in Live calls either one.
+ * the seam is shared with Replay's muted sink; nothing in Live calls either one
+ * — and, as ticket 049 confirmed by grep, nothing in Replay does either: they
+ * survive because they sit on the shared `RemoteAudioSink` interface, which
+ * ticket 047 explicitly permitted on this seam.
  *
  * The element is created lazily and reused across reconnects: attaching a new
  * stream to the same element is exactly the reconnect story, and one element
@@ -263,6 +266,30 @@ export function buildReplayDeps(): ReplayDeps {
   // same element instead of stacking them.
   const remoteAudioSink: RemoteAudioSink = createRemoteAudioSink({ muted: true });
 
+  // TICKET 049 — ONE AudioContext for this bag, shared by playRun and playTake
+  // and built LAZILY on the first press.
+  //
+  // Both seams used to do `new AudioContext()` per press and never release it.
+  // Chrome caps contexts per document (~6), so a QA pass playing a dozen Replay
+  // runs exhausted the cap and the NEXT `new AudioContext()` anywhere in the
+  // document threw — including Live's, which is how the hostile-context path
+  // this ticket fixes was reached in practice.
+  //
+  // REUSE, not close()-per-press: close() is async and the press path does not
+  // await it, so closing "the previous one" races a clip that is still
+  // sounding. Reuse mirrors what `remoteAudioSink` already does (one element
+  // per bag, re-attached), and `ArmPlayback.play()` resumes a
+  // suspended-by-policy context on every press anyway.
+  //
+  // LAZILY, because `buildReplayDeps()` runs at page-wiring time and a context
+  // built there would be built on a page that may never press play — the
+  // resource-side reading of "nothing in Replay autoplays" (PRD §7).
+  let replayPlaybackContext: PlaybackAudioContextLike | null = null;
+  const replayPlaybackContextFactory = (): PlaybackAudioContextLike => {
+    replayPlaybackContext ??= new AudioContext() as unknown as PlaybackAudioContextLike;
+    return replayPlaybackContext;
+  };
+
   const createTransport = (config: RunOnceConfig): InterpreterTransport => {
     if (config.architecture === 'realtime') {
       return new RealtimeTransport(
@@ -339,13 +366,13 @@ export function buildReplayDeps(): ReplayDeps {
         deps: { execute: createRunOnceExecutor(runnerDeps), now: () => Date.now() },
         onProgress: request.onProgress,
       }),
-    // ON DEMAND ONLY. Fetches the stored WAV and plays it through a fresh
-    // context; nothing in Replay ever autoplays, so this is reachable from a
-    // click and from nowhere else.
+    // ON DEMAND ONLY. Fetches the stored WAV and plays it through the bag's ONE
+    // reused context (ticket 049); nothing in Replay ever autoplays, so this is
+    // reachable from a click and from nowhere else.
     playRun: (runId: string): void => {
       void runs.getAudio(runId).then((bytes) => {
         const playback = new ArmPlayback({
-          audioContextFactory: () => new AudioContext() as unknown as PlaybackAudioContextLike,
+          audioContextFactory: replayPlaybackContextFactory,
           autoplay: false,
         });
         playback.enqueue(readWav(bytes).samples);
@@ -365,10 +392,11 @@ export function buildReplayDeps(): ReplayDeps {
         maxDurationMs: options.maxDurationMs,
       }),
     segmentTake,
-    // ON DEMAND ONLY, like playRun: a fresh context per press, never at render.
+    // ON DEMAND ONLY, like playRun: the same ONE reused context, never at
+    // render.
     playTake: (take: RecordedTake): void => {
       const playback = new ArmPlayback({
-        audioContextFactory: () => new AudioContext() as unknown as PlaybackAudioContextLike,
+        audioContextFactory: replayPlaybackContextFactory,
         autoplay: false,
       });
       playback.enqueue(take.samples);

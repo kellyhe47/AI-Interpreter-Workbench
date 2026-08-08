@@ -199,7 +199,7 @@ export interface SessionController {
   footer: SessionFooterData;
   elapsedMs: number;
   /**
-   * TICKET 049 (STUB) — true once translated audio could not be sounded because
+   * TICKET 049 — true once translated audio could not be sounded because
    * the AudioContext could not be constructed. A SURFACED, non-fatal state: the
    * session keeps running and keeps measuring; only the sound is missing.
    */
@@ -322,6 +322,11 @@ export function useSessionController(deps: SessionDeps): SessionController {
       audioContextFactory: () => depsRef.current.playbackContextFactory(),
       // Live autoplay is unconditional: one architecture collides with nothing.
       autoplay: true,
+      // TICKET 049 — a chunk that could not be sounded is a SURFACED, non-fatal
+      // state, never a silent swallow and never a thrown error out of the
+      // transport's onAudio callback. Re-render so LiveView raises the notice;
+      // nothing about the session, the ledger or the timings changes.
+      onPlaybackUnavailable: () => bump(),
     };
     const store: ControllerStore = {
       router: new TransportRouter(),
@@ -790,7 +795,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
     target: store.target,
     footer,
     elapsedMs,
-    playbackUnavailable: false,
+    playbackUnavailable: store.playback.playbackUnavailable,
     actions,
   };
 }
