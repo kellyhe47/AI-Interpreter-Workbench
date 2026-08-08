@@ -100,3 +100,77 @@ are never compared as if they were the same quantity.
 Per-turn history within a session and a past-sessions list — the operator explicitly does not need
 stored audio or session history here. This ticket is only about the CURRENT utterance's figures
 being real. File separately if wanted.
+
+---
+
+## DECIDED (operator) — option (c), and the labels must speak for themselves
+
+### The measurement anchor: (c)
+Live anchors on what it can actually observe: **`server_speech_stopped` -> `audio_queued`**. No
+back-derived `speech_end`, no second client-side VAD. Rationale recorded above; (a) is circular and
+(b) adds a second endpointer whose disagreements with the server's would be indistinguishable from
+real variance, against AGENTS.md's rule that VAD is a measurement control, not a knob.
+
+### CONSEQUENCE — Live must STOP RENDERING `endpointing` entirely
+Endpointing is *the gap between when the human actually stopped speaking and when the system decided
+they had*. Measuring it requires ground truth for the former, which only the corpus manifest has.
+**Live has none, so the row can never hold a value.** Do not relabel it, do not dash it — remove it
+from Live. A row that is structurally incapable of a value is worse than no row: it reads as
+breakage forever.
+
+Same reasoning retires Arm A's separate `queue` row. Over WebRTC there is no observable instant
+between "model produced audio" and "audio queued" — 040 settled that `response.output_audio.delta`
+does not exist on this transport. One observable span means ONE row.
+
+### THE LABELLING RULE — every row names the two events it spans
+The operator's objection, verbatim: *"the metrics that are currently displayed kind of don't mean
+anything. What does end-pointing mean? I just want to make sure that these metrics speak for
+themselves in what they are measuring."*
+
+`endpointing`, `model`, `queue` are jargon that mean nothing without a glossary. **Every stage row
+must state its span**, so it needs no legend and cannot be confused with Replay's differently-
+anchored figure.
+
+**Live · Arm A (Realtime)** — one row, because one model does everything:
+```
+model  (opaque)   detected end of speech -> audio ready        1.24 s
+```
+The existing `opaque` treatment stays, and its note stays true: recognition, translation and voice
+happen inside one model, so no finer split is observable.
+
+**Live · Cascade** — the same span, broken into the stages it CAN see:
+```
+transcribe   detected end of speech -> transcript      0.31 s
+translate    transcript -> translated text             0.22 s
+speak        text -> audio ready                       0.48 s
+total                                                  1.01 s
+```
+
+**Replay keeps `endpointing`** — there it is real, because the manifest supplies ground truth. But
+it gets the same treatment: state the span rather than assume the reader knows the term.
+
+### Additional acceptance criteria (these SUPERSEDE the earlier list where they conflict)
+
+- [ ] Live renders NO `endpointing` row and no Arm A `queue` row — removed, not blanked
+- [ ] Every Live stage row names the two events it spans, in plain language, with no glossary needed
+- [ ] Live's headline total is labelled distinctly from Replay's end-to-end, and the label states the
+      anchor — the two are different quantities and must never share a name
+- [ ] Arm A's single row derives from `audio_queued - server_speech_stopped`, never from
+      `first_audio_delta` (which does not exist over WebRTC)
+- [ ] Cascade Live renders `transcribe` / `translate` / `speak` from real marks. **Verify whether
+      `cascade.ts`'s pass-through timings already supply them; if a mark is missing, that is part of
+      this ticket.**
+- [ ] Per-utterance COST is visible as the utterance completes — the footer's `session $` must
+      accumulate rather than sit at `$0.00`
+- [ ] The footer's `p50` / `p95` populate from real Live utterances under the new anchor
+- [ ] **REPLAY IS UNTOUCHED IN SUBSTANCE.** Its figures still derive from the manifest's
+      `speech_end`; no aggregate moves, no gate changes. Only its stage LABELS may change. Pin this
+      — a regression here corrupts the actual experiment.
+
+### Note for the test-writer — a likely locked-test conflict
+Existing tests almost certainly pin the strings `endpointing`, `model`, `queue` and the
+`[data-stage-row="<label>"]` hooks, in both Live and Replay suites. **Survey the whole suite before
+writing** and resolve it in the test-writer's own pass; an implementer hitting a locked-vs-locked
+conflict on label text is a wasted dispatch. If the Replay relabelling turns out to be substantially
+more invasive than the Live work, say so and it will be split into its own ticket rather than
+allowed to stall this one.
