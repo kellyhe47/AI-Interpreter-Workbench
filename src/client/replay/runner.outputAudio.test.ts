@@ -95,7 +95,30 @@ interface HarnessOptions {
   script?: FixtureScriptEvent[];
   /** Make the upload endpoint reject. */
   uploadError?: Error;
+  /**
+   * ROUND 2 (R2-6) — give the transport a ticket-046 capture path TOO, so the
+   * runner's `audioChunks.length === 0` fallback condition has something to be
+   * wrong about. The reviewer replaced that condition with `if (true)` and the
+   * whole suite stayed green: no test ever gave a transport BOTH routes.
+   */
+  capturedOutput?: Int16Array;
 }
+
+/** Everything cascade's data-channel path is plus a 046-style media tap. */
+class DualSourceTransport extends FixtureTransport {
+  constructor(
+    opts: ConstructorParameters<typeof FixtureTransport>[0],
+    private readonly captured: Int16Array,
+  ) {
+    super(opts);
+  }
+  takeOutputAudio(): Int16Array {
+    return this.captured;
+  }
+}
+
+/** A marker no cascade chunk contains, so its presence is unambiguous. */
+const TAP_SAMPLES = Int16Array.from([31_001, -31_002, 31_003]);
 
 function makeHarness(opts: HarnessOptions = {}) {
   const wav = writeWav(ramp(FRAME_SAMPLES * 5), SAMPLE_RATE);
@@ -132,12 +155,16 @@ function makeHarness(opts: HarnessOptions = {}) {
   const deps: RunnerDeps = {
     recordings,
     runs,
-    createTransport: () =>
-      new FixtureTransport({
+    createTransport: () => {
+      const transportOpts = {
         armId: 'fx',
-        kind: 'cascade',
+        kind: 'cascade' as const,
         script: opts.script ?? scriptWithAudio(),
-      }),
+      };
+      return opts.capturedOutput === undefined
+        ? new FixtureTransport(transportOpts)
+        : new DualSourceTransport(transportOpts, opts.capturedOutput);
+    },
     now: () => Date.now(),
     newId: () => 'run-1',
   };
@@ -255,6 +282,36 @@ describe('runOnce — the output audio is UPLOADED, not merely returned', () => 
     expect(h.uploads).toEqual([]);
     expect(h.posted[0]!.outputAudioPath).toBeUndefined();
     expect(result.run.outputAudioPath).toBeUndefined();
+  });
+
+  it('a DECODED sample always wins: a transport with both routes uploads only onAudio (R2-6)', async () => {
+    // TICKET 046's capture is a FALLBACK for the arm whose audio never reaches
+    // `onAudio` at all. `runner.ts`'s `audioChunks.length === 0` guard is what
+    // makes that true, and it was unpinned: replacing it with `if (true)` left
+    // the suite green, because no test ever handed a transport BOTH routes.
+    // Cascade must stay byte-for-byte what it was.
+    const h = makeHarness({ capturedOutput: TAP_SAMPLES });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(Array.from(result.outputAudio)).toEqual([...CHUNK_A, ...CHUNK_B]);
+    const uploaded = Array.from(readWav(h.uploads[0]!.wav).samples);
+    expect(uploaded).toEqual([...CHUNK_A, ...CHUNK_B]);
+    for (const marker of TAP_SAMPLES) expect(uploaded).not.toContain(marker);
+  });
+
+  it('the fallback is REACHED when the data channel produced nothing (R2-6, control)', async () => {
+    // The mirror of the test above: same transport shape, same tap samples, and
+    // the ONLY difference is that no `onAudio` chunk arrived. If this were to
+    // fail, the guard above would be passing by being unreachable.
+    const h = makeHarness({ script: scriptWithoutAudio(), capturedOutput: TAP_SAMPLES });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const result = await done;
+
+    expect(Array.from(result.outputAudio)).toEqual(Array.from(TAP_SAMPLES));
+    expect(Array.from(readWav(h.uploads[0]!.wav).samples)).toEqual(Array.from(TAP_SAMPLES));
   });
 
   it('an upload failure does NOT fail the Run — the measurement is still recorded', async () => {

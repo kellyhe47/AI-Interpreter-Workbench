@@ -10,21 +10,58 @@
  * uploaded audio is byte-format-identical to cascade's and blind compare cannot
  * tell the arms apart by format), and capturing is SILENT (nothing in Replay
  * autoplays, PRD §7).
+ *
+ * ============================ ROUND 2 ======================================
+ * An independent reviewer deleted things this module must do and the whole
+ * suite stayed green. Three of those holes are closed here:
+ *
+ *  R2-2  THE GRAPH IS CONNECTED. The old fake called `onaudioprocess` directly,
+ *        so nothing depended on any node being wired: all three `connect()`
+ *        calls could be deleted with the suite green. In a real browser an
+ *        unconnected ScriptProcessorNode is never pulled, so Arm A would
+ *        silently capture nothing. The fake now records EDGES, and the graph
+ *        source -> processor -> gain -> ctx.destination is asserted — which is
+ *        also what makes the AC7 "gain is 0" claim non-vacuous.
+ *
+ *  R2-4  CAPTURE IS GATED to the model's speaking windows. Capturing from
+ *        track-attach to stop() makes an Arm A file the whole ~45 s run —
+ *        leading silence, inter-utterance gaps, comfort noise — while cascade's
+ *        is a few seconds of gapless TTS. BlindCompare plays the whole stored
+ *        WAV, so an evaluator would tell the arms apart in the first second:
+ *        AC2's wording met, its PURPOSE defeated. Frames outside a window are
+ *        DROPPED, not buffered, and a named tail grace keeps the last syllable.
+ *
+ *  R2-5  ONE PCM16 CONVENTION. This module reimplemented pcm.ts's `floatTo16`
+ *        with a DIFFERENT scale (`v * 32768` clamped, vs pcm.ts's asymmetric
+ *        `v < 0 ? v * 32768 : v * 32767`), so the client's two capture paths
+ *        could drift apart by 1 LSB and then independently. pcm.ts's convention
+ *        is the one that survives, because it is the one the microphone path,
+ *        the WAV writer and every stored recording already use.
+ * ==========================================================================
  */
 import { describe, expect, it } from 'vitest';
 import { SAMPLE_RATE } from '../../core/protocol';
 import type { RtcMediaStreamLike } from '../transport/realtime';
 import {
   INBOUND_SAMPLE_RATE,
+  INBOUND_TAIL_GRACE_MS,
+  INBOUND_TAIL_GRACE_SAMPLES,
   createInboundAudioTap,
   type InboundAudioContextLike,
   type InboundGainLike,
   type InboundProcessorLike,
   type InboundSourceNodeLike,
 } from './inboundAudio';
+import { floatTo16 } from './pcm';
 
 interface FakeNode {
   kind: 'source' | 'processor' | 'gain';
+  /**
+   * The object handed BACK to the module. R2-2: edges are recorded as the very
+   * objects `connect()` was called with, so "source -> processor" is a claim
+   * about the graph the module built and not about the order it built it in.
+   */
+  node: unknown;
   connectedTo: unknown[];
   disconnects: number;
   /** Only for gains. */
@@ -33,61 +70,107 @@ interface FakeNode {
   stream?: unknown;
 }
 
-function makeFakeContext() {
+/** A promise whose settlement a test controls — R2-7's close sequencing. */
+function makeGate() {
+  let resolve!: () => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+interface FakeContextOptions {
+  /** Make `ctx.close()` reject, as a wedged hardware context can. */
+  closeRejects?: boolean;
+}
+
+function makeFakeContext(options: FakeContextOptions = {}) {
   const nodes: FakeNode[] = [];
   const processors: InboundProcessorLike[] = [];
   const processorArgs: { bufferSize: number; inputChannels: number; outputChannels: number }[] = [];
   const factoryArgs: { sampleRate: number }[] = [];
   const state = { closes: 0 };
   const destination = { tag: 'ctx-destination' };
+  const closeGate = makeGate();
 
   const ctx: InboundAudioContextLike = {
     sampleRate: 24_000,
     destination,
     createMediaStreamSource: (stream): InboundSourceNodeLike => {
-      const entry: FakeNode = { kind: 'source', connectedTo: [], disconnects: 0, stream };
-      nodes.push(entry);
-      return {
-        connect: (node) => entry.connectedTo.push(node),
+      const entry: FakeNode = {
+        kind: 'source',
+        node: null,
+        connectedTo: [],
+        disconnects: 0,
+        stream,
+      };
+      const node: InboundSourceNodeLike = {
+        connect: (target) => entry.connectedTo.push(target),
         disconnect: () => {
           entry.disconnects += 1;
         },
       };
+      entry.node = node;
+      nodes.push(entry);
+      return node;
     },
     createScriptProcessor: (bufferSize, inputChannels, outputChannels): InboundProcessorLike => {
       processorArgs.push({ bufferSize, inputChannels, outputChannels });
-      const entry: FakeNode = { kind: 'processor', connectedTo: [], disconnects: 0 };
-      nodes.push(entry);
+      const entry: FakeNode = { kind: 'processor', node: null, connectedTo: [], disconnects: 0 };
       const proc: InboundProcessorLike = {
         onaudioprocess: null,
-        connect: (node) => entry.connectedTo.push(node),
+        connect: (target) => entry.connectedTo.push(target),
         disconnect: () => {
           entry.disconnects += 1;
         },
       };
+      entry.node = proc;
+      nodes.push(entry);
       processors.push(proc);
       return proc;
     },
     createGain: (): InboundGainLike => {
-      const entry: FakeNode = { kind: 'gain', connectedTo: [], disconnects: 0, gain: { value: 1 } };
-      nodes.push(entry);
-      return {
+      const entry: FakeNode = {
+        kind: 'gain',
+        node: null,
+        connectedTo: [],
+        disconnects: 0,
+        gain: { value: 1 },
+      };
+      const node: InboundGainLike = {
         gain: entry.gain!,
-        connect: (node) => entry.connectedTo.push(node),
+        connect: (target) => entry.connectedTo.push(target),
         disconnect: () => {
           entry.disconnects += 1;
         },
       };
+      entry.node = node;
+      nodes.push(entry);
+      return node;
     },
     close: () => {
       state.closes += 1;
+      if (options.closeRejects === true) return Promise.reject(new Error('context wedged'));
+      return closeGate.promise;
     },
   };
 
-  const audioContextFactory = (options: { sampleRate: number }): InboundAudioContextLike => {
-    factoryArgs.push(options);
+  const audioContextFactory = (opts: { sampleRate: number }): InboundAudioContextLike => {
+    factoryArgs.push(opts);
     return ctx;
   };
+
+  /** What an edge target IS, by identity — a node kind, or the destination. */
+  const labelOf = (target: unknown): string => {
+    if (target === destination) return 'destination';
+    return nodes.find((n) => n.node === target)?.kind ?? 'UNKNOWN';
+  };
+
+  /** Every edge in the graph the module built, as `from -> to`. */
+  const edges = (): string[] =>
+    nodes.flatMap((n) => n.connectedTo.map((t) => `${n.kind} -> ${labelOf(t)}`));
 
   /** Push one Web Audio render quantum through EVERY live processor. */
   const emit = (frame: Float32Array): void => {
@@ -96,7 +179,20 @@ function makeFakeContext() {
     }
   };
 
-  return { ctx, nodes, processors, processorArgs, factoryArgs, state, destination, emit, audioContextFactory };
+  return {
+    ctx,
+    nodes,
+    processors,
+    processorArgs,
+    factoryArgs,
+    state,
+    destination,
+    closeGate,
+    labelOf,
+    edges,
+    emit,
+    audioContextFactory,
+  };
 }
 
 /** A minimal remote MediaStream, tagged so assertions can name which one. */
@@ -104,6 +200,20 @@ const fakeStream = (tag: string): RtcMediaStreamLike & { tag: string } => ({
   tag,
   getAudioTracks: () => [{ kind: 'audio' }],
 });
+
+/**
+ * An ATTACHED, OPEN tap — the state every capture assertion below is about.
+ * The gate (R2-4) is shut until the model starts speaking, so a test that only
+ * attached would be asserting against a deliberately silent tap.
+ */
+function openTap(fake: ReturnType<typeof makeFakeContext>, tag = 'remote') {
+  const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+  tap.attach(fakeStream(tag));
+  tap.startWindow();
+  return tap;
+}
+
+const f32 = (...values: number[]): Float32Array => Float32Array.from(values);
 
 describe('createInboundAudioTap — 24 kHz mono PCM16, matching cascade (ticket 046)', () => {
   it('INBOUND_SAMPLE_RATE is the wire rate, derived and not a second literal', () => {
@@ -120,8 +230,7 @@ describe('createInboundAudioTap — 24 kHz mono PCM16, matching cascade (ticket 
 
   it('captures MONO: the capture node takes one input channel and reads channel 0', () => {
     const fake = makeFakeContext();
-    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
-    tap.attach(fakeStream('remote'));
+    const tap = openTap(fake);
 
     expect(fake.processorArgs).toHaveLength(1);
     const args = fake.processorArgs[0]!;
@@ -130,19 +239,8 @@ describe('createInboundAudioTap — 24 kHz mono PCM16, matching cascade (ticket 
     // A power-of-two render block, as Web Audio requires.
     expect([256, 512, 1024, 2048, 4096, 8192, 16384]).toContain(args.bufferSize);
 
-    fake.emit(Float32Array.from([0.25, -0.25]));
+    fake.emit(f32(0.25, -0.25));
     expect(Array.from(tap.take())).toEqual([8192, -8192]);
-  });
-
-  it('converts float to PCM16 with FULL-SCALE CLAMPING — the exact cascade format', () => {
-    const fake = makeFakeContext();
-    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
-    tap.attach(fakeStream('remote'));
-
-    // 1.0 must not wrap to -32768, and out-of-range float (Web Audio permits it)
-    // must clamp rather than alias into loud garbage.
-    fake.emit(Float32Array.from([0, 0.5, -0.5, 1, -1, 2, -2]));
-    expect(Array.from(tap.take())).toEqual([0, 16384, -16384, 32767, -32768, 32767, -32768]);
   });
 
   it('routes the ATTACHED stream, and accumulates frames in ARRIVAL ORDER', () => {
@@ -150,25 +248,25 @@ describe('createInboundAudioTap — 24 kHz mono PCM16, matching cascade (ticket 
     const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
     const stream = fakeStream('remote');
     tap.attach(stream);
+    tap.startWindow();
 
     const source = fake.nodes.find((n) => n.kind === 'source');
     expect(source?.stream).toBe(stream);
 
-    fake.emit(Float32Array.from([0.25]));
-    fake.emit(Float32Array.from([-0.25]));
-    fake.emit(Float32Array.from([0.5]));
+    fake.emit(f32(0.25));
+    fake.emit(f32(-0.25));
+    fake.emit(f32(0.5));
     expect(Array.from(tap.take())).toEqual([8192, -8192, 16384]);
   });
 
   it('take() is NON-DESTRUCTIVE, so the runner can read it after stop() closed the tap', () => {
     const fake = makeFakeContext();
-    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
-    tap.attach(fakeStream('remote'));
-    fake.emit(Float32Array.from([0.5, -0.5]));
+    const tap = openTap(fake);
+    fake.emit(f32(0.5, -0.5));
 
     expect(Array.from(tap.take())).toEqual([16384, -16384]);
     expect(Array.from(tap.take())).toEqual([16384, -16384]);
-    tap.close();
+    void tap.close();
     expect(Array.from(tap.take())).toEqual([16384, -16384]);
   });
 
@@ -181,21 +279,258 @@ describe('createInboundAudioTap — 24 kHz mono PCM16, matching cascade (ticket 
   });
 });
 
+/* ===========================================================================
+ * R2-5 — ONE PCM16 convention across the client's two capture paths.
+ * ======================================================================== */
+
+describe('createInboundAudioTap — PCM16 conversion is pcm.ts’s, not a second one', () => {
+  it('uses the ASYMMETRIC scale: +1 -> 32767 via *32767, -1 -> -32768 via *32768', () => {
+    const fake = makeFakeContext();
+    const tap = openTap(fake);
+
+    // 0.75 is where the two conventions disagree: 0.75 * 32768 = 24576, but
+    // pcm.ts's positive scale gives round(0.75 * 32767) = 24575. One LSB today,
+    // two independently drifting encoders tomorrow.
+    fake.emit(f32(0, 0.5, -0.5, 0.75, -0.75, 1, -1));
+    expect(Array.from(tap.take())).toEqual([0, 16384, -16384, 24575, -24576, 32767, -32768]);
+  });
+
+  it('CLAMPS out-of-range float rather than aliasing it — Web Audio permits |v| > 1', () => {
+    const fake = makeFakeContext();
+    const tap = openTap(fake);
+    fake.emit(f32(2, -2, 1.0001, -1.0001));
+    expect(Array.from(tap.take())).toEqual([32767, -32768, 32767, -32768]);
+  });
+
+  it('AGREES SAMPLE-FOR-SAMPLE with pcm.ts floatTo16, the microphone path’s encoder', () => {
+    // The two client capture paths must be one encoder. If this ever fails, an
+    // Arm A file and a cascade file are no longer byte-comparable and blind
+    // compare has a format tell.
+    const frame = f32(
+      0, 0.75, -0.75, 0.1, -0.1, 0.3333, -0.3333, 0.5, -0.5, 0.999_9, -0.999_9, 1, -1, 2, -2,
+    );
+    const fake = makeFakeContext();
+    const tap = openTap(fake);
+    fake.emit(frame);
+
+    expect(Array.from(tap.take())).toEqual(Array.from(floatTo16(frame)));
+  });
+});
+
+/* ===========================================================================
+ * R2-2 — the Web Audio graph is really CONNECTED.
+ *
+ * The fake drives `onaudioprocess` directly, so no other test in this file can
+ * tell a connected graph from a disconnected one: all three `connect()` calls
+ * were deletable with the suite green. In Chrome a ScriptProcessorNode that
+ * reaches no destination is never pulled — zero frames, and Arm A silently
+ * uploads nothing.
+ * ======================================================================== */
+
+describe('createInboundAudioTap — the capture graph is CONNECTED (round 2, R2-2)', () => {
+  it('wires mediaStreamSource -> processor -> gain -> ctx.destination, and nothing else', () => {
+    const fake = makeFakeContext();
+    openTap(fake);
+
+    expect(fake.edges()).toEqual([
+      'source -> processor',
+      'processor -> gain',
+      'gain -> destination',
+    ]);
+
+    // ...and the edges are between the ACTUAL nodes: the processor the module
+    // installed its callback on is the one the source feeds.
+    const source = fake.nodes.find((n) => n.kind === 'source')!;
+    const processor = fake.nodes.find((n) => n.kind === 'processor')!;
+    const gain = fake.nodes.find((n) => n.kind === 'gain')!;
+    expect(source.connectedTo).toEqual([processor.node]);
+    expect(processor.connectedTo).toEqual([gain.node]);
+    expect(gain.connectedTo).toEqual([fake.destination]);
+    expect(fake.processors[0]).toBe(processor.node);
+  });
+
+  it('the processor reaches the destination — a node nothing pulls captures nothing', () => {
+    const fake = makeFakeContext();
+    openTap(fake);
+
+    // Walk the graph forward from the processor. This is the property Chrome
+    // enforces and the one a deleted connect() breaks.
+    const reachesDestination = (from: FakeNode, seen = new Set<unknown>()): boolean =>
+      from.connectedTo.some((target) => {
+        if (target === fake.destination) return true;
+        if (seen.has(target)) return false;
+        seen.add(target);
+        const next = fake.nodes.find((n) => n.node === target);
+        return next !== undefined && reachesDestination(next, seen);
+      });
+
+    expect(reachesDestination(fake.nodes.find((n) => n.kind === 'processor')!)).toBe(true);
+    expect(reachesDestination(fake.nodes.find((n) => n.kind === 'source')!)).toBe(true);
+  });
+
+  it('a RECONNECT rebuilds the whole graph, not a dangling processor', () => {
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('first'));
+    tap.attach(fakeStream('second'));
+
+    expect(fake.edges()).toEqual([
+      'source -> processor',
+      'processor -> gain',
+      'gain -> destination',
+      'source -> processor',
+      'processor -> gain',
+      'gain -> destination',
+    ]);
+  });
+});
+
 describe('createInboundAudioTap — capture is SILENT (ticket 046, PRD §7)', () => {
-  it('never sounds the stream: every path to ctx.destination runs through a ZERO gain', () => {
+  it('the ONLY path to ctx.destination is a gain pinned at 0', () => {
     // A ScriptProcessor needs a sink to be pulled, so a route to the
-    // destination is permitted — but Replay autoplays NOTHING, so anything
+    // destination is required — but Replay autoplays NOTHING, so the one thing
     // reaching the speakers must be silenced at a gain node.
+    const fake = makeFakeContext();
+    openTap(fake);
+    fake.emit(f32(0.5));
+
+    const intoDestination = fake.nodes.filter((n) => n.connectedTo.includes(fake.destination));
+    // EXACTLY ONE path, and it is silent. "every path is a zero gain" is
+    // vacuously true when there are no paths at all — which is precisely the
+    // state R2-2 above proves is fatal.
+    expect(intoDestination).toHaveLength(1);
+    expect(intoDestination[0]!.kind).toBe('gain');
+    expect(intoDestination[0]!.gain?.value).toBe(0);
+  });
+});
+
+/* ===========================================================================
+ * R2-4 — capture is GATED to the model's speaking windows.
+ * ======================================================================== */
+
+describe('createInboundAudioTap — the capture gate (round 2, R2-4)', () => {
+  it('the tail grace is a NAMED constant, 250 ms, expressed in samples at the wire rate', () => {
+    expect(INBOUND_TAIL_GRACE_MS).toBe(250);
+    expect(INBOUND_TAIL_GRACE_SAMPLES).toBe((INBOUND_TAIL_GRACE_MS * INBOUND_SAMPLE_RATE) / 1000);
+    expect(INBOUND_TAIL_GRACE_SAMPLES).toBe(6_000);
+  });
+
+  it('DROPS everything before the first window — the run’s leading silence is not the model', () => {
     const fake = makeFakeContext();
     const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
     tap.attach(fakeStream('remote'));
-    fake.emit(Float32Array.from([0.5]));
 
-    const intoDestination = fake.nodes.filter((n) => n.connectedTo.includes(fake.destination));
-    for (const node of intoDestination) {
-      expect(node.kind).toBe('gain');
-      expect(node.gain?.value).toBe(0);
-    }
+    // Comfort noise, from track-attach until the model actually speaks.
+    fake.emit(f32(0.25, -0.25));
+    fake.emit(f32(0.25));
+    expect(tap.take()).toHaveLength(0);
+
+    tap.startWindow();
+    fake.emit(f32(0.5));
+    expect(Array.from(tap.take())).toEqual([16384]);
+  });
+
+  it('DROPS frames outside a window, and CONCATENATES the windows it kept', () => {
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('remote'));
+
+    fake.emit(f32(-1)); // before: dropped
+    tap.startWindow();
+    fake.emit(f32(0.5)); // utterance 1: kept
+    tap.endWindow();
+    // Past the grace: the inter-utterance gap that would unblind blind compare.
+    fake.emit(new Float32Array(INBOUND_TAIL_GRACE_SAMPLES));
+    fake.emit(f32(-1)); // dropped
+    tap.startWindow();
+    fake.emit(f32(0.25)); // utterance 2: kept
+    tap.endWindow();
+    fake.emit(new Float32Array(INBOUND_TAIL_GRACE_SAMPLES));
+    fake.emit(f32(-1)); // dropped
+
+    // Two utterances, gapless apart from the two tail graces they earned.
+    const captured = Array.from(tap.take());
+    expect(captured).toHaveLength(2 + 2 * INBOUND_TAIL_GRACE_SAMPLES);
+    expect(captured.filter((v) => v !== 0)).toEqual([16384, 8192]);
+    expect(captured[0]).toBe(16384);
+    expect(captured[1 + INBOUND_TAIL_GRACE_SAMPLES]).toBe(8192);
+  });
+
+  it('HONOURS THE TAIL GRACE: capture continues past endWindow, then stops mid-frame', () => {
+    // `output_audio_buffer.stopped` marks the end of the model's output BUFFER,
+    // not the end of the sound arriving over RTP — the last syllable is still in
+    // flight. Cutting at the event clips it.
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('remote'));
+    tap.startWindow();
+    fake.emit(f32(0.5));
+    tap.endWindow();
+
+    // A short tail frame is kept whole...
+    fake.emit(f32(0.25, 0.25));
+    expect(Array.from(tap.take())).toEqual([16384, 8192, 8192]);
+
+    // ...and the grace is a BUDGET, not a frame count: the frame that overruns
+    // it is truncated to exactly what is left, and the next one is dropped.
+    const remaining = INBOUND_TAIL_GRACE_SAMPLES - 2;
+    fake.emit(Float32Array.from({ length: remaining + 5 }, () => 0.5));
+    fake.emit(f32(-1));
+    const captured = Array.from(tap.take());
+    expect(captured).toHaveLength(1 + INBOUND_TAIL_GRACE_SAMPLES);
+    expect(captured.at(-1)).toBe(16384);
+    expect(captured).not.toContain(-32768);
+  });
+
+  it('a window REOPENED during the grace resumes full capture and re-arms the grace', () => {
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('remote'));
+    tap.startWindow();
+    tap.endWindow();
+    fake.emit(f32(0.5)); // in grace: kept
+
+    tap.startWindow();
+    // Far more than one grace's worth — all of it inside a real window.
+    fake.emit(new Float32Array(INBOUND_TAIL_GRACE_SAMPLES * 2));
+    fake.emit(f32(0.25));
+    tap.endWindow();
+    fake.emit(f32(0.25));
+
+    const captured = Array.from(tap.take());
+    expect(captured).toHaveLength(1 + INBOUND_TAIL_GRACE_SAMPLES * 2 + 2);
+    expect(captured[0]).toBe(16384);
+    expect(captured.at(-1)).toBe(8192);
+  });
+
+  it('the gate SURVIVES a reconnect: a window open when the track drops keeps capturing', () => {
+    // One run is one recording, and the model does not stop speaking because
+    // the peer connection blinked.
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('first'));
+    tap.startWindow();
+    fake.emit(f32(0.5));
+
+    tap.attach(fakeStream('second'));
+    fake.emit(f32(0.25));
+    expect(Array.from(tap.take())).toEqual([16384, 8192]);
+  });
+
+  it('endWindow() before any window, and after close(), are inert', () => {
+    const fake = makeFakeContext();
+    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
+    tap.attach(fakeStream('remote'));
+    expect(() => tap.endWindow()).not.toThrow();
+    fake.emit(f32(0.5));
+    expect(tap.take()).toHaveLength(0);
+
+    tap.startWindow();
+    fake.emit(f32(0.5));
+    void tap.close();
+    expect(() => tap.startWindow()).not.toThrow();
+    fake.emit(f32(0.25));
+    expect(Array.from(tap.take())).toEqual([16384]);
   });
 });
 
@@ -205,7 +540,8 @@ describe('createInboundAudioTap — reconnect and close (ticket 046)', () => {
     const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
 
     tap.attach(fakeStream('first'));
-    fake.emit(Float32Array.from([0.25]));
+    tap.startWindow();
+    fake.emit(f32(0.25));
     const firstSource = fake.nodes.find((n) => n.kind === 'source')!;
 
     tap.attach(fakeStream('second'));
@@ -213,24 +549,71 @@ describe('createInboundAudioTap — reconnect and close (ticket 046)', () => {
     // ONE context for the tap's whole life — a reconnect must not leak one.
     expect(fake.factoryArgs).toHaveLength(1);
 
-    fake.emit(Float32Array.from([-0.25]));
+    fake.emit(f32(-0.25));
     // One run is ONE recording, whatever the connection did underneath.
     expect(Array.from(tap.take())).toEqual([8192, -8192]);
   });
 
   it('close() closes the context idempotently, and later frames are inert', () => {
     const fake = makeFakeContext();
-    const tap = createInboundAudioTap({ audioContextFactory: fake.audioContextFactory });
-    tap.attach(fakeStream('remote'));
-    fake.emit(Float32Array.from([0.5]));
+    const tap = openTap(fake);
+    fake.emit(f32(0.5));
 
-    tap.close();
-    tap.close();
+    void tap.close();
+    void tap.close();
     expect(fake.state.closes).toBe(1);
 
     // A frame that lands after stop() must not throw, and must not extend the
     // recording the run already uploaded.
-    expect(() => fake.emit(Float32Array.from([0.25]))).not.toThrow();
+    expect(() => fake.emit(f32(0.25))).not.toThrow();
     expect(Array.from(tap.take())).toEqual([16384]);
+  });
+});
+
+/* ===========================================================================
+ * R2-7 — the context close is SEQUENCED, not fired and forgotten.
+ * ======================================================================== */
+
+describe('createInboundAudioTap — close() awaits the context (round 2, R2-7)', () => {
+  it('returns a promise that settles only once ctx.close() has settled', async () => {
+    // `void ctx.close()` is fire-and-forget. A realtime Replay run builds TWO
+    // AudioContexts and Chrome caps concurrent hardware contexts (~6), so across
+    // a 60-run sweep a lagging close makes a later construction throw and kills
+    // a run. The caller has to be able to WAIT.
+    const fake = makeFakeContext();
+    const tap = openTap(fake);
+
+    const order: string[] = [];
+    const closed = Promise.resolve(tap.close()).then(() => order.push('tap.close resolved'));
+
+    expect(tap.close()).toBeInstanceOf(Promise); // idempotent AND still awaitable
+    // Several microtask turns: a fire-and-forget close resolves in the first.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).toEqual([]);
+    expect(fake.state.closes).toBe(1);
+
+    order.push('ctx.close settled');
+    fake.closeGate.resolve();
+    await closed;
+    expect(order).toEqual(['ctx.close settled', 'tap.close resolved']);
+  });
+
+  it('a context that FAILS to close does not reject the caller — nothing can act on it', async () => {
+    const fake = makeFakeContext({ closeRejects: true });
+    const tap = openTap(fake);
+    await expect(Promise.resolve(tap.close())).resolves.toBeUndefined();
+  });
+
+  it('the captured audio is still readable after the close has settled', async () => {
+    const fake = makeFakeContext();
+    const tap = openTap(fake);
+    fake.emit(f32(0.5, -0.5));
+
+    const closed = Promise.resolve(tap.close());
+    fake.closeGate.resolve();
+    await closed;
+    expect(Array.from(tap.take())).toEqual([16384, -16384]);
   });
 });

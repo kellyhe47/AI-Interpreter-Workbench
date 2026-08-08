@@ -24,6 +24,7 @@ import { REALTIME_MODEL } from '../../core/arms';
 import type { CorpusUtterance } from '../../core/corpus';
 import { SAMPLE_RATE } from '../../core/protocol';
 import { readWav, writeWav } from '../../harness/wav';
+import { INBOUND_TAIL_GRACE_SAMPLES } from '../audio/inboundAudio';
 import type { Recording, Run } from '../state/ledger';
 import {
   RealtimeTransport,
@@ -147,6 +148,25 @@ function fakeFetch(): typeof fetch {
 /** Samples the fake model puts on the media track per answered utterance. */
 const TRACK_SAMPLES_PER_UTTERANCE = 6;
 
+/* ---------------------------------------------------------------------------
+ * ROUND 2 (R2-4) — the media track carries more than the model's voice.
+ *
+ * A real inbound track runs from the moment the answer is applied: leading
+ * comfort noise, then speech, then the gap to the next utterance. Capturing all
+ * of it makes an Arm A file the whole ~45 s run while cascade's is a few seconds
+ * of gapless TTS, and blind compare — which plays the WHOLE stored WAV — is
+ * unblinded in the first second. These three markers are what the fake model
+ * puts in each of those regions, so "the gate dropped the right thing" is a
+ * claim about identifiable samples rather than about a length.
+ * ------------------------------------------------------------------------ */
+
+/** Comfort noise on the track before the model has EVER spoken. Must be dropped. */
+const NOISE_MARK = -31_000;
+/** The last syllable, still in flight when `.stopped` lands. Must be KEPT. */
+const TAIL_MARK = 31_000;
+/** The inter-utterance gap, past the tail grace. Must be dropped. */
+const GAP_MARK = -30_000;
+
 interface ArmAHarnessOptions {
   /** Frames the model needs before it responds at all. Default: every frame. */
   deaf?: boolean;
@@ -162,6 +182,12 @@ interface ArmAHarnessOptions {
    * a timer or from the connect, not from the model's audio.
    */
   mute?: boolean;
+  /**
+   * ROUND 2 (R2-7) — hold the tap's context close open, so a run that does not
+   * WAIT for it is visible. Two AudioContexts per realtime run against Chrome's
+   * ~6-context cap is a 60-run sweep that dies part-way through.
+   */
+  holdClose?: boolean;
 }
 
 function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
@@ -172,7 +198,35 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
   const sinks: { closed: number }[] = [];
   /** TICKET 046 — the inbound taps built, and what the track carried. */
   const taps: { attached: unknown[]; closed: number }[] = [];
+  /** EVERYTHING the model put on the media track, in order. */
+  const delivered: number[] = [];
+  /** What the GATED tap kept — the bytes the run must store, and no others. */
   const trackAudio: number[] = [];
+  /** Every capture-gate transition the transport drove, in order. */
+  const windows: string[] = [];
+  /**
+   * ROUND 2 (R2-4) — the fake tap's gate, implementing exactly the contract
+   * inboundAudio.test.ts pins: frames outside a window are DROPPED, never
+   * buffered, and capture continues for INBOUND_TAIL_GRACE_SAMPLES past
+   * `endWindow()` so the last syllable is not clipped.
+   */
+  const gate = { capturing: false, grace: 0 };
+  const deliver = (...samples: number[]): void => {
+    for (const sample of samples) {
+      delivered.push(sample);
+      if (gate.capturing) {
+        trackAudio.push(sample);
+      } else if (gate.grace > 0) {
+        gate.grace -= 1;
+        trackAudio.push(sample);
+      }
+    }
+  };
+  /** R2-7 — the tap's context close, held open when `holdClose` is set. */
+  let releaseClose!: () => void;
+  const closeGate = new Promise<void>((res) => {
+    releaseClose = res;
+  });
   /** Clock at each `output_audio_buffer.started` the model sent. */
   const queuedAt: number[] = [];
   /** What `uploadAudio` was given, by run id. */
@@ -217,14 +271,19 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
     const boundaryFrames = ((answered + 1) * 1_000) / FRAME_MS;
     if (heard < boundaryFrames) return;
     answered += 1;
+    const speaks = opts.mute !== true;
     channel.emit({ type: 'input_audio_buffer.speech_stopped' });
+    // ROUND 2 — the track has been running since the answer was applied. Before
+    // the model's FIRST word that is comfort noise, and it is not evidence.
+    if (speaks && answered === 1) deliver(NOISE_MARK, NOISE_MARK);
+
     queuedAt.push(Date.now());
     channel.emit({ type: 'output_audio_buffer.started' });
     // TICKET 046 — and THE AUDIO ITSELF, on the media track and nowhere else.
     // There is no `response.output_audio.delta` on this transport (040).
-    if (opts.mute !== true) {
+    if (speaks) {
       for (let i = 0; i < TRACK_SAMPLES_PER_UTTERANCE; i++) {
-        trackAudio.push(i % 2 === 0 ? answered * 100 + i : -(answered * 100 + i));
+        deliver(i % 2 === 0 ? answered * 100 + i : -(answered * 100 + i));
       }
     }
     channel.emit({
@@ -232,6 +291,15 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
       transcript: `translation ${answered}`,
     });
     channel.emit({ type: 'output_audio_buffer.stopped' });
+    // ROUND 2 — `.stopped` ends the model's output BUFFER, not the sound on the
+    // wire: this syllable is still in flight and the tail grace must keep it.
+    if (speaks) deliver(TAIL_MARK);
+    // ...and then the gap. Exhausting the grace once is enough to prove it is a
+    // BUDGET and not "everything after the last window".
+    if (speaks && answered === MANIFEST.length) {
+      deliver(...new Array<number>(INBOUND_TAIL_GRACE_SAMPLES - 1).fill(0));
+      deliver(GAP_MARK, GAP_MARK);
+    }
     channel.emit({ type: 'response.done', response: { usage: { total_tokens: 10 } } });
   };
 
@@ -273,9 +341,20 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
                 taps.push(entry);
                 return {
                   attach: (stream: unknown) => entry.attached.push(stream),
+                  startWindow: () => {
+                    windows.push('start');
+                    gate.capturing = true;
+                    gate.grace = 0;
+                  },
+                  endWindow: () => {
+                    windows.push('end');
+                    gate.capturing = false;
+                    gate.grace = INBOUND_TAIL_GRACE_SAMPLES;
+                  },
                   take: () => Int16Array.from(trackAudio),
-                  close: () => {
+                  close: (): void | Promise<void> => {
                     entry.closed += 1;
+                    return opts.holdClose === true ? closeGate : undefined;
                   },
                 };
               },
@@ -292,7 +371,21 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
     newId: () => 'run-arm-a',
   };
 
-  return { deps, posted, pcs, written, sinks, taps, trackAudio, queuedAt, uploads, runs };
+  return {
+    deps,
+    posted,
+    pcs,
+    written,
+    sinks,
+    taps,
+    delivered,
+    trackAudio,
+    windows,
+    releaseClose: (): void => releaseClose(),
+    queuedAt,
+    uploads,
+    runs,
+  };
 }
 
 /** TICKET 046 — nothing in Replay autoplays, so nothing may build a context. */
@@ -396,7 +489,7 @@ describe('Replay Arm A end to end (ticket 043)', () => {
  * the track, never on the data channel.
  * ======================================================================== */
 
-/** Every sample the fake model put on the track, as the run should have stored. */
+/** What the GATED tap kept — exactly the bytes the run must store. */
 const capturedFor = (h: ReturnType<typeof makeArmAHarness>): number[] => [...h.trackAudio];
 
 describe('Replay Arm A output audio is captured and stored (ticket 046)', () => {
@@ -466,6 +559,11 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
 
     // The tapped run really did capture (else this proves nothing)...
     expect(withTap.outputAudio.length).toBeGreaterThan(0);
+    // ...THROUGH THE GATE — the path R2-4 added is the one under test here, not
+    // some ungated leftover. Four utterances, four windows, opened and closed.
+    expect(tapped.windows).toEqual(
+      MANIFEST.flatMap(() => ['start', 'end']),
+    );
     // ...and the measurement is untouched by it.
     expect(withTap.run.timings.audio_queued).toBe(noTap.run.timings.audio_queued);
     expect(withTap.run.timings.speech_end).toBe(noTap.run.timings.speech_end);
@@ -500,6 +598,88 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     expect(h.uploads).toEqual([]);
     expect(result.run.outputAudioPath).toBeUndefined();
     expect(h.posted[0]!.outputAudioPath).toBeUndefined();
+  });
+
+  it('STORES THE SPEECH, NOT THE RUN: the gate drops the noise and the gaps (round 2, R2-4)', async () => {
+    // Matching FORMAT is not enough. An ungated capture stores the whole ~45 s
+    // run — leading silence, inter-utterance gaps, comfort noise — while
+    // cascade's file is gapless TTS. BlindCompare plays the WHOLE stored WAV,
+    // so an evaluator would tell the arms apart in the first second: AC2's
+    // wording met, its PURPOSE defeated.
+    const h = makeArmAHarness();
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    const stored = Array.from(readWav(await h.runs.getAudio(result.run.id)).samples);
+
+    // The model spoke four times, so the transport opened four windows.
+    expect(h.windows).toEqual(MANIFEST.flatMap(() => ['start', 'end']));
+
+    // What the track carried but the model was not speaking is GONE...
+    expect(h.delivered).toContain(NOISE_MARK);
+    expect(h.delivered).toContain(GAP_MARK);
+    expect(stored).not.toContain(NOISE_MARK);
+    expect(stored).not.toContain(GAP_MARK);
+    // ...the last syllable, still in flight at `.stopped`, is KEPT...
+    expect(stored.filter((v) => v === TAIL_MARK)).toHaveLength(MANIFEST.length);
+    // ...and the four utterances CONCATENATE, in order, into one recording.
+    const speech = stored.filter((v) => v !== 0 && v !== TAIL_MARK);
+    expect(speech).toEqual(
+      MANIFEST.flatMap((_, u) =>
+        Array.from({ length: TRACK_SAMPLES_PER_UTTERANCE }, (__, i) =>
+          i % 2 === 0 ? (u + 1) * 100 + i : -((u + 1) * 100 + i),
+        ),
+      ),
+    );
+    // The gate really dropped something: an ungated tap stores every sample.
+    expect(stored.length).toBeLessThan(h.delivered.length);
+    expect(stored).toEqual(capturedFor(h));
+  });
+
+  it('the tail grace is a BUDGET: capture stops once it is spent (round 2, R2-4)', async () => {
+    const h = makeArmAHarness();
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    const result = await done;
+
+    const stored = Array.from(readWav(await h.runs.getAudio(result.run.id)).samples);
+    // Per utterance: the speech, plus one tail sample inside the grace. The last
+    // utterance also spends its whole remaining grace on the gap that follows —
+    // and everything past that is dropped, however long the run continues.
+    expect(stored).toHaveLength(
+      MANIFEST.length * (TRACK_SAMPLES_PER_UTTERANCE + 1) + (INBOUND_TAIL_GRACE_SAMPLES - 1),
+    );
+  });
+
+  it('AWAITS THE AUDIO CONTEXT CLOSE before the run resolves (round 2, R2-7)', async () => {
+    // `void ctx.close()` is fire-and-forget, and a realtime Replay run builds
+    // TWO AudioContexts (outbound sink + inbound tap) against Chrome's ~6
+    // concurrent-context cap. Across a 60-run sweep a lagging close makes a
+    // later construction throw and kills a run.
+    const h = makeArmAHarness({ holdClose: true });
+    let settled = false;
+    const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps }).then(
+      (r) => {
+        settled = true;
+        return r;
+      },
+    );
+    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+
+    // The transport asked the tap to close, and the run is WAITING on it.
+    expect(h.taps[0]!.closed).toBe(1);
+    expect(settled).toBe(false);
+    // Nothing was uploaded ahead of the close either — the run really stopped.
+    expect(h.uploads).toEqual([]);
+
+    h.releaseClose();
+    await vi.advanceTimersByTimeAsync(0);
+    const result = await done;
+
+    expect(settled).toBe(true);
+    expect(result.outputAudio.length).toBeGreaterThan(0);
+    expect(h.uploads).toHaveLength(1);
   });
 
   it('NOTHING AUTOPLAYS, and the run ends up judgeable in blind compare', async () => {

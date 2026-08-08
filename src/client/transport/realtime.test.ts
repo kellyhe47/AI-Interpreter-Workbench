@@ -191,14 +191,25 @@ function makeFakeInboundTap(calls: string[] = []) {
   const attached: RtcMediaStreamLike[] = [];
   const captured: number[] = [];
   const state = { built: 0, closed: 0 };
+  /**
+   * ROUND 2 (R2-7) — the tap's close is a real AudioContext close, and a run
+   * that never waits for it can leave Chrome's ~6 concurrent contexts exhausted
+   * part-way through a 60-run sweep. The gate lets a test hold it open.
+   */
+  const closeGate = makeGate();
   const tap: InboundAudioTap = {
     attach: (stream) => {
       calls.push('tap.attach');
       attached.push(stream);
     },
+    // ROUND 2 (R2-4) — the capture gate. The TAP decides what to keep; the
+    // transport only reports the model's speaking windows to it.
+    startWindow: () => calls.push('tap.startWindow'),
+    endWindow: () => calls.push('tap.endWindow'),
     take: () => Int16Array.from(captured),
     close: () => {
       state.closed += 1;
+      return closeGate.promise;
     },
   };
   return {
@@ -206,6 +217,9 @@ function makeFakeInboundTap(calls: string[] = []) {
     calls,
     attached,
     state,
+    closeGate,
+    /** Just the capture-gate calls, in order. */
+    windows: (): string[] => calls.filter((c) => c.endsWith('Window')),
     /** Pretend the media track delivered these samples. */
     feed: (...samples: number[]) => captured.push(...samples),
     factory: (): InboundAudioTap => {
@@ -213,6 +227,15 @@ function makeFakeInboundTap(calls: string[] = []) {
       return tap;
     },
   };
+}
+
+/** A promise whose settlement a test controls. */
+function makeGate() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 /** Records every call the transport makes on the output sink, in order. */
@@ -1181,6 +1204,151 @@ describe('RealtimeTransport inbound audio tap (ticket 046)', () => {
     // A late track event after stop() attaches nothing.
     pc.emitTrack(audioTrackEvent(fakeStream('late')));
     expect(inbound.attached).toHaveLength(1);
+  });
+});
+
+/* ===========================================================================
+ * ROUND 2, R2-4 — the transport GATES the tap to the model's speaking windows.
+ *
+ * A tap that runs from track-attach to stop() records the whole ~45 s run:
+ * leading silence, inter-utterance gaps, comfort noise. Cascade's stored audio
+ * is the concatenation of TTS chunks — gapless speech, a few seconds. Blind
+ * compare plays the WHOLE stored WAV, so an evaluator would tell the arms apart
+ * in the first second: AC2's wording met, its PURPOSE defeated (and ~130 MB per
+ * 60-run arm).
+ *
+ * The transport already RECEIVES `output_audio_buffer.started` / `.stopped`. It
+ * now REPORTS them to the tap — and that is all it does with them. AC3 is the
+ * constraint: the gate must not change when, whether, or in what order
+ * `audio_queued` is stamped.
+ * ======================================================================== */
+
+describe('RealtimeTransport gates the tap to the speaking window (round 2, R2-4)', () => {
+  it('opens the window on output_audio_buffer.started and closes it on .stopped', async () => {
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    const ch = await startConnected(h);
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('remote')));
+
+    expect(inbound.windows()).toEqual([]);
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    expect(inbound.windows()).toEqual(['tap.startWindow']);
+    ch.emitEvent({ type: 'output_audio_buffer.stopped' });
+    expect(inbound.windows()).toEqual(['tap.startWindow', 'tap.endWindow']);
+
+    // Two utterances, two windows — the tap concatenates them into one file.
+    ch.emitEvent({ type: 'response.done', response: { usage: {} } });
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    ch.emitEvent({ type: 'output_audio_buffer.stopped' });
+    expect(inbound.windows()).toEqual([
+      'tap.startWindow',
+      'tap.endWindow',
+      'tap.startWindow',
+      'tap.endWindow',
+    ]);
+  });
+
+  it('AC3 IS UNTOUCHED: the measurement is stamped BEFORE the gate moves, and only once', async () => {
+    // The gate READS the two events; it must not change when, whether or in
+    // what order `audio_queued` is stamped. A DUPLICATE `.started` (which 040
+    // suppresses for the measurement) must still open the capture window —
+    // otherwise a re-armed utterance would record nothing.
+    const calls: string[] = [];
+    const inbound = makeFakeInboundTap(calls);
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    const ch = await startConnected(h);
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('remote')));
+    calls.length = 0;
+
+    const timings: TimingMark[] = [];
+    h.transport.setHandlers({
+      onTiming: (mark) => {
+        timings.push(mark);
+        calls.push(`timing:${mark.event}`);
+      },
+    });
+
+    h.clock.t = 8123;
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    ch.emitEvent({ type: 'output_audio_buffer.started' }); // duplicate
+
+    // The mark is stamped once, at the original instant, ahead of the gate.
+    expect(timings.filter((t) => t.event === 'audio_queued')).toEqual([
+      expect.objectContaining({ event: 'audio_queued', t: 8123, utt: 0 }),
+    ]);
+    expect(calls).toEqual(['timing:audio_queued', 'tap.startWindow', 'tap.startWindow']);
+    // ...and no byte ever reached the runner's `onAudio` stamp.
+    expect(h.audio).toHaveLength(0);
+  });
+
+  it('a track that arrives MID-WINDOW is captured, not lost until the next utterance', async () => {
+    // A reconnect during the model's answer builds the tap AFTER `.started` has
+    // gone by. The window state belongs to the SESSION, not to the connection.
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    const ch = await startConnected(h);
+
+    ch.emitEvent({ type: 'output_audio_buffer.started' });
+    expect(inbound.state.built).toBe(0); // no track yet: nothing to build
+
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('remote')));
+    expect(inbound.state.built).toBe(1);
+    expect(inbound.windows()).toEqual(['tap.startWindow']);
+  });
+
+  it('with NO tap wired, the same events are inert — Live captures nothing (§17 19h)', async () => {
+    const sink = makeFakeSink();
+    const h = makeHarness({ trackCapable: true, remoteAudioSink: sink.sink });
+    const ch = await startConnected(h);
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('remote')));
+
+    h.clock.t = 7000;
+    expect(() => {
+      ch.emitEvent({ type: 'output_audio_buffer.started' });
+      ch.emitEvent({ type: 'output_audio_buffer.stopped' });
+    }).not.toThrow();
+    expect(h.timings).toContainEqual(
+      expect.objectContaining({ event: 'audio_queued', t: 7000, utt: 0 }),
+    );
+    expect(h.transport.takeOutputAudio()).toHaveLength(0);
+  });
+});
+
+/* ===========================================================================
+ * ROUND 2, R2-7 — stop() SEQUENCES the tap's context close.
+ * ======================================================================== */
+
+describe('RealtimeTransport stop() waits for the audio context (round 2, R2-7)', () => {
+  it('returns a promise that settles only once the tap has really closed', async () => {
+    const inbound = makeFakeInboundTap();
+    const h = makeHarness({ trackCapable: true, createInboundAudioTap: inbound.factory });
+    await startConnected(h);
+    trackPc(h).emitTrack(audioTrackEvent(fakeStream('remote')));
+    inbound.feed(1, 2, 3);
+
+    let settled = false;
+    const stopped = Promise.resolve(h.transport.stop()).then(() => {
+      settled = true;
+    });
+    expect(inbound.state.closed).toBe(1);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    // Fire-and-forget would already be done here, and a 60-run sweep would keep
+    // stacking AudioContexts against Chrome's ~6-context cap.
+    expect(settled).toBe(false);
+
+    inbound.closeGate.resolve();
+    await stopped;
+    expect(settled).toBe(true);
+    // The recording still outlives the close — the runner reads it after.
+    expect(Array.from(h.transport.takeOutputAudio())).toEqual([1, 2, 3]);
+  });
+
+  it('a transport with no tap still stops synchronously — nothing to wait for', async () => {
+    const h = makeHarness();
+    await startConnected(h);
+    expect(h.transport.stop()).toBeUndefined();
   });
 });
 
