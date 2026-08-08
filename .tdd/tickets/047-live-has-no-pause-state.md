@@ -80,13 +80,46 @@ toggle.
 Unrelated and must stay green: `App.test.tsx:432`, `ReplayView.test.tsx:897/913` — those are
 Replay/blind-compare play buttons.
 
-## OPEN QUESTION FOR THE OPERATOR — do not implement past this without an answer
+## RESOLVED — the feedback question (operator decision)
 
-In Live the microphone is open **while the translation plays out loud**. On speakers (not
-headphones) the model can hear its own output, and that audio would be transcribed as if the
-operator had spoken it — corrupting the very session being measured. Removing pause removes the
-only way to silence output mid-session.
+The concern: in Live the microphone is open while the translation plays out loud, so on speakers the
+model could hear its own output and transcribe it as if the operator had spoken.
 
-Options: (a) no control at all, accept that Live requires headphones, and say so in the UI;
-(b) a **mute** that silences output without suspending anything — no "pause state", but a way to
-stop feedback. Awaiting the operator's answer; (a) is what the ticket currently specifies.
+**It is already handled, implicitly.** `src/client/audio/capture.ts:91` calls
+`getUserMedia({ audio: true })`, and browsers default `echoCancellation: true` for a bare
+`audio: true`. **Confirmed empirically by the operator**: during Live testing the model spoke back
+on autoplay and never transcribed its own output.
+
+### Considered and REJECTED: gating the microphone while output plays
+
+The operator proposed muting input during output — the standard half-duplex fix. Rejected after
+analysis, with the operator's agreement, because it would cost more than it buys:
+
+- **It kills barge-in.** The transport sends `turn_detection: { type: 'server_vad',
+  silence_duration_ms: 500 }`; Realtime handles barge-in natively while cascade is turn-based.
+  Suppressing it would hide a genuine architectural difference and make Arm A look more like
+  cascade than it is — the exact distortion this project exists to prevent.
+- **It can drop real speech.** Anything said during the output window would be lost, so a session
+  could under-count utterances with no error surfaced.
+- **It layers a SECOND gate on a pinned control.** AGENTS.md: "VAD pinned at
+  `silence_duration_ms: 500` in every arm. A measurement control, not a knob." A client-side gate on
+  top changes when speech reaches the provider, in Live only — Replay would not have it.
+
+### DECIDED: make the browser default EXPLICIT instead
+
+- [ ] `getUserMedia` requests the constraint rather than inheriting it:
+      `{ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }`
+- [ ] It is a **declared control**, documented beside VAD and endpointing — the same discipline used
+      everywhere else in this codebase. A browser changing its default must not silently change the
+      experiment.
+- [ ] The capture seam's type widens from `{ audio: true }` to carry the constraint object; the
+      existing injected fakes keep working (they ignore the argument)
+- [ ] **No input gating anywhere.** Barge-in stays possible; nothing mutes the microphone.
+
+## Test criteria for the constraint
+
+- `startCapture` passes the explicit constraint object through to the injected `getUserMedia` —
+  assert the exact object, so a future edit cannot silently drop a field
+- Every existing capture test still passes with the widened type
+- No code path mutes or gates the microphone during output (source-level guard, same shape as the
+  no-pause guard above)
