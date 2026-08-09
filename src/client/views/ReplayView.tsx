@@ -1041,14 +1041,38 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
     if (sweepPlan === null || sweep !== null) return;
     const { configurations, reps } = sweepPlan;
     setSweepPlan(null);
+    /**
+     * THE FIRST PROGRESS EVENT ARRIVES *DURING* THE CALL BELOW.
+     *
+     * `startBatch` builds its `done` as an async IIFE, and an async body runs
+     * SYNCHRONOUSLY until its first `await`; `emitProgress(cell)` is the first
+     * statement in `runCell`. So `onProgress` fires while `deps.startBatch(...)`
+     * is still on the stack — before this line's `handle` exists and before the
+     * `setSweep` below has run.
+     *
+     * That cost the operator twenty seconds of a panel reading `starting — no
+     * run has been dispatched yet` with no clock on it: the updater's
+     * `previous === null` branch discarded the event (there was no sweep state
+     * to fold it into yet), and the `setSweep` below would have clobbered it
+     * anyway. The next event is emitted at the START of the second cell — one
+     * whole 1×-paced execution later.
+     *
+     * So the synchronous event is CAUGHT here and the initial state is SEEDED
+     * with it. This is a captured measurement, never a fabricated one: if
+     * nothing was emitted during the call this stays `null` and the panel goes
+     * on saying it is waiting — no invented `0:00` clock (ticket 067).
+     */
+    let duringStart: BatchProgress | null = null;
     const handle = deps.startBatch({
       recordingIds: [sweepPlan.recordingId],
       configurations,
       reps,
-      onProgress: (progress) =>
-        setSweep((previous) => (previous === null ? previous : { ...previous, progress })),
+      onProgress: (progress) => {
+        duringStart = progress;
+        setSweep((previous) => (previous === null ? previous : { ...previous, progress }));
+      },
     });
-    setSweep({ handle, configurations, reps, progress: null });
+    setSweep({ handle, configurations, reps, progress: duringStart });
     // A cancelled sweep is a SHORT sweep: whatever completed is still listed.
     void handle.done.then(() => {
       setSweep(null);

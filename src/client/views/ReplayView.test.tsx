@@ -2630,3 +2630,220 @@ describe('TICKET 067 — no ambient timer, no ambient clock, in either file', ()
     }
   });
 });
+
+/* ===== THE FIRST PROGRESS EVENT ARRIVES *DURING* startBatch ================= */
+
+/**
+ * THE TWENTY SECONDS OF NOTHING.
+ *
+ * The operator starts a sweep and the panel appears — reading `starting — no run
+ * has been dispatched yet`, with NO clock at all — and stays that way for about
+ * twenty seconds. Then the clock arrives, already past twenty seconds.
+ *
+ * WHY. `startBatch` builds `done` as an async IIFE, and an async function body
+ * runs SYNCHRONOUSLY until its first `await`. The cell loop calls `runCell`, and
+ * `emitProgress(cell)` is the FIRST statement in `runCell` — so the first
+ * progress event is delivered while `deps.startBatch(...)` is still on the
+ * stack, before it has returned its handle.
+ *
+ * At that instant `ReplayView`'s `sweep` state is still `null`. The subscription
+ * read
+ *
+ *   onProgress: (progress) =>
+ *     setSweep((previous) => (previous === null ? previous : { ...previous, progress }))
+ *
+ * so the updater took the `previous === null ? previous` branch and DROPPED the
+ * event on the floor; and the `setSweep({ …, progress: null })` on the next line
+ * would have clobbered it even if it had landed. The panel therefore mounted
+ * with `progress === null`, and `BatchProgress` renders the clock only in the
+ * `progress !== null` branch. The next event is emitted at the start of the
+ * SECOND cell — one full execution later, which at 1× pacing (PRD §7, eval 08)
+ * is ~21 s of audio plus provider latency. That is the operator's twenty seconds.
+ *
+ * WHY TICKET 067'S SUITE CANNOT SEE THIS. Every one of those tests emits through
+ * `BatchProbe.emit` AFTER the panel is already mounted, which is the one timing
+ * the defect does not occur at. The fake below emits BEFORE returning the
+ * handle, which is what the real runner does.
+ *
+ * NO TICK IS INVOLVED. These renders are given no `sweepClock` at all, so there
+ * is no tick source in the process: whatever the clock cell reads, it read off
+ * the event. And `emissions()` pins that exactly ONE event was ever delivered,
+ * so nothing here can be satisfied by "the second event arrived quickly".
+ *
+ * THE LINE THIS MUST NOT CROSS. The seeded value is the EVENT, never a
+ * fabricated zero: a `startBatch` that emits nothing synchronously must still
+ * render the waiting copy and no clock at all (ticket 067's rule — a countdown
+ * is not invented before there is something to count down from). The second
+ * test is that half, and it is why "seed with a zeroed progress object" is not
+ * an available shortcut.
+ */
+
+/** What the panel says when NOTHING has been dispatched. Verbatim from 013. */
+const SWEEP_WAITING = 'starting — no run has been dispatched yet';
+
+/** Scoped to the render's own container — RTL APPENDS, and a stale panel lies. */
+function inContainer(container: HTMLElement, selector: string): HTMLElement {
+  const found = container.querySelector<HTMLElement>(selector);
+  if (!found) throw new Error(`missing element: ${selector}`);
+  return found;
+}
+
+interface SyncStartedSweep {
+  container: HTMLElement;
+  /** The request the view handed the executor — the labels come off this. */
+  request: ReplayBatchRequest;
+  /** Deliver a LATER event, the way ticket 067's probe does. */
+  emit: (progress: BatchProgress) => void;
+  /** Total `onProgress` calls. One synchronous event and no more. */
+  emissions: () => number;
+}
+
+/**
+ * Drives the REAL operator path — `[data-batch-button]`, then
+ * `[data-sweep-confirm-start]` — over a `startBatch` that calls `onProgress`
+ * before it returns, exactly as `runner.ts` does.
+ *
+ * `first` builds the synchronous event from the request the view actually sent,
+ * so the position line can be asserted whole; passing a builder that returns
+ * `null` is the "nothing was dispatched synchronously" arm.
+ */
+async function openSweepEmittingDuringStart(
+  first: (request: ReplayBatchRequest) => BatchProgress | null,
+): Promise<SyncStartedSweep> {
+  const fakes = makeFakes(DEFAULT_LIBRARY);
+  let emissions = 0;
+  let sent: ReplayBatchRequest | null = null;
+  let deliver: ((progress: BatchProgress) => void) | null = null;
+
+  const startBatch = vi.fn((request: ReplayBatchRequest): BatchHandle => {
+    sent = request;
+    deliver = (progress) => {
+      emissions += 1;
+      request.onProgress?.(progress);
+    };
+    // THE DEFECT'S EXACT TIMING: emitted from INSIDE the call, before the
+    // handle exists on the caller's side.
+    const synchronous = first(request);
+    if (synchronous !== null) deliver(synchronous);
+    // A `done` that never settles — the sweep is still running throughout.
+    return { done: new Promise<BatchSummary>(() => {}), cancel: vi.fn() };
+  });
+
+  const deps: ReplayDeps = {
+    ...fakes.deps,
+    startBatch: startBatch as unknown as ReplayDeps['startBatch'],
+  };
+
+  const view = render(<ReplayView deps={deps} />);
+  await waitFor(() => expect(rows()).toHaveLength(2));
+  await selectRecording(CORPUS_REC.id);
+
+  fireEvent.click(inContainer(view.container, '[data-batch-button]'));
+  await waitFor(() => expect(view.container.querySelector('[data-sweep-confirm]')).not.toBeNull());
+
+  // NO `await` past this click. Everything asserted below is true of the DOM
+  // the operator sees the instant the sweep starts.
+  fireEvent.click(inContainer(view.container, '[data-sweep-confirm-start]'));
+  expect(startBatch).toHaveBeenCalledTimes(1);
+
+  const request = sent as ReplayBatchRequest | null;
+  if (request === null) throw new Error('startBatch was never called');
+  const emitLater = deliver as ((progress: BatchProgress) => void) | null;
+  if (emitLater === null) throw new Error('no emitter was captured');
+
+  return {
+    container: view.container,
+    request,
+    emit: (progress) => act(() => emitLater(progress)),
+    emissions: () => emissions,
+  };
+}
+
+/** The event `runner.ts` delivers from inside the call, built off the request. */
+function firstCellEvent(
+  request: ReplayBatchRequest,
+  overrides: Partial<BatchProgress> = {},
+): BatchProgress {
+  return {
+    runIndex: 1,
+    totalRuns: 12,
+    recordingId: request.recordingIds[0] ?? '',
+    configId: request.configurations[0]?.id ?? '',
+    repIndex: 1,
+    warmup: false,
+    // NOT zero — a seeded `0:00` would satisfy "a clock is present" while
+    // proving nothing about where the figure came from.
+    elapsedMs: 7_000,
+    // The first cell: nothing has settled, so the runner has no sample to
+    // extrapolate from. An absence, and it stays one.
+    estimatedRemainingMs: null,
+    ...overrides,
+  };
+}
+
+/** The position line, whole, for an event built by `firstCellEvent`. */
+function expectedPosition(request: ReplayBatchRequest, runIndex: number, repIndex: number): string {
+  const configuration = request.configurations[0] as BatchConfiguration;
+  const label = configuration.label ?? configuration.id;
+  return (
+    `run ${runIndex} of 12 · ${request.recordingIds[0] ?? ''} × ${label} · ` +
+    `rep ${repIndex}/${request.reps}`
+  );
+}
+
+describe('the sweep panel mounts with the event delivered DURING startBatch', () => {
+  it('shows the clock immediately — one synchronous event, no tick, no second event', async () => {
+    const sweep = await openSweepEmittingDuringStart((request) => firstCellEvent(request));
+
+    // The panel is up...
+    expect(sweep.container.querySelector('[data-batch-progress]')).not.toBeNull();
+
+    // ...and the clock is ON IT, right now. Before the fix there was no
+    // `[data-batch-clock]` element here at all for the next ~20 seconds.
+    expectClock(sweep.container, '0:07', SWEEP_NO_ESTIMATE);
+
+    // The figure is the EVENT'S. A locally invented zero would read `0:00`.
+    expect(clockIn(sweep.container)).not.toContain('elapsed 0:00');
+
+    // The matrix position is the event's too — not the waiting copy.
+    expect(positionIn(sweep.container)).toBe(expectedPosition(sweep.request, 1, 1));
+    expect(sweep.container.textContent ?? '').not.toContain(SWEEP_WAITING);
+
+    // Non-vacuity for "immediately": exactly ONE event has ever been
+    // delivered, and no clock seam was injected, so nothing but that
+    // synchronous emission could have put those figures on screen.
+    expect(sweep.emissions()).toBe(1);
+  });
+
+  it('a startBatch that emits NOTHING synchronously still reads `starting…` with no clock', async () => {
+    const sweep = await openSweepEmittingDuringStart(() => null);
+
+    expect(sweep.container.querySelector('[data-batch-progress]')).not.toBeNull();
+    expect(sweep.emissions()).toBe(0);
+
+    // Ticket 067's rule, unmoved: nothing has been measured, so there is no
+    // clock, no position and no bar — an absence, not a fabricated `0:00`.
+    expect(sweep.container.querySelector('[data-batch-clock]')).toBeNull();
+    expect(sweep.container.querySelector('[data-batch-position]')).toBeNull();
+    expect(sweep.container.querySelector('[data-batch-bar]')).toBeNull();
+    expect(sweep.container.textContent ?? '').toContain(SWEEP_WAITING);
+  });
+
+  it('later events still re-anchor the panel seeded by the synchronous one', async () => {
+    const sweep = await openSweepEmittingDuringStart((request) => firstCellEvent(request));
+    expectClock(sweep.container, '0:07', SWEEP_NO_ESTIMATE);
+
+    sweep.emit(
+      firstCellEvent(sweep.request, {
+        runIndex: 2,
+        repIndex: 2,
+        elapsedMs: 28_000,
+        estimatedRemainingMs: 300_000,
+      }),
+    );
+
+    await waitFor(() => expectClock(sweep.container, '0:28', '5:00'));
+    expect(positionIn(sweep.container)).toBe(expectedPosition(sweep.request, 2, 2));
+    expect(sweep.emissions()).toBe(2);
+  });
+});
