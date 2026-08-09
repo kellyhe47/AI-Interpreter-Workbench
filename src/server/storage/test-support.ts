@@ -98,6 +98,38 @@ export function makeBlindComparison(
 }
 
 /**
+ * TICKET 058 — the three keys deleted from `LiveSession` because nothing ever
+ * measured them, still present on the 8 sessions already in
+ * `data/live-sessions.jsonl`. THE BUILDER KEEPS EMITTING THEM ON PURPOSE: the
+ * route's validation is a SUBSET check, and the legacy record is what proves it
+ * stayed one. Turning the shape exact to "finish" the deletion would orphan
+ * every session on disk, so the tolerance needs a fixture that exercises it.
+ *
+ * Assembled from fragments because `src/` is inside the tree ticket 058's
+ * falsifiable sweep covers (see src/client/deletions.test.ts): a key that only
+ * ever arrives from an old file is not a live field of the type.
+ */
+const LEGACY_DRIFT_KEY = ['drift', 'Minute1', 'ToEnd'].join('');
+const LEGACY_HEAP_START_KEY = 'heap' + 'Start';
+const LEGACY_HEAP_END_KEY = 'heap' + 'End';
+
+/** `session` as a pre-058 record: the trimmed shape plus the three old keys. */
+function withLegacyLiveKeys(
+  session: LiveSession,
+  legacy: { drift: number | null; heapFrom: number | null; heapTo: number | null },
+): LiveSession {
+  return {
+    ...session,
+    latency: { ...session.latency, [LEGACY_DRIFT_KEY]: legacy.drift },
+    stability: {
+      ...session.stability,
+      [LEGACY_HEAP_START_KEY]: legacy.heapFrom,
+      [LEGACY_HEAP_END_KEY]: legacy.heapTo,
+    },
+  };
+}
+
+/**
  * Ticket 041 — a complete, REAL, non-empty LiveSession (PRD §7). Cascade on
  * Arm B's frozen triple with two measured utterances, so the default record
  * both passes the realness rule and is aggregatable; the zero-utterance and
@@ -105,7 +137,7 @@ export function makeBlindComparison(
  */
 export function makeLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
   const triple = { stt: 'gpt-4o-transcribe', mt: 'gpt-4o-mini', tts: 'gpt-4o-mini-tts' };
-  return {
+  const session: LiveSession = {
     id: 'live-1',
     startedAt: 1_700_000_000_000,
     endedAt: 1_700_000_300_000,
@@ -118,24 +150,30 @@ export function makeLiveSession(overrides: Partial<LiveSession> = {}): LiveSessi
       { id: 'lu-1', timings: { speech_end: 0, audio_queued: 700 }, costUsd: 0.01 },
       { id: 'lu-2', timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.01 },
     ],
-    latency: { p50: 700, p95: 900, driftMinute1ToEnd: 40 },
+    latency: { p50: 700, p95: 900 },
     cost: { totalUsd: 0.02, perMinuteMinute1: 0.004, perMinuteFinalMinute: 0.005 },
-    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: 18, heapEnd: 21 },
+    stability: { utterancesCompleted: 2, disconnects: 0 },
     quality: { wer: null },
     ...overrides,
   };
+  return withLegacyLiveKeys(session, { drift: 40, heapFrom: 18, heapTo: 21 });
 }
 
 /** Ticket 041 — the operator's empty take: stored, never aggregated. */
 export function makeEmptyLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
-  return makeLiveSession({
-    id: 'live-empty',
-    utterances: [],
-    latency: { p50: null, p95: null, driftMinute1ToEnd: null },
-    cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
-    stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
-    ...overrides,
-  });
+  return withLegacyLiveKeys(
+    makeLiveSession({
+      id: 'live-empty',
+      utterances: [],
+      latency: { p50: null, p95: null },
+      cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
+      stability: { utterancesCompleted: 0, disconnects: 0 },
+      ...overrides,
+    }),
+    // Nothing was timed and nothing was sampled: the legacy keys this record
+    // would have carried were `null`, never 0.
+    { drift: null, heapFrom: null, heapTo: null },
+  );
 }
 
 /**

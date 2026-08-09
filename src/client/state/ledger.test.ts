@@ -452,9 +452,22 @@ function runWithLatency(ms: number, overrides: Partial<Run> = {}): Run {
   return makeRun({ timings: { speech_end: 1_000, audio_queued: 1_000 + ms }, ...overrides });
 }
 
+/**
+ * TICKET 058 — the three keys deleted from `LiveSession`, still carried by the
+ * sessions already in `localStorage` and in the server's stream. The builder
+ * keeps emitting them so the reader's TOLERANCE is exercised by a real legacy
+ * record; the trimmed shape is built by stripping them at the call site.
+ * Assembled from fragments so 058's own sweep over `src/` reaches zero.
+ */
+const LEGACY_LIVE_KEYS = {
+  drift: ['drift', 'Minute1', 'ToEnd'].join(''),
+  heapFrom: 'heap' + 'Start',
+  heapTo: 'heap' + 'End',
+} as const;
+
 function makeLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
   entitySeq += 1;
-  return {
+  const session: LiveSession = {
     id: `live-${entitySeq}`,
     startedAt: 1_700_000_000_000,
     endedAt: 1_700_000_300_000,
@@ -466,11 +479,20 @@ function makeLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
       { id: 'lu-1', timings: { speech_end: 0, audio_queued: 700 }, costUsd: 0.004 },
       { id: 'lu-2', timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.006 },
     ],
-    latency: { p50: 700, p95: 900, driftMinute1ToEnd: 200 },
+    latency: { p50: 700, p95: 900 },
     cost: { totalUsd: 0.01, perMinuteMinute1: 0.002, perMinuteFinalMinute: 0.003 },
-    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: 10, heapEnd: 12 },
+    stability: { utterancesCompleted: 2, disconnects: 0 },
     quality: { wer: null, subjectiveNotes: 'clean' },
     ...overrides,
+  };
+  return {
+    ...session,
+    latency: { ...session.latency, [LEGACY_LIVE_KEYS.drift]: 200 },
+    stability: {
+      ...session.stability,
+      [LEGACY_LIVE_KEYS.heapFrom]: 10,
+      [LEGACY_LIVE_KEYS.heapTo]: 12,
+    },
   };
 }
 

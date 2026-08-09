@@ -33,11 +33,12 @@ Server on :8787, Vite client on :5173 (proxied `/api` + `/ws`). Open http://loca
   one mt-stage failure. Fixture records never reach the Results view (realness rule).
 - **Production build:** `npm run build && npm start` (single origin: server serves the SPA).
 - **Tests:** `npm test` — 461 tests, all fixture-driven, zero network.
-- **Manual smoke (real APIs, ~$0.01):** `npx tsx scripts/smoke-openai.mjs` ·
-  `npx tsx scripts/smoke-elevenlabs.mjs`
-- **Placeholder corpus + fixture bench:** `npx tsx scripts/generate-placeholder-corpus.mjs` ·
-  `npx tsx scripts/bench-fixture.mjs` · stability soak: `node --expose-gc --import tsx
-  scripts/soak-fixture.mjs <minutes>`
+- **Manual smoke (real APIs, ~$0.01):** `npm run smoke:openai` · `npm run smoke:elevenlabs`
+- **Corpus:** the recorded takes are captured through the in-app Record flow and stored under
+  `data/recordings/`; the scripts they are read from are `corpus/SCRIPTS.md` and
+  `corpus/LIVE-SCRIPT.md`. (The synthetic tone-burst corpus and the fixture bench/soak scripts
+  that consumed it were deleted — they were never an input, and a placeholder number reaching a
+  reported figure is exactly what the realness rule exists to prevent.)
 
 ## Architecture
 

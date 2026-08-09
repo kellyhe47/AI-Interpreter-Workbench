@@ -618,7 +618,6 @@ describe('ResultsView — conversation-length card is sourced from LiveSessions'
     expect(liveCell('p50', 'cascade')).toBe(formatMs(armB.p50Ms));
     expect(liveCell('disconnects', 'realtime-default')).toBe(String(armA.disconnects));
     expect(liveCell('disconnects', 'cascade')).toBe(String(armB.disconnects));
-    expect(liveCell('drift', 'realtime-default')).toBe(formatMs(armA.driftMinute1ToEndMs));
     expect(liveCell('cost-final-minute', 'realtime-default')).toBe(
       formatUsd(armA.costPerMinuteFinalMinute),
     );
@@ -1180,9 +1179,9 @@ function unsyncedTake(id: string, latencyMs: number): LiveSession {
         timings: { speech_end: 0, audio_queued: latencyMs },
         costUsd: 0.02,
       })),
-      latency: { p50: latencyMs, p95: latencyMs, driftMinute1ToEnd: null },
+      latency: { p50: latencyMs, p95: latencyMs},
       cost: { totalUsd: 0.1, perMinuteMinute1: 0.02, perMinuteFinalMinute: 0.02 },
-      stability: { utterancesCompleted: 5, disconnects: 0, heapStart: null, heapEnd: null },
+      stability: { utterancesCompleted: 5, disconnects: 0},
     }),
     syncState: 'unsynced',
   };

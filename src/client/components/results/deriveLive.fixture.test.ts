@@ -20,7 +20,6 @@ import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, type ProviderTriple } from '../
 import { RunLedger, type LiveSession } from '../../state/ledger';
 import { deriveLiveModel } from './derive';
 import {
-  LIVE_A_DRIFT_MS,
   makeLiveSessionEntity,
   seedLiveSessions,
 } from './testRecords';
@@ -49,14 +48,11 @@ function fixtureLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
     latency: {
       p50: FIXTURE_CONSTANT_LATENCY_MS,
       p95: FIXTURE_CONSTANT_LATENCY_MS,
-      driftMinute1ToEnd: 0,
     },
     cost: { totalUsd: 0.02, perMinuteMinute1: 0.004, perMinuteFinalMinute: 0.004 },
     stability: {
       utterancesCompleted: FIXTURE_UTTERANCES_COMPLETED,
       disconnects: 0,
-      heapStart: null,
-      heapEnd: null,
     },
     ...overrides,
   });
@@ -175,7 +171,6 @@ describe('ticket 018 — regression guard: a REAL LiveSession still populates it
     expect(a.disconnects).toBe(1);
     expect(a.p50Ms).toBe(1100);
     expect(a.p95Ms).toBe(1200);
-    expect(a.driftMinute1ToEndMs).toBe(LIVE_A_DRIFT_MS);
 
     const b = model.columns.find((c) => c.arm === 'B')!;
     expect(b.p50Ms).toBe(700);
@@ -192,8 +187,8 @@ describe('ticket 018 — regression guard: a REAL LiveSession still populates it
           { id: 'lu-2', timings: { speech_end: 0, audio_queued: 700 }, costUsd: 0.01 },
           { id: 'lu-3', timings: { speech_end: 0, audio_queued: 800 }, costUsd: 0.01 },
         ],
-        latency: { p50: 700, p95: 800, driftMinute1ToEnd: 40 },
-        stability: { utterancesCompleted: 3, disconnects: 0, heapStart: null, heapEnd: null },
+        latency: { p50: 700, p95: 800},
+        stability: { utterancesCompleted: 3, disconnects: 0},
       }),
     );
     ledger.appendLiveSession(
@@ -226,8 +221,8 @@ describe('ticket 018 — regression guard: a REAL LiveSession still populates it
         utterances: [
           { id: 'lu-1', timings: { speech_end: 0, audio_queued: 1000 }, costUsd: 0.1 },
         ],
-        latency: { p50: 1000, p95: 1000, driftMinute1ToEnd: 250 },
-        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+        latency: { p50: 1000, p95: 1000},
+        stability: { utterancesCompleted: 1, disconnects: 0},
       }),
     );
     const model = deriveLiveModel(ledger);

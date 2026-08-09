@@ -104,8 +104,6 @@ function realtimeSession(
     stability: {
       utterancesCompleted: utterances.length,
       disconnects: 0,
-      heapStart: null,
-      heapEnd: null,
     },
     cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null, ...cost },
   });

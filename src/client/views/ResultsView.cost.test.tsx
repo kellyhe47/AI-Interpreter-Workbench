@@ -356,11 +356,11 @@ describe('TICKET 059 · the last two formatUsd cost cells join the one vocabular
         utterances: [
           { id: 'lu-1', timings: { server_speech_stopped: 0, audio_queued: 900 }, costUsd: null },
         ],
-        latency: { p50: 900, p95: 900, driftMinute1ToEnd: null },
+        latency: { p50: 900, p95: 900},
         // Nobody could price this take — cascade reports no usage today, so
         // this is the ordinary case and not an edge one.
         cost: { totalUsd: null, perMinuteMinute1: null, perMinuteFinalMinute: null },
-        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+        stability: { utterancesCompleted: 1, disconnects: 0},
         quality: { wer: null },
       }),
     );
@@ -404,9 +404,9 @@ describe('TICKET 059 · the last two formatUsd cost cells join the one vocabular
         utterances: [
           { id: 'lu-1', timings: { server_speech_stopped: 0, audio_queued: 900 }, costUsd: 0.12 },
         ],
-        latency: { p50: 900, p95: 900, driftMinute1ToEnd: null },
+        latency: { p50: 900, p95: 900},
         cost: { totalUsd: 0.12, perMinuteMinute1: 0.12, perMinuteFinalMinute: 0.3 },
-        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+        stability: { utterancesCompleted: 1, disconnects: 0},
         quality: { wer: null },
       }),
     );

@@ -44,8 +44,8 @@ function ledgerWithLiveSession(): RunLedger {
       // A self-reported summary the utterances CANNOT produce: if the card
       // still shows 9.99 s it is reading the session's own field rather than
       // measuring the utterances it carries (R2-2's mean-of-p50s fallback).
-      latency: { p50: 9_999, p95: 9_999, driftMinute1ToEnd: null },
-      stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+      latency: { p50: 9_999, p95: 9_999},
+      stability: { utterancesCompleted: 1, disconnects: 0},
     }),
   );
   return ledger;
@@ -222,9 +222,9 @@ function prePolicySession() {
       timings: { server_speech_stopped: 0, audio_queued: ms },
       costUsd: 1,
     })),
-    latency: { p50: 9_000, p95: 9_100, driftMinute1ToEnd: 700 },
+    latency: { p50: 9_000, p95: 9_100},
     cost: { totalUsd: 2, perMinuteMinute1: 0.9, perMinuteFinalMinute: 0.9 },
-    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 2, disconnects: 0},
   });
 }
 
@@ -353,9 +353,9 @@ function prePolicySessionNamed(id: string) {
       timings: { server_speech_stopped: 0, audio_queued: ms },
       costUsd: 1,
     })),
-    latency: { p50: 8_000, p95: 8_100, driftMinute1ToEnd: 700 },
+    latency: { p50: 8_000, p95: 8_100},
     cost: { totalUsd: 2, perMinuteMinute1: 0.9, perMinuteFinalMinute: 0.9 },
-    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 2, disconnects: 0},
   });
 }
 

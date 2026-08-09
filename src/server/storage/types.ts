@@ -238,7 +238,7 @@ export interface LiveSession {
   contextPolicy?: LiveContextPolicy;
   modelSnapshots: Record<string, string>;
   utterances: LiveSessionUtterance[];
-  latency: { p50: number | null; p95: number | null; driftMinute1ToEnd: number | null };
+  latency: { p50: number | null; p95: number | null };
   cost: {
     /** TICKET 052 — `null` when NO utterance in the session could be priced. */
     totalUsd: number | null;
@@ -248,8 +248,6 @@ export interface LiveSession {
   stability: {
     utterancesCompleted: number;
     disconnects: number;
-    heapStart: number | null;
-    heapEnd: number | null;
   };
   quality: { wer: null; subjectiveNotes?: string };
 }

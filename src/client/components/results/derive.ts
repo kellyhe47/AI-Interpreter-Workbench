@@ -122,9 +122,9 @@ import {
   type ArmTag,
 } from '../../../core/arms';
 // src/core/corpus.ts is the CANONICAL category union (ticket 030; compiled by
-// both tsconfigs, and what `RunUtterance.category` is typed as). The identical
-// union in src/harness/corpus.ts is the pre-22a synthetic placeholder kept for
-// bench/soak — importing it here left two copies free to drift apart.
+// both tsconfigs, and what `RunUtterance.category` is typed as). It is now the
+// ONLY one: ticket 054 deleted the harness-side synthetic duplicate along with
+// the placeholder clips it validated, so two copies can no longer drift apart.
 import type { CorpusCategory } from '../../../core/corpus';
 import {
   PRICING_VERSION,
@@ -519,7 +519,6 @@ export interface LiveArmColumn {
   disconnects: number;
   p50Ms: number | null;
   p95Ms: number | null;
-  driftMinute1ToEndMs: number | null;
   costPerMinuteMinute1: number | null;
   costPerMinuteFinalMinute: number | null;
   /**
@@ -1452,11 +1451,6 @@ export function deriveLiveModel(ledger: RunLedger): LiveModel {
       disconnects: sessions.reduce((sum, s) => sum + s.stability.disconnects, 0),
       p50Ms,
       p95Ms,
-      driftMinute1ToEndMs: meanOf(
-        sessions
-          .map((s) => s.latency.driftMinute1ToEnd)
-          .filter((v): v is number => v !== null),
-      ),
       costPerMinuteMinute1: meanOf(
         sessions.map((s) => s.cost.perMinuteMinute1).filter((v): v is number => v !== null),
       ),

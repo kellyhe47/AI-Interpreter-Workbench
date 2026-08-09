@@ -120,8 +120,8 @@ describe('ticket 018 — an excluded LiveSession is still STORED (dev data, not 
       id: 'live-fixture',
       providerTriple: { ...FIXTURE_TRIPLE },
       modelSnapshots: { ...FIXTURE_TRIPLE },
-      stability: { utterancesCompleted: 20, disconnects: 0, heapStart: null, heapEnd: null },
-      latency: { p50: 980, p95: 980, driftMinute1ToEnd: null },
+      stability: { utterancesCompleted: 20, disconnects: 0},
+      latency: { p50: 980, p95: 980},
     });
   }
 

@@ -56,14 +56,11 @@ function fixtureLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
     latency: {
       p50: FIXTURE_CONSTANT_LATENCY_MS,
       p95: FIXTURE_CONSTANT_LATENCY_MS,
-      driftMinute1ToEnd: 0,
     },
     cost: { totalUsd: 0.02, perMinuteMinute1: 0.004, perMinuteFinalMinute: 0.004 },
     stability: {
       utterancesCompleted: FIXTURE_UTTERANCES_COMPLETED,
       disconnects: 0,
-      heapStart: null,
-      heapEnd: null,
     },
     ...overrides,
   });

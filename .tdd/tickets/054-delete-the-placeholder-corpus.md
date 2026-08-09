@@ -1,13 +1,13 @@
 ---
 id: 054
 title: Delete the placeholder corpus — the real takes are recorded, and keeping both invites a tone burst into the write-up
-status: pending
+status: done
 source: spec-audit + operator
 depends_on: []
 touches: [corpus/, scripts/generate-placeholder-corpus.mjs, scripts/bench-fixture.mjs, scripts/soak-fixture.mjs, src/harness/corpus.ts, src/harness/corpus.test.ts]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Why
@@ -215,3 +215,31 @@ is involved. Do not add a seam. (For reference only, the project's seams live in
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09) — worked as one loop with ticket 058
+
+Suite 2426 passing / 0 failing. `npm run check` exits 0. Golden eval 06 still green.
+
+Deleted: 36 `corpus/*.wav` tone bursts, `corpus/manifest.json`,
+`scripts/generate-placeholder-corpus.mjs`, `src/harness/corpus{,.test}.ts`.
+
+**Survived, each pinned by an assertion in the same test as its deletion** (so a typo'd path fails
+loudly rather than passing): `corpus/SCRIPTS.md`, `corpus/LIVE-SCRIPT.md`, `src/core/corpus.ts` (the
+route imports `validateManifest` from there, never the harness copy — the two were **not**
+consolidated), and `src/harness/wav.ts`, which has real production importers.
+
+### The rule outlives the data
+
+The point of this ticket is that deleting the placeholder *data* must not delete the *rule*. All
+three placeholder-prefix guards survive (`ledger.ts` ×2, `exportResults.ts` ×1), pinned three ways:
+physically present **together with** the manifest being gone; golden eval 06's `must_exclude` intact;
+and behaviourally against ids that were **never in the deleted manifest**
+(`placeholder-2027-something-new`), so the rule cannot degrade into a lookup against data that no
+longer exists. It protects future placeholders, not just the ones removed.
+
+### Premise corrected
+
+**Ticket 058's out-of-scope note was wrong and contradicted this ticket.** It said the generator must
+stay "because golden eval 06 depends on it". It does not: eval 06 only *quotes the path in its `why`
+prose*, the harness treats `why` as an opaque string, and the eval's only `readFileSync` reads
+`package.json`. Deleting the generator is safe and 054 wins.

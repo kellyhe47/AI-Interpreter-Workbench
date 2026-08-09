@@ -726,9 +726,12 @@ export function useSessionController(deps: SessionDeps): SessionController {
         : { realtime: config.realtimeModel ?? REALTIME_MODEL },
       utterances: store.utterances.map((u) => ({ ...u, timings: { ...u.timings } })),
       latency: {
+        // TICKET 058 — p50/p95 stay `null` when nothing was timed: unmeasured is
+        // `null`, never a 0. The latency-drift figure that used to sit here was
+        // never measured at all, so the FIELD is gone rather than nulled — a
+        // typed key is a claim that a measurement exists.
         p50: latencies.length === 0 ? null : nearestRank(latencies, 0.5),
         p95: latencies.length === 0 ? null : nearestRank(latencies, 0.95),
-        driftMinute1ToEnd: null,
       },
       cost: {
         // TICKET 052 — measured utterances only, so a session whose utterances
@@ -746,11 +749,12 @@ export function useSessionController(deps: SessionDeps): SessionController {
         // one of the reasons Live exists at all and Replay cannot answer this.
         ...perMinuteCosts(startedAt, endedAt),
       },
+      // TICKET 058 — the two COUNTERS only. The heap figures were never sampled
+      // (jsdom has no `performance.memory` and nothing injected one), so they are
+      // deleted rather than reported as absent.
       stability: {
         utterancesCompleted: store.utterances.length,
         disconnects: store.disconnects,
-        heapStart: null,
-        heapEnd: null,
       },
       quality: { wer: null },
     };

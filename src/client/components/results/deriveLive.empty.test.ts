@@ -46,9 +46,9 @@ function emptySession(overrides: Partial<LiveSession> = {}): LiveSession {
     providerTriple: { ...DEFAULT_CASCADE_TRIPLE },
     modelSnapshots: { ...DEFAULT_CASCADE_TRIPLE },
     utterances: [],
-    latency: { p50: null, p95: null, driftMinute1ToEnd: null },
+    latency: { p50: null, p95: null},
     cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
-    stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 0, disconnects: 0},
     ...overrides,
   });
 }
@@ -61,9 +61,9 @@ function measuredSession(overrides: Partial<LiveSession> = {}): LiveSession {
     providerTriple: { ...DEFAULT_CASCADE_TRIPLE },
     modelSnapshots: { ...DEFAULT_CASCADE_TRIPLE },
     utterances: [{ id: 'lu-1', timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.02 }],
-    latency: { p50: 900, p95: 900, driftMinute1ToEnd: 30 },
+    latency: { p50: 900, p95: 900},
     cost: { totalUsd: 0.02, perMinuteMinute1: 0.004, perMinuteFinalMinute: 0.005 },
-    stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 1, disconnects: 0},
     ...overrides,
   });
 }
@@ -301,9 +301,9 @@ function syncedSession(id: string, utterances: number, latencyMs: number): LiveS
       timings: { speech_end: 0, audio_queued: latencyMs },
       costUsd: 0.01,
     })),
-    latency: { p50: latencyMs, p95: latencyMs, driftMinute1ToEnd: null },
+    latency: { p50: latencyMs, p95: latencyMs},
     cost: { totalUsd: 0.01 * utterances, perMinuteMinute1: null, perMinuteFinalMinute: null },
-    stability: { utterancesCompleted: utterances, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: utterances, disconnects: 0},
   });
 }
 

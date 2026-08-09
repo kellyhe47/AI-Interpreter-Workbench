@@ -1,13 +1,13 @@
 ---
 id: 058
 title: Delete the fabricated artifacts — invented benchmark data, dead code, and scaffolding for fields hardcoded null
-status: pending
+status: done
 source: spec-audit
 depends_on: []
 touches: [benchmark-results/, src/harness/bench.ts, src/harness/bench.test.ts, scripts/bench-fixture.mjs, scripts/soak-fixture.mjs, src/client/views/useSessionController.ts, src/client/state/ledger.ts, src/client/components/results/derive.ts, src/client/views/ResultsView.tsx, src/server/storage/types.ts, src/server/routes/liveSessions.ts, package.json, .tdd/worktrees/]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Why
@@ -265,3 +265,42 @@ deleted) — that is a removal, not a policy violation.
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09) — worked as one loop with ticket 054
+
+Suite 2426 passing / 0 failing. `npm run check` exits 0.
+
+Deleted: `benchmark-results/` entirely (its `fixture-soak.json` was stamped `"PLACEHOLDER": true`
+with invented heap figures and was the **only** heap data in the repo), `src/harness/bench{,.test}.ts`,
+`scripts/bench-fixture.mjs`, `scripts/soak-fixture.mjs`.
+
+Removed end-to-end: `driftMinute1ToEnd`, `heapStart`, `heapEnd` — type, validator, writer,
+aggregator, render row. Ban sweeps over `src/`, `scripts/`, `package.json` (comments included) return
+**0** for all of them and for `harness/bench` / `runFixtureBench`. 94 hits of scaffolding for
+measurements that never happened are gone.
+
+**Removing a field that is always `null` is not the same as reporting zero** — it removes a claim
+that a measurement exists. A pinned test asserts an empty take still reports `p50`/`p95` as `null`,
+never `0`, and that the posted `latency` keys are exactly `['p50','p95']`.
+
+### The ordering held
+
+Relaxed `routes/liveSessions.ts` **first**, verified 40/40 green at that exact point — the trimmed
+body now 2xx **while** a legacy body still 201s and stores verbatim, and *relaxing is not deleting*
+(missing `latency`, missing `stability`, non-numeric values all still 400) — and only then stopped
+writing the fields. A read-only load of real `data/` confirms all **8 stored sessions still load with
+their old keys intact**, verbatim, no re-added nulls, no zeros.
+
+### `.tdd/worktrees/053/` — removed by the orchestrator, work preserved
+
+It was a **full repo copy**, with its own `corpus/`, `src/` and `scripts/` — exactly the
+doubled-results hazard AC7 names. Removed with `git worktree remove`, which deletes the directory and
+**keeps the branch**: `tdd/053` still holds all three commits (`3e844e2`, `741983d`, `ca40359`) and
+remains unmerged, exactly as PRD §15B intends. `git worktree add` recreates it from the branch at any
+time.
+
+### Smoke scripts
+
+**Wired, not deleted** — `npm run smoke:openai` / `npm run smoke:elevenlabs`. They make real provider
+calls and are the evidence behind PRD §13's "one real-provider smoke test per path"; deleting them
+would have dropped a true claim.

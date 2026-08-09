@@ -171,9 +171,9 @@ export function makeLiveSessionEntity(overrides: Partial<LiveSession> = {}): Liv
     // A session built by TODAY's code carries today's price source (052 R2).
     pricingVersion: PRICING_VERSION,
     utterances: [],
-    latency: { p50: null, p95: null, driftMinute1ToEnd: null },
+    latency: { p50: null, p95: null},
     cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
-    stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 0, disconnects: 0},
     quality: { wer: null },
     ...overrides,
   };
@@ -853,8 +853,6 @@ export function seedCorpusExclusionCases(ledger: RunLedger): void {
  */
 export const LIVE_A_LATENCIES = [1000, 1100, 1200] as const;
 export const LIVE_B_LATENCIES = [600, 700, 800] as const;
-export const LIVE_A_DRIFT_MS = 250;
-export const LIVE_B_DRIFT_MS = 40;
 export const LIVE_A_COST = { totalUsd: 0.9, perMinuteMinute1: 0.12, perMinuteFinalMinute: 0.3 };
 export const LIVE_B_COST = { totalUsd: 0.2, perMinuteMinute1: 0.04, perMinuteFinalMinute: 0.041 };
 
@@ -876,9 +874,9 @@ export function seedLiveSessions(ledger: RunLedger): void {
       contextPolicy: 'default',
       modelSnapshots: { realtime: REALTIME_MODEL },
       utterances: liveUtterances(LIVE_A_LATENCIES, 0.3),
-      latency: { p50: 1100, p95: 1200, driftMinute1ToEnd: LIVE_A_DRIFT_MS },
+      latency: { p50: 1100, p95: 1200},
       cost: { ...LIVE_A_COST },
-      stability: { utterancesCompleted: 3, disconnects: 1, heapStart: 20, heapEnd: 44 },
+      stability: { utterancesCompleted: 3, disconnects: 1},
       quality: { wer: null, subjectiveNotes: 'one drop at minute 4' },
     }),
   );
@@ -892,9 +890,9 @@ export function seedLiveSessions(ledger: RunLedger): void {
       contextPolicy: 'n/a',
       modelSnapshots: { ...ARM_B_TRIPLE },
       utterances: liveUtterances(LIVE_B_LATENCIES, 0.06),
-      latency: { p50: 700, p95: 800, driftMinute1ToEnd: LIVE_B_DRIFT_MS },
+      latency: { p50: 700, p95: 800},
       cost: { ...LIVE_B_COST },
-      stability: { utterancesCompleted: 3, disconnects: 0, heapStart: 18, heapEnd: 21 },
+      stability: { utterancesCompleted: 3, disconnects: 0},
       quality: { wer: null },
     }),
   );
@@ -930,7 +928,6 @@ export const LIVE_A_TRIMMED_COST = {
   perMinuteMinute1: 0.5,
   perMinuteFinalMinute: 0.8,
 };
-export const LIVE_A_TRIMMED_DRIFT_MS = 40;
 
 /**
  * Appends ONE arm-A session under the trimmed context policy. Deliberately a
@@ -955,10 +952,9 @@ export function seedTrimmedLiveSession(ledger: RunLedger): void {
       latency: {
         p50: LIVE_A_TRIMMED_P50_MS,
         p95: LIVE_A_TRIMMED_P95_MS,
-        driftMinute1ToEnd: LIVE_A_TRIMMED_DRIFT_MS,
       },
       cost: { ...LIVE_A_TRIMMED_COST },
-      stability: { utterancesCompleted: 2, disconnects: 2, heapStart: 20, heapEnd: 30 },
+      stability: { utterancesCompleted: 2, disconnects: 2},
       quality: { wer: null },
     }),
   );

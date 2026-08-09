@@ -223,7 +223,7 @@ describe('ticket 041 — a malformed body is a 4xx with a machine-readable envel
       reason: 'stability counters are not numbers',
       body: {
         ...makeLiveSession(),
-        stability: { utterancesCompleted: 'two', disconnects: 0, heapStart: null, heapEnd: null },
+        stability: { utterancesCompleted: 'two', disconnects: 0},
       },
     },
     // PRD §7: free conversation has no reference transcript, so a WER on a

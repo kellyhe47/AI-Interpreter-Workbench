@@ -2,8 +2,10 @@
  * Ticket 017 — export-results logic.
  *
  * The testable half of `npm run export-results`. `scripts/export-results.mjs`
- * is a thin CLI shell over this module — same split as
- * scripts/bench-fixture.mjs over src/harness/bench.ts.
+ * is a thin CLI shell over this module — the logic is here so it can be tested
+ * without a process, and the script only parses argv and prints.
+ * (TICKET 058 deleted the fixture-bench module this header used to cite as the
+ * sibling example of that split; it had no production importer.)
  *
  * Reads the working store at `dataDir` (normally `data/`, gitignored) through
  * `createStorage` and writes a dated bundle into `resultsDir` (normally

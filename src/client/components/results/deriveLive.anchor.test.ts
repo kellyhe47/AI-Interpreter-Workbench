@@ -74,12 +74,10 @@ function realtimeSession(id: string, latencies: number[], reported: { p50: numbe
     providerTriple: undefined,
     modelSnapshots: { realtime: REALTIME_MODEL },
     utterances: latencies.map((ms, i) => utterance(`${id}-u${i + 1}`, realtimeMarks(ms))),
-    latency: { p50: reported.p50, p95: reported.p95, driftMinute1ToEnd: null },
+    latency: { p50: reported.p50, p95: reported.p95},
     stability: {
       utterancesCompleted: latencies.length,
       disconnects: 0,
-      heapStart: null,
-      heapEnd: null,
     },
   });
 }
@@ -91,12 +89,10 @@ function cascadeSession(id: string, latencies: number[], reported: { p50: number
     providerTriple: { ...ARM_B_TRIPLE },
     modelSnapshots: { ...ARM_B_TRIPLE },
     utterances: latencies.map((ms, i) => utterance(`${id}-u${i + 1}`, cascadeMarks(ms))),
-    latency: { p50: reported.p50, p95: reported.p95, driftMinute1ToEnd: null },
+    latency: { p50: reported.p50, p95: reported.p95},
     stability: {
       utterancesCompleted: latencies.length,
       disconnects: 0,
-      heapStart: null,
-      heapEnd: null,
     },
   });
 }
@@ -152,8 +148,8 @@ describe('deriveLiveModel — the statistic', () => {
       makeLiveSessionEntity({
         id: 'live-unmeasurable',
         utterances: [utterance('u-1', {}), utterance('u-2', { audio_queued: 900 })],
-        latency: { p50: 900, p95: 900, driftMinute1ToEnd: null },
-        stability: { utterancesCompleted: 2, disconnects: 0, heapStart: null, heapEnd: null },
+        latency: { p50: 900, p95: 900},
+        stability: { utterancesCompleted: 2, disconnects: 0},
       }),
     );
 
@@ -175,8 +171,8 @@ describe('deriveLiveModel — the statistic', () => {
         utterances: [
           utterance('u-1', { speech_end: 0, vad_fired: 500, audio_queued: 1_053 }),
         ],
-        latency: { p50: 1_053, p95: 1_053, driftMinute1ToEnd: null },
-        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+        latency: { p50: 1_053, p95: 1_053},
+        stability: { utterancesCompleted: 1, disconnects: 0},
       }),
     );
 
@@ -237,9 +233,9 @@ function prePolicySession() {
     contextPolicy: undefined,
     modelSnapshots: { realtime: REALTIME_MODEL },
     utterances: [9_000, 9_100].map((ms, i) => utterance(`lu-pre-${i + 1}`, realtimeMarks(ms))),
-    latency: { p50: 9_000, p95: 9_100, driftMinute1ToEnd: 700 },
+    latency: { p50: 9_000, p95: 9_100},
     cost: { totalUsd: 2, perMinuteMinute1: 0.9, perMinuteFinalMinute: 0.9 },
-    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 2, disconnects: 0},
   });
 }
 
@@ -314,8 +310,8 @@ describe('deriveLiveModel — the context-policy axis (TICKET 064)', () => {
         contextPolicy: 'n/a',
         modelSnapshots: { ...ARM_B_TRIPLE },
         utterances: [utterance('lu-b2-1', cascadeMarks(700))],
-        latency: { p50: 700, p95: 700, driftMinute1ToEnd: null },
-        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+        latency: { p50: 700, p95: 700},
+        stability: { utterancesCompleted: 1, disconnects: 0},
       }),
     );
 
@@ -382,8 +378,8 @@ function prePolicySessionNamed(id: string) {
     contextPolicy: undefined,
     modelSnapshots: { realtime: REALTIME_MODEL },
     utterances: [utterance(`${id}-u1`, realtimeMarks(8_000))],
-    latency: { p50: 8_000, p95: 8_000, driftMinute1ToEnd: null },
-    stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+    latency: { p50: 8_000, p95: 8_000},
+    stability: { utterancesCompleted: 1, disconnects: 0},
   });
 }
 
@@ -463,8 +459,8 @@ describe('deriveLiveModel — the realness gate runs BEFORE the policy is read (
         providerTriple: { ...FIXTURE_TRIPLE },
         modelSnapshots: { ...FIXTURE_TRIPLE },
         utterances: [utterance('lu-fx-1', cascadeMarks(980))],
-        latency: { p50: 980, p95: 980, driftMinute1ToEnd: 0 },
-        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+        latency: { p50: 980, p95: 980},
+        stability: { utterancesCompleted: 1, disconnects: 0},
       }),
     );
 
@@ -488,9 +484,9 @@ describe('deriveLiveModel — the realness gate runs BEFORE the policy is read (
         providerTriple: undefined,
         modelSnapshots: { realtime: REALTIME_MODEL },
         utterances: [],
-        latency: { p50: null, p95: null, driftMinute1ToEnd: null },
+        latency: { p50: null, p95: null},
         cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
-        stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
+        stability: { utterancesCompleted: 0, disconnects: 0},
       }),
     );
 

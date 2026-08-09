@@ -131,14 +131,12 @@ function rejectionReason(body: unknown): string | null {
   if (!body.utterances.every(isUtterance)) {
     return 'every utterance must carry an id, its timings and a numeric-or-null costUsd';
   }
-  if (
-    !hasFields(body.latency, {
-      p50: isNumberOrNull,
-      p95: isNumberOrNull,
-      driftMinute1ToEnd: isNumberOrNull,
-    })
-  ) {
-    return 'latency must give p50, p95 and driftMinute1ToEnd as numbers or null';
+  // TICKET 058 — the never-measured latency-drift figure is gone from the shape.
+  // `hasFields` is a SUBSET check, so the sessions already on disk that still
+  // carry it keep loading and are stored back verbatim; the route neither
+  // demands the key nor re-adds a `null` for it.
+  if (!hasFields(body.latency, { p50: isNumberOrNull, p95: isNumberOrNull })) {
+    return 'latency must give p50 and p95 as numbers or null';
   }
   if (
     !hasFields(body.cost, {
@@ -150,15 +148,15 @@ function rejectionReason(body: unknown): string | null {
   ) {
     return 'cost must give a numeric-or-null totalUsd and per-minute figures or null';
   }
+  // TICKET 058 — the never-measured heap figures are gone from the shape too.
+  // The two COUNTERS are still gated: relaxing is not deleting.
   if (
     !hasFields(body.stability, {
       utterancesCompleted: isNumber,
       disconnects: isNumber,
-      heapStart: isNumberOrNull,
-      heapEnd: isNumberOrNull,
     })
   ) {
-    return 'stability must give numeric counters and heap figures or null';
+    return 'stability must give numeric counters';
   }
   // PRD §7: free conversation has no reference transcript, so a WER on a Live
   // session is a FABRICATED measurement, not a missing one. `null` is the only

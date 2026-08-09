@@ -38,7 +38,6 @@ import {
   FAILED_RECORDING_ID,
   FIXTURE_RECORDING_ID,
   LIVE_A_COST,
-  LIVE_A_DRIFT_MS,
   MANUAL_RECORDING_ID,
   RECORDING_DURATION_MS,
   SHORT_SWEEP_ALL_FIVE_P50_MS,
@@ -486,7 +485,6 @@ describe('deriveLiveModel — LiveSessions only, never mixed with Runs', () => {
     expect(a.sessions).toBe(1);
     expect(a.p50Ms).toBe(1100);
     expect(a.p95Ms).toBe(1200);
-    expect(a.driftMinute1ToEndMs).toBe(LIVE_A_DRIFT_MS);
     expect(a.costPerMinuteMinute1).toBe(LIVE_A_COST.perMinuteMinute1);
     expect(a.costPerMinuteFinalMinute).toBe(LIVE_A_COST.perMinuteFinalMinute);
     expect(a.utterancesCompleted).toBe(3);

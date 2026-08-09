@@ -194,9 +194,9 @@ export const SERVER_LIVE_SESSIONS: readonly LiveSession[] = [
     utterances: [
       { id: 'lu-1', timings: { speech_end: 0, audio_queued: LIVE_CASCADE_LATENCY_MS }, costUsd: 0.02 },
     ],
-    latency: { p50: LIVE_CASCADE_LATENCY_MS, p95: LIVE_CASCADE_LATENCY_MS, driftMinute1ToEnd: 30 },
+    latency: { p50: LIVE_CASCADE_LATENCY_MS, p95: LIVE_CASCADE_LATENCY_MS},
     cost: { totalUsd: 0.02, perMinuteMinute1: 0.004, perMinuteFinalMinute: 0.005 },
-    stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 1, disconnects: 0},
   }),
   makeLiveSessionEntity({
     id: LIVE_SESSION_IDS.realtime,
@@ -207,9 +207,9 @@ export const SERVER_LIVE_SESSIONS: readonly LiveSession[] = [
     utterances: [
       { id: 'lu-1', timings: { speech_end: 0, audio_queued: LIVE_REALTIME_LATENCY_MS }, costUsd: 0.3 },
     ],
-    latency: { p50: LIVE_REALTIME_LATENCY_MS, p95: LIVE_REALTIME_LATENCY_MS, driftMinute1ToEnd: 200 },
+    latency: { p50: LIVE_REALTIME_LATENCY_MS, p95: LIVE_REALTIME_LATENCY_MS},
     cost: { totalUsd: 0.3, perMinuteMinute1: 0.06, perMinuteFinalMinute: 0.07 },
-    stability: { utterancesCompleted: 1, disconnects: 1, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: 1, disconnects: 1},
   }),
 ];
 
@@ -220,9 +220,9 @@ export const EMPTY_LIVE_SESSION: LiveSession = makeLiveSessionEntity({
   providerTriple: { ...ARM_B_TRIPLE },
   modelSnapshots: { ...ARM_B_TRIPLE },
   utterances: [],
-  latency: { p50: null, p95: null, driftMinute1ToEnd: null },
+  latency: { p50: null, p95: null},
   cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
-  stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
+  stability: { utterancesCompleted: 0, disconnects: 0},
 });
 
 export interface StaticHydrationSource {

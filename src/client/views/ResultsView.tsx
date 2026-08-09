@@ -567,11 +567,9 @@ const LIVE_ROWS: ReadonlyArray<{
   },
   { metric: 'p50', label: 'p50 latency', value: (c) => formatMs(c ? c.p50Ms : null) },
   { metric: 'p95', label: 'p95 latency', value: (c) => formatMs(c ? c.p95Ms : null) },
-  {
-    metric: 'drift',
-    label: 'drift, first minute to end',
-    value: (c) => formatMs(c ? c.driftMinute1ToEndMs : null),
-  },
+  // TICKET 058 — the latency-drift row is REMOVED, not blanked. A row reading
+  // `not measured` forever asserts the measurement is expected; nothing ever
+  // sampled it, so the claim goes with the field.
   {
     metric: 'cost-minute-1',
     label: 'cost per minute, first minute',

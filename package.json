@@ -11,6 +11,8 @@
     "start": "NODE_ENV=production tsx src/server/index.ts",
     "export-results": "tsx scripts/export-results.mjs",
     "score-wer": "tsx scripts/score-wer.mjs",
+    "smoke:openai": "tsx scripts/smoke-openai.mjs",
+    "smoke:elevenlabs": "tsx scripts/smoke-elevenlabs.mjs",
     "verify-citations": "tsx scripts/verify-citations.mjs",
     "test": "vitest run",
     "test:watch": "vitest",

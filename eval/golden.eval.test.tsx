@@ -152,7 +152,7 @@ function liveSession(id: string, utterances: number): LiveSession {
   return makeLiveSessionEntity({
     id,
     utterances: liveUtterances(utterances, 0.01),
-    stability: { utterancesCompleted: utterances, disconnects: 0, heapStart: null, heapEnd: null },
+    stability: { utterancesCompleted: utterances, disconnects: 0},
   });
 }
 
