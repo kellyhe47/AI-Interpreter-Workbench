@@ -219,3 +219,40 @@ literal (`RunsList.tsx:60`). Corrected in the ticket.
 ## Queue from here
 
 064 → 055 (split 055a/055b) → 059 → 060 → 065 → 066 → 054 → 058 (never parallel with 054) → 057.
+
+## PAUSED — 2026-08-09, mid-064 (Kelly's request)
+
+**Working tree is clean. Nothing is in flight. No agent is running.**
+
+### Exactly where 064 stands
+
+- Tests written and **locked** at `50f37f4`. Suite: **2176 passing / 13 red**, all 13 are 064's.
+- Both typechecks clean. `npm run eval` 9 pass / 4 fail (01, 02, 04 → 055; 10 → 060).
+- **The implementer has NOT run.** That is the next step.
+
+### To resume
+
+Dispatch an implementer against `.tdd/tickets/064-*.md`, briefed with:
+
+1. The two independent halves — `deriveLiveModel` must group by `(armTag, contextPolicy)`, AND
+   `LIVE_COLUMNS`' `realtime-trimmed` must stop being `arm: null` with `columnFor` returning
+   `undefined` for it. Fixing only the model leaves the DOM identical (zero production callers —
+   this repo's #1 failure mode).
+2. The trap: do NOT repair `columnFor` with `column.arm as ArmTag` or a `!`. Column identity must
+   become a PAIR. A green guard already exists for this and will bite.
+3. `undefined` contextPolicy = excluded and DISCLOSED, never folded into `default`.
+   `'n/a'` = "this arm has no policy axis" and must not fragment cascade into a fourth column.
+4. The dominant assertion is the DEFAULT column's p50 (1.10 s, not the pooled 1.20 s), not whether
+   the trimmed column stops showing `—`.
+5. 3 of the 15 new tests are green trap-guards that are vacuous today; they bite only on a wrong
+   fix. Do not treat their passing as progress.
+
+Then the adversarial reviewer, then commit. Same loop as 062 / 061 / 056.
+
+### Live findings not yet acted on
+
+- **`ReplayView.tsx:637`** picks blind-compare pairs on `status === 'complete'` alone, with no
+  stored-audio predicate (from 056). Flagged for Kelly, deliberately unchanged.
+- **`src/core/protocol.test.ts:122-138`** — the "session.start has no extra field" guard is
+  structurally vacuous (`Array<keyof SessionStart>` widens, so the `Exclude` is `never`
+  unconditionally). Filed as a background task chip, not a ticket.
