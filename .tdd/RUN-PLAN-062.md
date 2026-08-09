@@ -6,8 +6,8 @@ Owner: orchestrating agent. Kelly owns git. Sub-agents run NO git commands.
 
 | # | Ticket | State |
 |---|---|---|
-| 062 | Realtime/cascade ignore the selected language pair | **IN PROGRESS** — tests locked at 3bb00a8, 34 red |
-| 061 | Runs record no languagePair / direction | queued (062 partially subsumes: Run fields) |
+| 062 | Realtime/cascade ignore the selected language pair | **DONE** — `a57cd3a`, reviewed GREEN |
+| 061 | Runs record no languagePair / direction | **DONE** — tests `856c7f3`, impl `a6ca500`, reviewed GREEN |
 | 064 | REALTIME · TRIMMED pooled into default column | queued |
 | 055 | One ledger, one truth + run envelope (split 055a/055b) | queued |
 | 059 | $0.000 on Results + Replay | queued |
@@ -128,3 +128,42 @@ failure naming its ticket. A case that goes green must go green because the prod
 - One 5-minute Live session per arm (the rubric's stability benchmark, never executed)
 - Listening to EN→YUE output (PRD §10's Mandarin-pronunciation trap is audible only)
 - Do NOT re-run the 3 recorded EN corpus takes until 062 lands.
+
+## Progress log
+
+**2026-08-09 — 062 DONE** (`a57cd3a`). 34 locked reds closed. Three defects, one seam
+(`deriveLanguageSelection` etc. in `sessionMachine.ts`, beside the `pairs` table). Blank/whitespace
+target refused at the source in both `RealtimeTransport.start()` and `runOnce`. Reviewed over 18
+mutations — no headline defect reintroducible; 4 unpinned-intent findings closed with 7 assertions,
+each watched fail first. The one that mattered: a Live utterance RECORD stamped `EN↔ES` for an
+EN↔YUE or reversed session — the defect class moved from wire to ledger.
+
+**2026-08-09 — 061 DONE** (tests `856c7f3`, impl `a6ca500`). Suite 2174 passing. Golden eval case 11
+now passes. Reviewed GREEN over 24 mutations, including both relocation mutations.
+
+Scope finding worth carrying forward: `languageSelectionForSource` returned the first matching pair,
+so Cantonese was unreachable from Replay — and sweeps run through Replay, so the kept Cantonese track
+could not be produced at all. Replay now has the operator-visible target control AC2 specified.
+**Ticket 065 (batch sweep dialog) will see this control** — the sweep now has a target-language
+dimension it did not have before.
+
+One locked test was repaired by the orchestrator (not the implementer, who correctly stopped and
+reported it): `ResultsView.category.test.tsx:194` used `getByText` where n = 1 makes p50 === p95, so
+both cells render the same string. Replaced with `getAllByText` plus a strictly stronger clause.
+
+## OPEN QUESTION FOR KELLY — ticket 056
+
+`056-retain-output-audio-per-run.md` is `status: pending`, carries a full `## CONTEXT FOR A FRESH
+AGENT` section, and owns a **failing golden eval** (case 12,
+`output-audio-is-retained-for-blind-scoring`) — but it appears in **neither** the handoff's work
+order **nor** its deferred list (050, 026, 053) **nor** its closed-invalid list (022, 063). Its own
+title says "without it the project's most distinctive finding cannot be produced", which reads like
+the Cantonese audible-only finding (PRD §10).
+
+Two of the five remaining eval failures are 055; one is 060; one is 056. So 056 is the only red eval
+case with no place in the stated queue. Needs a decision: work it, defer it explicitly, or close it.
+
+## Remaining queue (unchanged order)
+
+064 → 055 (split 055a ledger / 055b runner envelope) → 059 → 060 → 065 → 066 → 054 → 058 (never
+parallel with 054) → 057.
