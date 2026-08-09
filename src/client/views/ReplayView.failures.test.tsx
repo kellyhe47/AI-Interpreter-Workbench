@@ -525,6 +525,10 @@ describe('ticket 024 — Run and Batch sweep have no affordance without a select
     await selectRecording(CORPUS_REC.id);
 
     fireEvent.click(actionButton(BATCH_SWEEP));
+    // TICKET 065 — the press opens a confirmation and reaches no executor;
+    // confirming is the only path to `startBatch`. The assertions are unchanged.
+    await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+    fireEvent.click(get('[data-sweep-confirm-start]'));
 
     await waitFor(() => expect(fakes.startBatch).toHaveBeenCalledTimes(1));
     expect(fakes.batchRequests[0]!.recordingIds).toContain(CORPUS_REC.id);

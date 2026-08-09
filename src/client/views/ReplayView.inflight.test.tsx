@@ -445,10 +445,18 @@ describe('ticket 044 — the indication clears on completion AND on failure', ()
 /* ==================================================== the batch sweep ===== */
 
 describe('ticket 044 — Batch sweep is not double-fireable, and does not contradict BatchProgress', () => {
+  /**
+   * TICKET 065 — the press now opens a confirmation and reaches no executor, so
+   * getting a sweep IN FLIGHT takes one more step. Nothing below changed: the
+   * disabled-while-sweeping and not-double-fireable contracts are asserted
+   * exactly as before, against a sweep that is genuinely running.
+   */
   async function startSweep() {
     const fakes = await mount({ recordings: [CORPUS_REC, MIC_REC] });
     await selectRecording(CORPUS_REC.id);
     fireEvent.click(actionButton(BATCH_SWEEP));
+    await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+    fireEvent.click(get('[data-sweep-confirm-start]'));
     await waitFor(() => expect(fakes.batches).toHaveLength(1));
     await waitFor(() => expect(q('[data-batch-progress]')).not.toBeNull());
     return fakes;

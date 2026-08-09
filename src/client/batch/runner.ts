@@ -7,7 +7,7 @@
  *
  * THE BATCH RUNNER EXISTS FOR CONTROL ENFORCEMENT, NOT CLICK REDUCTION (PRD
  * §17 22f). Counterbalancing and warmup discard are §8 requirements a human
- * would apply inconsistently across 45 runs, and they are the entire reason
+ * would apply inconsistently across 27 runs, and they are the entire reason
  * `origin: 'sweep'` means anything to the ledger's aggregation gate. A runner
  * that quietly skipped either control would make every 'sweep' Run a lie.
  *
@@ -31,16 +31,24 @@
  *   cell executions              reps + 1  (warmup is additional, never one of them)
  *   BatchConfigSummary.intended  === options.reps, exactly
  *   totalRuns / attemptedRuns    recordings × configurations × reps — warmups EXCLUDED
- *   BatchProgress.totalRuns      the same measured count (3 × 3 × 5 = 45)
+ *   BatchProgress.totalRuns      the same measured count (3 × 3 × 3 = 27)
  *   BatchProgress.runIndex       1-based among MEASURED runs; 0 for a warmup
  *   BatchExecutorRequest.repIndex 1-based for counted reps; 0 for the warmup
+ *   executionCount(r, c, reps)   what the OPERATOR is billed for: every
+ *                                execution, warmups INCLUDED (ticket 065)
  *
- * Treating the warmup as one of the five would silently cost 20% of N, and p95
- * — the statistic the fatter cascade tail makes interesting, and the reason 5
- * repetitions were chosen (PRD §17 22c) — is exactly what degrades first when
- * N shrinks. Hence the warmup is extra, and `intendedReps` is what the sweep
- * SET OUT to retain, so `4 of 5` on the provenance line means a lost rep and
- * not a redefinition of the target.
+ * Treating the warmup as one of the retained reps would silently cost 20% of N,
+ * and p95 — the statistic the fatter cascade tail makes interesting, and the
+ * reason repetitions are retained at all (PRD §17 22c, cut from five to three by
+ * §15A) — is exactly what degrades first when N shrinks. Hence the warmup is
+ * extra, and `intendedReps` is what the sweep SET OUT to retain, so `2 of 3` on
+ * the provenance line means a lost rep and not a redefinition of the target.
+ *
+ * TICKET 065 — AND THE OPPOSITE MISTAKE COSTS THE OPERATOR MONEY. `totalRuns`
+ * is what the sweep MEASURES; it is not what the sweep RUNS, and a pre-launch
+ * estimate quoting it is 20% short of both the bill and the wall clock. That is
+ * what `executionCount` below is for, and it is derived from `planCells` — the
+ * very list the runner walks — rather than from a second copy of the formula.
  *
  * THE WARMUP IS RECORDED, NOT SWALLOWED. It appears in `summary.discarded`
  * with its runId and in the progress stream with `warmup: true`, while being
@@ -177,7 +185,10 @@ export interface BatchProgress {
    * position in it (so the ratio runIndex/totalRuns never exceeds 1). */
   runIndex: number;
   /** Measured matrix size: recordings × configurations × reps. Warmups are
-   * NOT counted — the mock's "run 17 of 45" is 3 × 3 × 5 retained runs. */
+   * NOT counted — 3 × 3 × 3 = 27 at the reps in force. (The design mock's
+   * "run 17 of 45" is the FIVE-rep matrix PRD §17 22c specified; §15A
+   * (2026-08-09) cut it to three, and the header above is the count that
+   * governs.) */
   totalRuns: number;
   recordingId: string;
   configId: string;
@@ -242,9 +253,10 @@ export interface BatchOptions {
   recordingIds: string[];
   configurations: BatchConfiguration[];
   /**
-   * RETAINED reps per (recording × configuration) — PRD §17 22c, "5
-   * repetitions retained". The warmup is an ADDITIONAL, uncounted execution,
-   * so a cell runs `reps + 1` times and aggregates `reps` samples.
+   * RETAINED reps per (recording × configuration) — PRD §17 22c, cut from five
+   * to THREE by PRD §15A (2026-08-09), which postdates it. The warmup is an
+   * ADDITIONAL, uncounted execution, so a cell runs `reps + 1` times and
+   * aggregates `reps` samples.
    */
   reps: number;
   /** Per-run completion timeout; an over-running run is aborted and failed. */
@@ -264,10 +276,16 @@ const MEASURED_ATTEMPTS = 2;
 /** The warmup is thrown away either way, so it never spends a retry. */
 const WARMUP_ATTEMPTS = 1;
 
-/** One planned execution: a matrix cell, or a configuration's warmup. */
-interface PlannedCell {
+/**
+ * One planned execution: a matrix cell, or a configuration's warmup.
+ *
+ * TICKET 065 — generic in the configuration so `executionCount` can plan the
+ * SHAPE of a sweep without inventing recipes for it. The runner instantiates it
+ * at `BatchConfiguration`, which is the default, so nothing below changed.
+ */
+interface PlannedCell<Configuration = BatchConfiguration> {
   recordingId: string;
-  configuration: BatchConfiguration;
+  configuration: Configuration;
   /** 1-based for counted reps; 0 for the warmup. */
   repIndex: number;
   warmup: boolean;
@@ -286,12 +304,12 @@ type AttemptOutcome =
  * odd reps in declared order, even reps reversed. The alternation is the
  * control; a `counterbalancingApplied` flag without it would be decoration.
  */
-function planCells(
-  recordingIds: string[],
-  configurations: BatchConfiguration[],
+function planCells<Configuration>(
+  recordingIds: readonly string[],
+  configurations: readonly Configuration[],
   reps: number,
-): PlannedCell[] {
-  const cells: PlannedCell[] = [];
+): Array<PlannedCell<Configuration>> {
+  const cells: Array<PlannedCell<Configuration>> = [];
   for (const recordingId of recordingIds) {
     for (const configuration of configurations) {
       cells.push({ recordingId, configuration, repIndex: 0, warmup: true });
@@ -304,6 +322,35 @@ function planCells(
     }
   }
   return cells;
+}
+
+/**
+ * TICKET 065 — EVERY EXECUTION A SWEEP WILL PERFORM, warmups included.
+ *
+ * `recordings × configurations × (reps + 1)`, and it is what the pre-launch
+ * confirmation quotes: the operator is billed for the warmups and waits through
+ * them, so an estimate that leaves them out is 20% short of both the money and
+ * the clock. `startBatch`'s own `totalRuns` is a different, smaller quantity —
+ * the MEASURED matrix — and it is the number already on screen in BatchProgress
+ * ("run 17 of 27" for the three-recording sweep above), which is exactly why it
+ * is the wrong one to reach for here.
+ *
+ * COUNTED OFF THE PLAN, NOT RE-DERIVED. This calls the same `planCells` the
+ * runner walks, with placeholder ids standing in for the recordings and
+ * configurations (the plan's SHAPE does not depend on their contents), so the
+ * estimate cannot drift from the schedule: change how many warmups a cell gets
+ * and this number moves with it.
+ */
+export function executionCount(
+  recordings: number,
+  configurations: number,
+  reps: number,
+): number {
+  return planCells(
+    Array.from({ length: Math.max(0, recordings) }, (_unused, index) => `recording-${index}`),
+    Array.from({ length: Math.max(0, configurations) }, (_unused, index) => index),
+    Math.max(0, reps),
+  ).length;
 }
 
 function messageOf(cause: unknown): string {
@@ -587,7 +634,8 @@ export function startBatch(options: BatchOptions): BatchHandle {
           : Math.min(...recordingIds.map((id) => byRecording?.get(id) ?? 0));
       return {
         configId: configuration.id,
-        // What the sweep SET OUT to retain — the denominator of '4 of 5'.
+        // What the sweep SET OUT to retain — the denominator of '2 of 3'.
+        // (The design mock's '4 of 5' is the five-rep matrix §15A superseded.)
         intendedReps: reps,
         completedReps,
       };

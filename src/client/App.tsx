@@ -52,6 +52,17 @@
  * three in, so the affordance exists in the real product, and a host bag that
  * supplies its own (a test pinning the draw) still wins.
  *
+ * APP ALSO SUPPLIES REPLAY'S SELECTION STORE (ticket 066). Exactly one view is
+ * mounted, so the Recording selection ReplayView holds dies with the view on
+ * every tab change — and coming back left the Runs panel saying "No Runs of
+ * this Recording yet." while the sidebar row still read "3 runs". The store is
+ * an OPTIONAL seam on ReplayDeps for the same reason the blind seams are, and
+ * App fills it in exactly as it fills those: a bag that supplies its own (the
+ * real browser one from `buildBrowserDeps`, or a fake pinning the value) wins.
+ * App's own default lives for the App's lifetime and no longer, which is
+ * precisely the span the defect spans. App itself names no storage API: where
+ * the value is PERSISTED is browserDeps' business, not the shell's.
+ *
  * A SUBMITTED COMPARISON GOES TO BOTH DESTINATIONS (ticket 023, QA F6). The
  * default `recordBlindComparison` writes the ledger AND POSTs the very same
  * record to /api/blind-comparisons through `deps.replay.blindComparisons`.
@@ -275,6 +286,26 @@ export default function App(props: AppProps): ReactElement {
   );
 
   /**
+   * TICKET 066 — the fallback selection store: the Recording id Replay had
+   * chosen, held OUTSIDE the view that keeps being unmounted.
+   *
+   * A ref, not state: nothing in the shell renders from it, and a re-render on
+   * every selection would be a re-render of the whole workbench for a fact only
+   * Replay reads. Its identity is stable for the App's lifetime, so it cannot
+   * churn `replayDeps` and restart Replay's loads.
+   */
+  const selectedRecordingRef = useRef<string | null>(null);
+  const selectionStore = useMemo<NonNullable<ReplayDeps['selectionStore']>>(
+    () => ({
+      get: () => selectedRecordingRef.current,
+      set: (recordingId) => {
+        selectedRecordingRef.current = recordingId;
+      },
+    }),
+    [],
+  );
+
+  /**
    * The Replay bag with the blind seams filled in. Memoized on `deps` — which
    * is pinned for the App's lifetime — because ReplayView re-lists recordings
    * and runs whenever its `deps` identity changes, and a fresh object per
@@ -288,8 +319,12 @@ export default function App(props: AppProps): ReactElement {
       rng: bag.rng ?? Math.random,
       evaluatorLanguage: bag.evaluatorLanguage ?? DEFAULT_EVALUATOR_LANGUAGE,
       recordBlindComparison: bag.recordBlindComparison ?? persistBlindComparison,
+      // Ticket 066 — the host's, if it has one (browserDeps persists it across
+      // reloads); otherwise the in-memory one above, which is all the tab
+      // round-trip needs and is what keeps a minimal bag working.
+      selectionStore: bag.selectionStore ?? selectionStore,
     };
-  }, [deps, persistBlindComparison]);
+  }, [deps, persistBlindComparison, selectionStore]);
 
   // The dot describes the SESSION, not the navigation: no `view ===` gate.
   const live = LIVE_STATUSES.includes(controller.state.status);

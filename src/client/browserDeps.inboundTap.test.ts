@@ -22,6 +22,19 @@
  * the Live half always did, through `ReplayDeps.createTransport` — the factory
  * `runOnce` is bound to.
  *
+ * ============================ ROUND 3 ======================================
+ * F1 (P0). The same hole, one property along. `selectionStore:
+ * browserSelectionStore()` (browserDeps.ts) is the ONLY line that makes ticket
+ * 066's Recording selection survive a RELOAD, and deleting it left the whole
+ * suite green and both typechecks clean — because `App` supplies an in-memory
+ * fallback that carries the selection across a TAB change, so every existing
+ * 066 test passes with the real store gone. The two guards R2-1 established are
+ * therefore extended to it: a property probe off the CONSTRUCTED bag, and a
+ * source scan SCOPED to `buildReplayDeps`' body. Plus the store's own three
+ * behaviours, which nothing exercised at all: the defensive try/catch, the
+ * empty-string coercion, and `removeItem` on a cleared selection.
+ * ==========================================================================
+ *
  * R2-3 (MAJOR). `buildReplayDeps` wired NO `remoteAudioSink`, so the remote
  * MediaStream went straight into `createMediaStreamSource`. Chromium has a long
  * history of delivering SILENCE from a remote WebRTC stream into Web Audio
@@ -33,7 +46,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL } from '../core/arms';
 import { buildBrowserDeps, buildReplayDeps } from './browserDeps';
 import type { RunOnceConfig } from './replay/runner';
@@ -235,5 +248,138 @@ describe('browserDeps — Replay’s remote sink is MUTED, not absent (round 2, 
     const el = attachAndReadElement(deps.remoteAudioSink, 'live-remote');
     expect(el.muted).toBe(false);
     expect(el.autoplay).toBe(true);
+  });
+});
+
+
+/* ===========================================================================
+ * ROUND 3 F1 — the ticket-066 selection store is WIRED, and it is a REAL one.
+ *
+ * The same two-way guard R2-1 established for the inbound tap, because it is
+ * the same failure: `selectionStore: browserSelectionStore()` was deletable
+ * with 2383/2383 green. The honest target is the RELOAD — App's in-memory
+ * fallback already carries the selection across a tab change, so a tab
+ * round-trip cannot tell a wired store from a missing one. A second
+ * `buildReplayDeps()` IS the reload: a fresh bag over the same browser storage.
+ *
+ * WHY THE STORAGE IS INSTALLED HERE. This runner is Node 22 under jsdom, and
+ * Node's own `localStorage` global shadows jsdom's and is undefined without
+ * `--localstorage-file` — so `window.localStorage` is ABSENT in every test in
+ * this repo. The production store's try/catch swallows that, which means an
+ * uninstalled run would pass every assertion below for the wrong reason. So the
+ * Storage is supplied explicitly, exactly as a browser supplies it, and the
+ * module under test still reaches for it by the global name it uses in
+ * production.
+ * ======================================================================== */
+
+/** A real-shaped Storage, with individual methods replaceable. */
+function installStorage(overrides: Partial<Storage> = {}): Map<string, string> {
+  const entries = new Map<string, string>();
+  const storage = {
+    get length(): number {
+      return entries.size;
+    },
+    key: (index: number): string | null => Array.from(entries.keys())[index] ?? null,
+    getItem: (key: string): string | null => entries.get(key) ?? null,
+    setItem: (key: string, value: string): void => {
+      entries.set(key, String(value));
+    },
+    removeItem: (key: string): void => {
+      entries.delete(key);
+    },
+    clear: (): void => entries.clear(),
+    ...overrides,
+  };
+  Object.defineProperty(window, 'localStorage', {
+    value: storage as unknown as Storage,
+    configurable: true,
+    writable: true,
+  });
+  return entries;
+}
+
+/** A storage that refuses everything, the way a blocked context does. */
+const refuses = (): never => {
+  throw new DOMException('access denied', 'SecurityError');
+};
+
+describe('browserDeps — the Replay selection store is WIRED (ticket 066, round 3 F1)', () => {
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'localStorage');
+    vi.restoreAllMocks();
+  });
+
+  it('the CONSTRUCTED bag publishes a selectionStore — the R2-1 property probe', () => {
+    // The property on the built object, not a string in the file: exactly the
+    // assertion the inbound tap needed, for exactly the same reason.
+    installStorage();
+    const bag = buildReplayDeps();
+    expect(bag.selectionStore).toBeDefined();
+    expect(typeof bag.selectionStore?.get).toBe('function');
+    expect(typeof bag.selectionStore?.set).toBe('function');
+  });
+
+  it('what it stores survives a RELOAD — a SECOND bag reads the first bag’s selection', () => {
+    // THE assertion of F1. `App`'s in-memory fallback makes the tab round-trip
+    // pass with this wiring deleted; reload persistence is the only thing
+    // browserDeps contributes, and a fresh bag over the same storage is it.
+    const entries = installStorage();
+
+    buildReplayDeps().selectionStore!.set('rec-survives-reload');
+
+    // It really went to BROWSER storage, not to a closure the bag is holding.
+    expect(Array.from(entries.values())).toEqual(['rec-survives-reload']);
+    expect(buildReplayDeps().selectionStore!.get()).toBe('rec-survives-reload');
+  });
+
+  it('the wiring is in buildReplayDeps’ BODY — the R2-1 scoped source scan', () => {
+    // Belt to the probe's braces, SCOPED TO THE FUNCTION BODY: an import line
+    // or a helper nothing calls cannot satisfy this.
+    expect(REPLAY_DEPS_SOURCE).toMatch(/selectionStore: browserSelectionStore\(\)/);
+  });
+
+  it('an EMPTY stored value is NO selection, not a selection named ""', () => {
+    // A blank key is what a half-written store leaves behind; restored as-is it
+    // would be an id naming no row — ticket 066's own contradiction, inverted.
+    const entries = installStorage();
+    buildReplayDeps().selectionStore!.set('rec-mic');
+    const key = Array.from(entries.keys())[0]!;
+    entries.set(key, '');
+
+    expect(buildReplayDeps().selectionStore!.get()).toBeNull();
+  });
+
+  it('CLEARING the selection REMOVES the key — it does not store the word "null"', () => {
+    const entries = installStorage();
+    const store = buildReplayDeps().selectionStore!;
+    store.set('rec-mic');
+    expect(entries.size).toBe(1);
+
+    store.set(null);
+
+    // `setItem(key, String(null))` would leave the key behind and restore the
+    // literal id 'null' on the next load. Absence has to be absent.
+    expect(entries.size).toBe(0);
+    expect(store.get()).toBeNull();
+  });
+
+  it('a READ that storage REFUSES is no selection, never a thrown view', () => {
+    // Private mode and blocked third-party contexts throw from getItem itself.
+    // A lost selection is not worth throwing the whole Replay view away for.
+    installStorage({ getItem: refuses });
+    const store = buildReplayDeps().selectionStore!;
+
+    expect(() => store.get()).not.toThrow();
+    expect(store.get()).toBeNull();
+  });
+
+  it('a WRITE that storage REFUSES costs the operator a re-selection, not the click', () => {
+    installStorage({ setItem: refuses, removeItem: refuses });
+    const store = buildReplayDeps().selectionStore!;
+
+    // Both directions: selecting a clip and clearing the selection. Either one
+    // escaping would take out the click handler that called it.
+    expect(() => store.set('rec-mic')).not.toThrow();
+    expect(() => store.set(null)).not.toThrow();
   });
 });

@@ -1,13 +1,13 @@
 ---
 id: 065
 title: "\"Batch sweep…\" launches 18 executions immediately — the ellipsis promises a dialog that does not exist"
-status: pending
+status: done
 source: spec-audit (verified)
 depends_on: []
 touches: [src/client/views/ReplayView.tsx, src/client/components/replay/RunConfigPanel.tsx]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — re-verified 2026-08-08
@@ -230,3 +230,53 @@ current no-dialog behaviour and will fail on a correct fix:
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09) — worked as one loop with ticket 066
+
+Suite 2403 passing / 0 failing. `npm run check` (typecheck + test + eval + verify-citations) exits 0.
+
+The press now opens `[data-sweep-confirm]` and reaches no executor; `[data-sweep-confirm-start]` is
+the only path to `deps.startBatch`. `SWEEP_REPS` is 3 (PRD §15A, dated 2026-08-09, postdates §17 22c
+— the document contradicted itself and §15A wins).
+
+**Every number is derived.** `executionCount` is exported from `batch/runner.ts` and is literally
+`planCells(...).length` — the same schedule `startBatch` walks — not a second formula. A test runs a
+**real** batch and requires the estimate to agree with what executed while staying strictly larger
+than `summary.totalRuns`, which excludes warmups. At 1 clip × 3 arms × 3 reps the dialog shows **12**
+and `totalRuns` is 9.
+
+### Two ticket premises corrected rather than built to
+
+- **AC2 (the screen shows 18, not 15) and AC6 (`SWEEP_REPS` becomes 3) cannot both hold of the same
+  screen.** At 3 reps it is 12 and 9. The 18/15 pair is preserved exactly as pure estimator
+  arithmetic where reps is an argument; the screen is pinned to 12/9. **Do not "fix" the test back
+  to 18.**
+- **AC7 presumes an operator reps control** that AC6's fixed `SWEEP_REPS` rules out. Tested on the
+  pure estimator, per the ticket's own §4 suggestion.
+
+### The review finding that mattered most
+
+**The quote froze; the screen behind it did not.** `SweepPlan` captured the clip and configurations
+at press time, but nothing disabled the library or ticket 061's target-language control while the
+dialog was open — so the operator could change either and then press Start sweep, launching the
+**quoted** values while the screen showed the **new** ones. *A displayed value disagreeing with what
+runs — the characteristic failure, one step further along than the one this ticket fixed.* And
+`aria-modal="true"` on a non-modal panel was itself a false claim.
+
+Fixed by making the panel genuinely modal in **both** halves: `quoteOpen` gates `selectRecording` and
+`chooseTarget` (the fact), and `[data-replay-background]` carries `inert` (the affordance) — the same
+fact/affordance division `run()` and `startSweep()` already make. The dialog now also **names the
+pair, direction and target** it will run, so the quote is self-describing.
+
+Also closed: the displayed execution figure was unpinned from its source (`const executions = 12`
+passed everything — it only diverges when `ARMS` grows, so a source-scoped assertion was added by
+necessity), and the priced branch of `[data-sweep-cost]` was never exercised because every test
+mounted with `runs: []`.
+
+**Ruling on a flagged deviation:** the cost guard reported a genuinely measured zero rate as absence,
+inverting 059's other half. Fixed rather than pinned — zero is a measurement. `$0.000` renders for a
+real free rate; `not measured` is reserved for the `measured === 0` case, which is the actual absence
+test. AC4 is unharmed: the string it forbids is `$0.00`.
+
+The stale "five reps" comments were finished off — five sites, one more than the review listed.
+A ticket partly about a document contradicting itself should not leave its own header stale.

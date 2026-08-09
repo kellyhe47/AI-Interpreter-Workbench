@@ -37,6 +37,9 @@ import {
 // they declare the price source they ran under; a Run with no stamp priced
 // NOTHING and its card reads `not measured` (see `RunsList.playGate.test.tsx`).
 import { PRICING_VERSION } from '../../core/pricing';
+// TICKET 065 ROUND 2 (F4) — the PRODUCTION execution helper, so the figure on
+// screen is pinned to the derivation that owns it and not to a literal 12.
+import { executionCount } from '../batch/runner';
 import type {
   BatchConfiguration,
   BatchHandle,
@@ -944,10 +947,17 @@ describe('BatchProgress — position, clock, bar, controls note and cancel', () 
     estimatedRemainingMs: 2_490_000, // 41:30
   };
 
+  /**
+   * TICKET 065 — the press now opens a confirmation and reaches no executor, so
+   * "a sweep is running" takes one more step to arrange. Every assertion below
+   * is unchanged: what moved is how the sweep gets started, not what it does.
+   */
   async function openSweep() {
     const fakes = await mount(DEFAULT_LIBRARY);
     await selectRecording(CORPUS_REC.id);
     fireEvent.click(screen.getByRole('button', { name: 'Batch sweep…' }));
+    await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+    fireEvent.click(get('[data-sweep-confirm-start]'));
     await waitFor(() => expect(fakes.batches).toHaveLength(1));
     await waitFor(() => expect(q('[data-batch-progress]')).not.toBeNull());
     return fakes;
@@ -1172,6 +1182,10 @@ describe('TICKET 062 — a Replay run carries the language pair and direction', 
     const fakes = await mount(DEFAULT_LIBRARY);
     await selectRecording(CORPUS_REC.id);
     fireEvent.click(screen.getByRole('button', { name: 'Batch sweep…' }));
+    // TICKET 065 — the press opens a confirmation; confirming is what launches.
+    // The configuration assertions below are untouched.
+    await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+    fireEvent.click(get('[data-sweep-confirm-start]'));
     await waitFor(() => expect(fakes.batches).toHaveLength(1));
 
     const { configurations } = fakes.batches[0]!.request;
@@ -1292,6 +1306,10 @@ describe('TICKET 061 — an operator-visible control picks the target language',
     await selectRecording(CORPUS_REC.id);
     chooseTarget('Cantonese');
     fireEvent.click(screen.getByRole('button', { name: 'Batch sweep…' }));
+    // TICKET 065 — the press opens a confirmation; confirming is what launches.
+    // The chosen direction must survive that step, which is the point here.
+    await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+    fireEvent.click(get('[data-sweep-confirm-start]'));
     await waitFor(() => expect(fakes.batches).toHaveLength(1));
 
     const { configurations } = fakes.batches[0]!.request;
@@ -1819,5 +1837,356 @@ describe('TICKET 066 — no view reaches for browser storage directly', () => {
     const code = strip(readFileSync(resolve(process.cwd(), file), 'utf8'));
     expect(code, `${file} must take its store through deps`).not.toMatch(/\blocalStorage\b/);
     expect(code, `${file} must take its store through deps`).not.toMatch(/\bsessionStorage\b/);
+  });
+});
+
+/* ===== TICKET 065 ROUND 2 — the quote and the screen cannot disagree ====== */
+
+/**
+ * ROUND 2 F2 (P1) — THE QUOTE FROZE; THE SCREEN BEHIND IT DID NOT.
+ *
+ * `SweepPlan` captures the recording id and the configurations at press time and
+ * hands THOSE objects to the executor — which is right, and is what ticket 065
+ * fixed. But `sweepInFlight` is false while a quote is open and the panel was
+ * modal in name only: no backdrop, no focus trap, no `inert`. So the operator
+ * could click a different library row, or change ticket 061's target language,
+ * and then press Start sweep: the sweep ran the QUOTED clip and target while the
+ * library and the target control showed the NEW ones. That is a displayed value
+ * disagreeing with what runs — the characteristic failure, one step past the one
+ * 065 fixed — and `aria-modal="true"` on a non-modal panel was itself a false
+ * claim.
+ *
+ * THE FIX ASSERTED HERE: the quote is genuinely modal. The two regions holding
+ * every control that could contradict it are `inert` (the affordance), and the
+ * selection and target-language handlers refuse while it is open (the fact —
+ * jsdom does not implement inert, and neither does a keyboard-driven browser
+ * without it). Plus the dialog NAMES the language pair and direction it will
+ * run, so the quote is self-describing rather than silent about the one thing
+ * ticket 061 made variable.
+ *
+ * ============ ADDED TO THE DOM CONTRACT =====================================
+ * [data-sweep-language-pair=<pair>][data-sweep-direction=<direction>]
+ *   [data-sweep-target-language=<language>]  inside [data-sweep-confirm]
+ * [data-replay-background] — the regions behind the quote; `inert` while open
+ * ===========================================================================
+ */
+describe('TICKET 065 ROUND 2 — the quote is MODAL, and it names its language pair', () => {
+  const batchButton = (): HTMLElement => get('[data-batch-button]');
+  const confirmPanel = (): HTMLElement | null => q('[data-sweep-confirm]');
+  const startControl = (): HTMLElement => get('[data-sweep-confirm-start]');
+  const cancelControl = (): HTMLElement => get('[data-sweep-confirm-cancel]');
+  const backgrounds = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('[data-replay-background]'));
+
+  const pickTarget = (language: string): void => {
+    fireEvent.click(within(get('[data-target-language]')).getByRole('button', { name: language }));
+  };
+
+  async function openConfirm(recordingId: string = CORPUS_REC.id) {
+    const fakes = await mount({ recordings: [CORPUS_REC, MIC_REC], runs: [] as SeededRun[] });
+    await selectRecording(recordingId);
+    fireEvent.click(batchButton());
+    await waitFor(() => expect(confirmPanel()).not.toBeNull());
+    return fakes;
+  }
+
+  it('the dialog NAMES the pair, the direction and the target it will run', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    pickTarget('Cantonese');
+    fireEvent.click(batchButton());
+    await waitFor(() => expect(confirmPanel()).not.toBeNull());
+
+    // Read off the DIALOG, then compared against what the executor receives —
+    // never two literals compared with each other.
+    const named = get('[data-sweep-language-pair]');
+    expect(named.getAttribute('data-sweep-language-pair')).toBe('EN↔YUE');
+    expect(named.getAttribute('data-sweep-direction')).toBe('en→yue');
+    expect(named.getAttribute('data-sweep-target-language')).toBe('Cantonese');
+    // The operator reads the copy, not the attributes.
+    expect(text(named)).toContain('EN↔YUE');
+    expect(text(named)).toContain('en→yue');
+    expect(text(named)).toContain('Cantonese');
+
+    fireEvent.click(startControl());
+
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    for (const configuration of fakes.batches[0]!.request.configurations) {
+      expect(configuration.config.languagePair).toBe(
+        named.getAttribute('data-sweep-language-pair'),
+      );
+      expect(configuration.config.direction).toBe(named.getAttribute('data-sweep-direction'));
+      expect(configuration.config.targetLanguage).toBe(
+        named.getAttribute('data-sweep-target-language'),
+      );
+    }
+  });
+
+  it('a LIBRARY ROW pressed while the quote is open changes nothing — and the sweep is the quoted clip', async () => {
+    const fakes = await openConfirm(CORPUS_REC.id);
+    const quotedWallclock = get('[data-sweep-wallclock-ms]').getAttribute(
+      'data-sweep-wallclock-ms',
+    );
+
+    fireEvent.click(row(MIC_REC.id));
+
+    // The SCREEN did not move: the quoted clip is still the selected one, so
+    // there is nothing for the executor to disagree with.
+    expect(row(CORPUS_REC.id)).toHaveAttribute('data-selected', 'true');
+    expect(row(MIC_REC.id)).toHaveAttribute('data-selected', 'false');
+    // ...and the quote did not move either — the 30 s clip would have re-quoted
+    // the wall clock at 360000.
+    expect(get('[data-sweep-wallclock-ms]').getAttribute('data-sweep-wallclock-ms')).toBe(
+      quotedWallclock,
+    );
+
+    fireEvent.click(startControl());
+
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    expect(fakes.batches[0]!.request.recordingIds).toEqual([CORPUS_REC.id]);
+  });
+
+  it('a TARGET-LANGUAGE press while the quote is open changes nothing — and the sweep is the quoted target', async () => {
+    const fakes = await openConfirm(CORPUS_REC.id);
+    expect(get('[data-sweep-language-pair]').getAttribute('data-sweep-direction')).toBe('en→es');
+
+    pickTarget('Cantonese');
+
+    // The control still reads what the quote names — this is the pairing that
+    // was silently breakable: the dialog said en→es and en→yue would have run.
+    expect(get('[data-target-language]').getAttribute('data-target-language')).toBe('Spanish');
+    expect(get('[data-sweep-language-pair]').getAttribute('data-sweep-direction')).toBe('en→es');
+
+    fireEvent.click(startControl());
+
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    for (const configuration of fakes.batches[0]!.request.configurations) {
+      expect(configuration.config.languagePair).toBe('EN↔ES');
+      expect(configuration.config.direction).toBe('en→es');
+      expect(configuration.config.targetLanguage).toBe('Spanish');
+    }
+  });
+
+  it('the regions behind the quote are INERT while it is open — the affordance', async () => {
+    await openConfirm(CORPUS_REC.id);
+    const behind = backgrounds();
+    // Both regions holding a control that could contradict the quote: the
+    // library and the run panel (the 061 target control), and the header.
+    expect(behind.length).toBeGreaterThanOrEqual(2);
+    expect(behind.some((element) => element.contains(get('[data-recordings-library]')))).toBe(
+      true,
+    );
+    expect(behind.some((element) => element.contains(get('[data-target-language]')))).toBe(true);
+    for (const element of behind) expect(element).toHaveAttribute('inert');
+    // The dialog itself must NOT be inert — it is the thing being operated.
+    expect(confirmPanel()!.hasAttribute('inert')).toBe(false);
+    expect(backgrounds().some((element) => element.contains(confirmPanel()!))).toBe(false);
+  });
+
+  it('CANCEL gives the screen back — the modality is the quote’s, not permanent', async () => {
+    await openConfirm(CORPUS_REC.id);
+
+    fireEvent.click(cancelControl());
+    await waitFor(() => expect(confirmPanel()).toBeNull());
+
+    for (const element of backgrounds()) expect(element.hasAttribute('inert')).toBe(false);
+    // ...and both refusals are lifted, not latched.
+    await selectRecording(MIC_REC.id);
+    pickTarget('English');
+    expect(get('[data-target-language]').getAttribute('data-target-language')).toBe('English');
+  });
+});
+
+/* ===== TICKET 065 ROUND 2 — the PRICED branch of the quote =============== */
+
+/**
+ * ROUND 2 F3 (P1) — every 065 test mounted with `runs: []`, so the figure branch
+ * of `[data-sweep-cost]` never rendered: `projectSweepCostUsd` could be replaced
+ * by a constant `not measured` with the suite green.
+ *
+ * THE MEASURED-ZERO RULING (F3's flagged judgment call). The guard was
+ * `if (!(perExecution > 0)) return { usd: null }`, which reported a rate of
+ * exactly zero — stamped with a price source, priced today, genuinely free — as
+ * ABSENCE. That inverts the other half of ticket 059 ("a Run written today whose
+ * measured cost really is 0 still renders $0.000") and breaks the standing rule
+ * that zero is a measurement and absence is not. It is FIXED here rather than
+ * pinned: AC4 forbids `$0.00`, and `formatCostUsd` renders a measured zero as
+ * `$0.000` — three decimals, because `formatAmountUsd` already refuses to let a
+ * real figure collapse into two. An UNPRICED sweep still reads `not measured`.
+ */
+describe('TICKET 065 ROUND 2 — the quote prices itself from PRICED prior runs', () => {
+  const batchButton = (): HTMLElement => get('[data-batch-button]');
+  const confirmPanel = (): HTMLElement | null => q('[data-sweep-confirm]');
+  const cost = (): HTMLElement => get('[data-sweep-cost]');
+
+  async function quote(runs: SeededRun[], recordingId: string = CORPUS_REC.id) {
+    const fakes = await mount({ recordings: [CORPUS_REC, MIC_REC], runs });
+    await selectRecording(recordingId);
+    fireEvent.click(batchButton());
+    await waitFor(() => expect(confirmPanel()).not.toBeNull());
+    return fakes;
+  }
+
+  /** Completed, priced today: $0.021 and $0.14 over the corpus clip. */
+  const PRICED_PAIR = [RUN_CASCADE, RUN_REALTIME];
+
+  it('renders a REAL $ figure — the mean measured rate × the executions ahead', async () => {
+    await quote([...PRICED_PAIR, RUN_FAILED]);
+
+    // Hand-derived, not re-expressed from the component: (0.021 + 0.14) / 2
+    // = 0.0805 per execution × 12 executions = 0.966. RUN_FAILED is not
+    // complete, so it is no evidence of a rate at all.
+    expect(text(cost())).toBe('$0.966');
+    expect(text(get('[data-sweep-cost]').parentElement)).toContain(
+      'projected from 2 priced prior runs of this clip',
+    );
+  });
+
+  it('an UNSTAMPED prior run contributes NOTHING — not to the sum, not to the denominator', async () => {
+    // TICKET 059's discriminator: a Run that declares no price source priced
+    // nothing, whatever figure it stores. $9.99 landing in the numerator would
+    // read $60.06; landing in the denominator alone would read $0.126.
+    const UNSTAMPED: SeededRun = {
+      ...RUN_REALTIME,
+      id: 'run-unstamped',
+      cost: 9.99,
+      pricingVersion: undefined,
+    };
+    await quote([RUN_CASCADE, UNSTAMPED]);
+
+    // 0.021 × 12 — the ONE priced run is the whole basis.
+    expect(text(cost())).toBe('$0.252');
+    expect(text(get('[data-sweep-cost]').parentElement)).toContain(
+      'projected from 1 priced prior runs of this clip',
+    );
+  });
+
+  it('a clip whose prior runs are ALL unstamped quotes `not measured`, never a zero', async () => {
+    const UNSTAMPED: SeededRun = { ...RUN_CASCADE, id: 'run-u1', pricingVersion: undefined };
+    await quote([UNSTAMPED]);
+
+    expect(text(cost())).toBe('not measured');
+    expect(text(get('[data-sweep-cost]').parentElement)).toContain(
+      'no priced run of this clip to project from',
+    );
+  });
+
+  it('a MEASURED zero is a measurement: it quotes $0.000, not `not measured`', async () => {
+    // The F3 ruling, pinned. This Run was written today, under a named price
+    // source, and really cost nothing. Absence would be a different fact.
+    const FREE: SeededRun = { ...RUN_CASCADE, id: 'run-free', cost: 0 };
+    await quote([FREE]);
+
+    expect(text(cost())).toBe('$0.000');
+    expect(text(cost())).not.toBe('not measured');
+    // AC4 stands: the string this ticket forbids is `$0.00`, and the formatter
+    // never produces it for a figure anyone measured.
+    expect(text(cost())).not.toBe('$0.00');
+    expect(text(get('[data-sweep-cost]').parentElement)).toContain(
+      'projected from 1 priced prior runs of this clip',
+    );
+  });
+
+  it('the runs of ANOTHER clip price nothing here — the basis is this clip’s own', async () => {
+    // RUN_ON_MIC is priced and complete, but it is evidence about the 30 s mic
+    // clip, not about the corpus one.
+    await quote([RUN_ON_MIC], CORPUS_REC.id);
+
+    expect(text(cost())).toBe('not measured');
+  });
+});
+
+/* ===== TICKET 065 ROUND 2 — the execution figure is PINNED to its source == */
+
+/**
+ * ROUND 2 F4 (P2) — `const executions = 12` hardcoded in the view passed
+ * everything: reps are separately pinned to what `startBatch` receives, but an
+ * ARM-COUNT change (3 → 4) would drift silently, and the copy would then read
+ * "12 · 1 clip × 4 configurations × (3 + 1 warmup)" with nothing objecting.
+ *
+ * So the displayed count is pinned to `executionCount` over the configuration
+ * count the executor ACTUALLY receives — the same production helper the view
+ * calls, fed the matrix that really ran.
+ */
+describe('TICKET 065 ROUND 2 — the quoted executions are derived from the REAL matrix', () => {
+  it('the figure equals executionCount(1, the configurations that launch, the reps that launch)', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    fireEvent.click(get('[data-batch-button]'));
+    await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+
+    const shown = Number(get('[data-sweep-executions]').getAttribute('data-sweep-executions'));
+    const shownCopy = text(get('[data-sweep-executions]'));
+
+    fireEvent.click(get('[data-sweep-confirm-start]'));
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    const request = fakes.batches[0]!.request;
+
+    // The matrix that RAN is the authority: grow ARMS to four and this moves,
+    // where a literal 12 in the view would not.
+    expect(shown).toBe(executionCount(1, request.configurations.length, request.reps));
+    // ...and the copy names the same configuration count it was derived from,
+    // so the sentence cannot contradict its own leading number.
+    expect(shownCopy).toContain(`${request.configurations.length} configurations`);
+    expect(shownCopy).toContain(`(${request.reps} + 1 warmup)`);
+  });
+
+  it('the view DERIVES the figure — it does not carry one', () => {
+    // A SOURCE-TEXT assertion BY NECESSITY, and labelled as one — the same
+    // necessity `browserDeps.inboundTap.test.ts` documents for its R3-5 case.
+    // The sweep matrix has exactly ONE shape at runtime (1 clip × frozen ARMS ×
+    // SWEEP_REPS), so `const executions = 12` and the derivation render the
+    // identical DOM today and diverge only when ARMS grows to four. Nothing
+    // observable distinguishes them from outside, so the assertion above cannot
+    // reach the drift on its own, and this is what holds the derivation in
+    // place until the day it does.
+    const source = readFileSync(resolve(process.cwd(), 'src/client/views/ReplayView.tsx'), 'utf8');
+    const quoteBody = source.slice(
+      source.indexOf('const openSweepConfirm'),
+      source.indexOf('const cancelSweepConfirm'),
+    );
+    expect(quoteBody).toMatch(/executionCount\(1, configurations\.length, SWEEP_REPS\)/);
+    // ...and no literal standing in for it.
+    expect(quoteBody).not.toMatch(/const executions = \d/);
+  });
+});
+
+/* ===== TICKET 066 ROUND 2 — a stale id is CLEARED, not merely ignored ===== */
+
+/**
+ * ROUND 2 F5 (P2) — the absent-Recording case passed vacuously: both actions
+ * disable on `recordingLabel === null` (the RESOLVED object), so an unresolved
+ * stale id naming an absent clip already yields the asserted state, for the
+ * wrong reason. What actually went untested is `deps.selectionStore?.set(null)`
+ * — without it the dead id is restored on every future mount, forever.
+ */
+describe('TICKET 066 ROUND 2 — an unresolvable restored id is CLEARED from the store', () => {
+  it('an ABSENT clip’s id is erased, so the next mount restores nothing', async () => {
+    const fakes = makeFakes({ recordings: [CORPUS_REC, MIC_REC], runs: [RUN_CASCADE] });
+    let current: string | null = 'rec-that-is-gone';
+    const deps = {
+      ...fakes.deps,
+      selectionStore: {
+        get: () => current,
+        set: (id: string | null) => {
+          current = id;
+        },
+      },
+    } as ReplayDeps;
+
+    const first = render(<ReplayView deps={deps} />);
+    await waitFor(() => expect(rows()).toHaveLength(2));
+
+    // THE assertion: not "the id is ignored" — "the id is gone".
+    await waitFor(() => expect(current).toBeNull());
+
+    // And the harm it prevents, played out: a fresh mount over the same store.
+    first.unmount();
+    render(<ReplayView deps={deps} />);
+    await waitFor(() => expect(rows()).toHaveLength(2));
+    expect(
+      document.querySelectorAll('[data-recording-row][data-selected="true"]'),
+    ).toHaveLength(0);
+    expect(current).toBeNull();
   });
 });

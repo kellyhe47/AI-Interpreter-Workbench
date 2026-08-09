@@ -1,13 +1,13 @@
 ---
 id: 066
 title: Leaving Replay and returning clears the Recording selection while the sidebar still shows its run count
-status: pending
+status: done
 source: spec-audit (verified)
 depends_on: []
 touches: [src/client/views/ReplayView.tsx, src/client/App.tsx]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — re-verified 2026-08-08
@@ -188,3 +188,45 @@ path, not about UI selection.
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09) — worked as one loop with ticket 065
+
+Suite 2403 passing / 0 failing. `npm run check` exits 0.
+
+`ReplayDeps.selectionStore?: { get(): string | null; set(id: string | null): void }` — optional on
+the bag. `App` supplies a ref-backed in-memory default for hosts that omit one (exactly as it already
+does `rng` / `evaluatorLanguage` / `recordBlindComparison`); `browserDeps.ts` wires the real
+`window.localStorage` under `workbench.replay.selectedRecording.v1`. A locked source-scan asserts
+`ReplayView.tsx` and `App.tsx` name **no** storage API — jsdom provides `localStorage`, so a direct
+reach would otherwise satisfy every behavioural test.
+
+Restoration resolves once, inside `loadRecordings`: an id naming an absent or soft-deleted Recording
+yields no selection **and the stale id is cleared from the store**, so it cannot be restored on every
+future mount.
+
+### The P0 the review caught — the repo's #1 failure, recurring verbatim
+
+`browserDeps.ts:475` is the **only** line that makes this persist across a reload, and deleting it
+left **2383/2383 passing and both typechecks clean**. `browserDeps.inboundTap.test.ts` exists
+*precisely because* "a reviewer deleted the entire property from `buildReplayDeps` and the suite
+stayed green" — and its two-way guard (a property probe off the constructed bag **plus** a scoped
+source scan) had never been extended to `selectionStore`. It is now, along with the store's
+try/catch, its empty-string→`null` coercion, and its `removeItem` on `null`.
+
+Honest scoping: App's in-memory default means the *tab round-trip* still worked without that line.
+What died silently was **reload** persistence — the only thing `browserDeps` contributes — so the new
+test drives a second `buildReplayDeps()` reading what the first wrote.
+
+### Environment finding worth carrying forward
+
+**`window.localStorage` is `undefined` in every test in this repo.** Node 22's own `localStorage`
+global shadows jsdom's and needs `--localstorage-file`. The production store's `try/catch` swallows
+that, so a test that did not install a `Storage` would have passed **for the wrong reason**. The new
+tests install a real-shaped `Storage` on `window` explicitly.
+
+### Deliberately out of scope
+
+`RunsList.tsx` renders "No Runs of this Recording yet." whenever `runs.length === 0`, including with
+no selection — so AC6 is still literally violated in the no-selection state. Fixing it needs a file
+outside this ticket's `touches`. The headline contradiction (library says 3 runs, panel says none for
+a *selected* clip) is gone.

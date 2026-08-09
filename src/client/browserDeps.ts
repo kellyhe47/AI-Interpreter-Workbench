@@ -255,6 +255,43 @@ const browserFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
  * absent: App fills them in, because App owns the ledger they persist into.
  * ---------------------------------------------------------------------- */
 
+/**
+ * TICKET 066 — where the Replay Recording selection is actually kept.
+ *
+ * The view takes the store through its deps bag and names no storage API, for
+ * the reason `RunLedger` takes a `StorageAdapter` rather than reaching for
+ * `window.localStorage` itself: jsdom provides one, so a direct reach passes
+ * every test and is still a global the product cannot swap. THIS is the module
+ * that is allowed to know about the browser, and it is the only one that does.
+ *
+ * A read is defensive because storage can be denied outright (private mode,
+ * a blocked third-party context) — and losing the selection is not worth
+ * throwing the whole view away for.
+ */
+const REPLAY_SELECTION_STORAGE_KEY = 'workbench.replay.selectedRecording.v1';
+
+function browserSelectionStore(): NonNullable<ReplayDeps['selectionStore']> {
+  return {
+    get: (): string | null => {
+      try {
+        const stored = window.localStorage.getItem(REPLAY_SELECTION_STORAGE_KEY);
+        return stored === null || stored === '' ? null : stored;
+      } catch {
+        return null;
+      }
+    },
+    set: (recordingId: string | null): void => {
+      try {
+        if (recordingId === null) window.localStorage.removeItem(REPLAY_SELECTION_STORAGE_KEY);
+        else window.localStorage.setItem(REPLAY_SELECTION_STORAGE_KEY, recordingId);
+      } catch {
+        // A store that refuses to write costs the operator a re-selection after
+        // a reload, and nothing else. It must not cost them the click.
+      }
+    },
+  };
+}
+
 export function buildReplayDeps(): ReplayDeps {
   const recordings: RecordingsClient = createRecordingsClient({ fetchImpl: browserFetch });
   const runs: RunsClient = createRunsClient({ fetchImpl: browserFetch });
@@ -433,6 +470,9 @@ export function buildReplayDeps(): ReplayDeps {
       playback.play();
     },
     corpusVersion: CORPUS_VERSION,
+    // Ticket 066 — the selection survives a tab change (App would manage that
+    // much on its own) AND a reload, which only a real store can do.
+    selectionStore: browserSelectionStore(),
     now: () => Date.now(),
     newId: () => crypto.randomUUID(),
   };
