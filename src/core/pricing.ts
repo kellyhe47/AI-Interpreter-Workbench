@@ -651,6 +651,36 @@ export function costFromStored(usd: number | null | undefined): CostResult {
   return measured(usd, true);
 }
 
+/**
+ * TICKET 059 — A STORED FIGURE READ THROUGH THE PRICE SOURCE THAT PRODUCED IT.
+ *
+ * `costFromStored(0)` is a MEASUREMENT, and it must stay one: a configuration
+ * that really did cost nothing has to be able to say so. But a record written by
+ * a build that had no cost model at all also stores `0` — the three Runs in
+ * `data/runs/` do, on the Run and on every utterance record — and reading those
+ * forward publishes takes asserting the configuration was free.
+ *
+ * THE STAMP IS THE DISCRIMINATOR, NOT THE VALUE. A record that declares no price
+ * source priced nothing, whatever figure it carries: `0` and `0.021` are equally
+ * unmeasured when nobody can name the rate table behind them. And in the other
+ * direction, a record written TODAY that measured a real zero still reports it,
+ * which is what keeps `0` and `null` distinct facts.
+ *
+ * THE ONE PLACE THAT RULE LIVES. 052 R2 wrote it inline for `LiveSession`, which
+ * is why the Live footer is correct today; every surface that reads a stored
+ * cost forward — the Live columns, the Run samples, the Replay card, the export
+ * bundle — now asks this function, so no surface can hold a different opinion.
+ *
+ * The reason stays `no-usage-reported` — the same reason the Live path already
+ * produces for an unstamped session, so one absence is one fact.
+ */
+export function costFromPriceSource(
+  pricingVersion: string | undefined,
+  usd: number | null | undefined,
+): CostResult {
+  return costFromStored(pricingVersion === undefined ? null : usd);
+}
+
 export function formatCostUsd(cost: CostResult | number | null | undefined): string {
   if (cost === null || cost === undefined) return COST_NOT_MEASURED_CELL;
   if (typeof cost === 'number') {

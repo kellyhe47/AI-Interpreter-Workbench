@@ -32,7 +32,7 @@
 
 import type { CSSProperties, ReactElement } from 'react';
 import { armLabel } from '../../../core/arms';
-import { COST_NOT_MEASURED_CELL, formatCostUsd } from '../../../core/pricing';
+import { COST_NOT_MEASURED_CELL, costFromPriceSource, formatCostUsd } from '../../../core/pricing';
 import {
   deriveCascadeIntervals,
   deriveRealtimeIntervals,
@@ -76,7 +76,15 @@ const formatMs = (value: number | null): string => (value === null ? ABSENT : `$
  * one) there is no denominator, and an unnormalized figure would silently
  * compare a 30-second clip against a 60-second one.
  */
-function formatPerMinute(cost: number | null, recording: Recording | null): string {
+function formatPerMinute(run: Run, recording: Recording | null): string {
+  // TICKET 059 — READ THROUGH THE RUN'S OWN PRICE SOURCE. 052's guard below is
+  // real and it never fired: every stored `run.cost` in `data/runs/` is `0`, not
+  // `null`, because the build that wrote those Runs had no cost model at all —
+  // so both complete cards rendered `$0.000/min`, two takes reporting the
+  // configuration as free. The stamp is what separates them, never the value: a
+  // run written today whose cost really is 0 still reads `$0.000/min`, and an
+  // unstamped run carrying `0.021` is unpriced all the same.
+  const cost = costFromPriceSource(run.pricingVersion, run.cost).usd;
   // TICKET 052 — an UNMEASURED cost is not a cheap run. `not measured` says so;
   // `$0.000/min` would report the run as free.
   if (cost === null) return COST_NOT_MEASURED_CELL;
@@ -353,7 +361,7 @@ export default function RunsList(props: RunsListProps): ReactElement {
                     </span>
                     {' · '}
                     <span data-run-cost="" style={{ fontFamily: 'var(--font-mono)' }}>
-                      {formatPerMinute(run.cost, props.recording)}
+                      {formatPerMinute(run, props.recording)}
                     </span>
                   </span>
                 </>

@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { armLabel } from '../../../core/arms';
+import { COST_NOT_MEASURED_CELL } from '../../../core/pricing';
 import { RunLedger, type LiveSession, type Run } from '../../state/ledger';
 import {
   DIRECTION_NOT_RECORDED_CELL,
@@ -27,6 +28,7 @@ import {
 } from './derive';
 import {
   ADHOC_RECORDING_ID,
+  ARM_C_TRIPLE,
   CATEGORY_COST_PER_RUN,
   CATEGORY_RECORDING_IDS,
   CLEAN_RECORDING_ID,
@@ -45,8 +47,12 @@ import {
   SHORT_SWEEP_INTENDED_REPS,
   SHORT_SWEEP_SURVIVING_P50_MS,
   SHORT_SWEEP_SURVIVING_P95_MS,
+  T0,
   makeLiveSessionEntity,
   makeRecordingEntity,
+  makeRunEntity,
+  makeUnstampedRunEntity,
+  makeUtteranceRecord,
   runWithLatency,
   seedCategorySweep,
   seedCleanSweep,
@@ -1105,5 +1111,147 @@ describe('TICKET 055a — the floor is the HIGHEST declaration, over EVERY attem
     // 5 — the declaration — not the 3 the surviving rep indices can prove.
     expect(arm.provenance.intendedReps).toBe(5);
     expect(arm.provenance.line).toContain('2 of 5 reps completed');
+  });
+});
+
+/* ====== 059 FOLLOW-UP — the by-category row's cost DENOMINATOR, asserted ==== */
+
+/**
+ * A FIELD NO ASSERTION TOUCHES IS NOT A DISCLOSURE, IT IS A COMMENT WITH A TYPE.
+ *
+ * `CategoryGroupRow.measuredCostSamples` was COMPUTED (the `costOf` spread in
+ * `groupByCategory`), DECLARED (`derive.ts`, "the same disclosure
+ * `RecordingGroupRow` carries") and read by NOBODY: setting it to a wrong number
+ * left the whole suite green, and the By Category table rendered the cost cell
+ * with no denominator beside it. That is the R2-8(c) pattern `ResultsView.cost
+ * .test.tsx`'s own header condemns — computed, pinned, rendered nowhere — with
+ * the "pinned" half missing too.
+ *
+ * The rule underneath it is 052 AC7's: `$0.002` over 1 of 2 samples and `$0.002`
+ * over 2 of 2 are DIFFERENT CLAIMS, and the money cannot tell them apart —
+ * summing a missing cost as 0 and skipping it produce the SAME total. Only the
+ * denominator can. So it is pinned in two places, exactly as the direction cell
+ * is: the FIGURE here, and the cell an operator actually reads in
+ * `ResultsView.category.test.tsx`.
+ *
+ * And it reports ACTUAL, never intended: a denominator that collapses onto its
+ * own numerator reports every table as fully priced.
+ */
+describe('groupByCategory — the cost denominator, in the SAME vocabulary as By Recording', () => {
+  const REC_PARTIAL = 'rec-cat-partial';
+  const REC_UNSTAMPED = 'rec-cat-unstamped';
+
+  /**
+   * Two by-category rows that differ ONLY in how much of them was priced.
+   * They sit on different ARMS because the row key is (category × arm ×
+   * direction), so one category over two arms is the only way to get two rows
+   * that a single `costOf` call cannot have produced together.
+   *
+   *   arm B — stamped, one record priced of two   → 1 of 2
+   *   arm C — NO price source at all, both stored → 0 of 2
+   */
+  function mixedPricingLedger(): RunLedger {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: REC_PARTIAL, label: 'partly priced clip' }));
+    ledger.appendRecording(makeRecordingEntity({ id: REC_UNSTAMPED, label: 'unstamped clip' }));
+
+    const records = (costs: Array<number | null>) =>
+      costs.map((cost, i) =>
+        makeUtteranceRecord({
+          utteranceId: `u${i + 1}`,
+          index: i + 1,
+          category: 'short-reply',
+          timings: { speech_end: T0, audio_queued: T0 + 700 + i },
+          cost,
+        }),
+      );
+
+    ledger.appendRun(
+      makeRunEntity({
+        id: 'run-cat-partial',
+        recordingId: REC_PARTIAL,
+        cost: 0.002,
+        utterances: records([0.002, null]),
+      }),
+    );
+    ledger.appendRun(
+      makeUnstampedRunEntity({
+        id: 'run-cat-unstamped',
+        recordingId: REC_UNSTAMPED,
+        providerTriple: { ...ARM_C_TRIPLE },
+        modelSnapshots: { ...ARM_C_TRIPLE },
+        armTag: 'C',
+        cost: 0.002,
+        utterances: records([0.002, 0.002]),
+      }),
+    );
+    return ledger;
+  }
+
+  const rowForArm = (ledger: RunLedger, arm: string): CategoryGroupRow => {
+    const row = groupByCategory(ledger).find((r) => r.arm === arm);
+    expect(row, `no by-category row for arm ${arm}`).toBeDefined();
+    return row!;
+  };
+
+  it('a fully priced row reports its WHOLE denominator', () => {
+    const ledger = new RunLedger();
+    seedCategorySweep(ledger);
+    const rows = groupByCategory(ledger);
+    expect(rows).toHaveLength(2);
+
+    for (const row of rows) {
+      // Stated as a literal as well as against `n`: `measuredCostSamples === n`
+      // alone is satisfied by a field that simply IS `n`, which is the collapse
+      // the standing rule forbids.
+      expect(row.n).toBe(4);
+      expect(row.measuredCostSamples).toBe(4);
+      expect(row.measuredCostSamples).toBe(row.n);
+      expect(row.costUsd).toBeCloseTo(4 * CATEGORY_COST_PER_RUN, 10);
+    }
+  });
+
+  it('a row whose Run declared NO price source reports 0 — and n beside it is untouched', () => {
+    // An unpriced run is not an unrun run: the samples still count, only the
+    // dollars are absent.
+    const row = rowForArm(mixedPricingLedger(), 'C');
+
+    expect(row.n).toBe(2);
+    expect(row.measuredCostSamples).toBe(0);
+    expect(row.costUsd).toBeNull();
+    expect(row.costCell).toBe(COST_NOT_MEASURED_CELL);
+  });
+
+  it('a PARTIALLY priced row reports the honest denominator, never its own n', () => {
+    // The case both a null total and a full denominator would misreport: the
+    // dollars are real, and they are real over HALF the row.
+    const row = rowForArm(mixedPricingLedger(), 'B');
+
+    expect(row.n).toBe(2);
+    expect(row.measuredCostSamples).toBe(1);
+    expect(row.measuredCostSamples).not.toBe(row.n);
+    expect(row.costUsd).toBeCloseTo(0.002, 10);
+  });
+
+  it('reports the SAME denominator the By Recording row does — one fact, not two', () => {
+    // The two tables read the same records through the same `costOf`. A
+    // denominator that disagreed between them would be the second vocabulary
+    // `derive.ts:476` says it exists to prevent.
+    const ledger = mixedPricingLedger();
+    const byRecording = groupByRecording(ledger);
+    const denominatorFor = (recordingId: string): [number, number] => {
+      const row = byRecording.find((r) => r.recordingId === recordingId)!;
+      return [row.measuredCostSamples, row.n];
+    };
+
+    expect([rowForArm(ledger, 'B').measuredCostSamples, rowForArm(ledger, 'B').n]).toEqual(
+      denominatorFor(REC_PARTIAL),
+    );
+    expect([rowForArm(ledger, 'C').measuredCostSamples, rowForArm(ledger, 'C').n]).toEqual(
+      denominatorFor(REC_UNSTAMPED),
+    );
+    // Not vacuous: the two rows disagree with EACH OTHER, so a constant cannot
+    // satisfy both sides.
+    expect(denominatorFor(REC_PARTIAL)).not.toEqual(denominatorFor(REC_UNSTAMPED));
   });
 });

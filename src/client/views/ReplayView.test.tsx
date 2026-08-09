@@ -33,6 +33,10 @@ import {
   type ArmTag,
   type ProviderTriple,
 } from '../../core/arms';
+// TICKET 059 — the four Run fixtures below are runs written by TODAY's code, so
+// they declare the price source they ran under; a Run with no stamp priced
+// NOTHING and its card reads `not measured` (see `RunsList.playGate.test.tsx`).
+import { PRICING_VERSION } from '../../core/pricing';
 import type {
   BatchConfiguration,
   BatchHandle,
@@ -160,6 +164,7 @@ const RUN_CASCADE: SeededRun = {
   transcripts: { source: 'hello', target: 'hola' },
   outputAudioPath: 'runs/run-cascade.out.wav',
   cost: 0.021,
+  pricingVersion: PRICING_VERSION,
   errors: [],
   createdAt: T0 + 60_000,
   annotations: { repIndex: 3 },
@@ -178,6 +183,7 @@ const RUN_REALTIME: SeededRun = {
   transcripts: { source: 'hello', target: 'hola' },
   outputAudioPath: 'runs/run-realtime.out.wav',
   cost: 0.14,
+  pricingVersion: PRICING_VERSION,
   errors: [],
   createdAt: T0 + 120_000,
 };
@@ -195,6 +201,7 @@ const RUN_FAILED: SeededRun = {
   timings: { speech_end: T0, audio_queued: null },
   transcripts: { source: 'hello' },
   cost: 0,
+  pricingVersion: PRICING_VERSION,
   errors: ['tts: stage timed out for this utterance'],
   createdAt: T0 + 180_000,
 };
@@ -213,6 +220,7 @@ const RUN_ON_MIC: SeededRun = {
   transcripts: { source: 'hola', target: 'hello' },
   outputAudioPath: 'runs/run-mic.out.wav',
   cost: 0.0105,
+  pricingVersion: PRICING_VERSION,
   errors: [],
   createdAt: T0 + 240_000,
   annotations: { repIndex: 1 },

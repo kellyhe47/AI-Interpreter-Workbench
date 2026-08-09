@@ -1,13 +1,13 @@
 ---
 id: 059
 title: "$0.000 still renders on two surfaces — 052's rule holds on Live and leaks everywhere else"
-status: pending
+status: done
 source: qa
 depends_on: []
 touches: [src/client/state/ledger.ts, src/server/storage/types.ts, src/client/replay/runner.ts, src/client/components/results/derive.ts, src/client/views/ResultsView.tsx, src/client/components/replay/RunsList.tsx, src/harness/exportResults.ts]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed (QA, HEAD `ca40359`)
@@ -252,3 +252,69 @@ Do NOT create `RunsList.cost.test.tsx`, `ResultsView.byRecording.test.tsx`, or s
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2326 passing / 0 failing. Eval unchanged at 12 pass / 1 fail (only case 10, ticket 060).
+
+`costFromPriceSource(pricingVersion, usd)` in `src/core/pricing.ts` is the ONE place the
+"no stamp ⇒ priced nothing" rule lives, read at six call sites. `Run.pricingVersion` is mirrored on
+both types and written by `runOnce` **and** `abandonedRunStub`. `runSamples` reads **every** sample's
+cost through the **parent Run's** stamp — a record never names its own price source, the same reason
+`runSamples` derives `arm` from the parent, and a Run-level-only stamp would have moved nothing on
+screen because the aggregates sum records.
+
+The stamp is written even when `cost` is null and even when the run failed. It reports the *source*,
+never the figure; gating it on `cost !== null` would make it a restatement of the cost and would make
+a run whose real measured cost was `0` indistinguishable from one nobody could price — this ticket's
+own defect, reintroduced at the write path.
+
+The three remaining `formatUsd` cost sites are gone; the `row.n === 0` branch that rendered `—` is
+deleted; both By Recording and By Category disclose `N of M priced`.
+
+### What makes the fix non-degenerate
+
+Any rule of the form `cost === 0 ? null : cost` satisfies most of this ticket. It dies at **six
+independent layers** — `runSamples`, `runAggregates`, both derivation groupings, rendered Results,
+the rendered Replay card, and the export bundle. Pinned from the other side too: an unstamped run
+with a **non-zero** stored cost is also unpriced, so special-casing the value rather than the stamp
+fails both ways. **A Run written today whose measured cost really is `0` still renders `$0.000`.**
+
+The server mirror is forced structurally rather than by a source-text grep: `exportResults.ts`
+imports `Run` from `../server/storage`, so reading `run.pricingVersion` there does not compile unless
+the server type declares it.
+
+### A locked test was unsatisfiable — repaired by the orchestrator
+
+The implementer stopped rather than routing around it, and was right. `ResultsView.cost.test.tsx`'s
+"renders no `$0.000` anywhere on the secondary tab **for the unstamped ledger**" called
+`zeroCostLedger()`, which also seeds `run-stamped-zero` — a row that MUST render `$0.000`. Both cells
+are descendants of `[data-results-tab="secondary"]` and `'$0.000'.includes('$0.00')`, so the two
+assertions were mutually exclusive and no implementation could pass both. Repaired with an
+`unstampedOnlyLedger()`, matching the title the test always had. The assertions are untouched, and
+the reviewer confirmed the repair **widened** coverage — the original could never have exercised
+either table.
+
+### Adversarial review — 22 mutations, GREEN
+
+All four test-file edits validated, including the judgment call at `ResultsView.test.tsx:801`: a
+`>= 3` em-dash count where the third dash *was* the cost cell. Under the mutation that restores
+`n === 0 ? '—'`, the row renders exactly three dashes — **the original would have passed**. Replacing
+the count with a named `COST_NOT_MEASURED_CELL` assertion is strictly sharper, proven rather than
+argued.
+
+Two survivors, both closed:
+- `CategoryGroupRow.measuredCostSamples` was computed, declared and **rendered nowhere** — the exact
+  R2-8(c) pattern this ticket's own test header condemns, and self-refuting given the implementation
+  argued a denominator on one table only "would be a second vocabulary for one fact". Now rendered
+  beside the By Category cost cell in the same vocabulary.
+- `abandonedRunStub`'s stamp was the only construction site with no test.
+
+### Recorded honestly — golden eval 07 does NOT gate this ticket
+
+Case 07 builds its fixture as `makeRunEntity({ cost: totalUsd })` where `totalUsd` is `null`, so it
+exercises the **052** null-cost path, never 059's stored-`0`-without-a-stamp path. With the
+discriminator removed from *both* leaking surfaces, `npm run eval` still reports 12 passed with 07
+green. It passes for a real reason — real DOM over three surfaces, real pricing path — just not for
+this ticket's reason. **The locked unit tests carry the whole load.** Third time this session an eval
+case has turned out not to gate its ticket (cf. 056 case 12, 055a case 04).

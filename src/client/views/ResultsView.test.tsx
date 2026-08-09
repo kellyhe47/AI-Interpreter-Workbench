@@ -22,6 +22,7 @@ import { resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { armLabel } from '../../core/arms';
+import { COST_NOT_MEASURED_CELL } from '../../core/pricing';
 import { RunLedger, type LiveSession, type Run } from '../state/ledger';
 import {
   STT_UNCHANGED_CELL,
@@ -796,9 +797,19 @@ describe('ResultsView — a failed run is visible on the row that absorbed it', 
     expect(row.querySelector('[data-exclusion="failed"]')).not.toBeNull();
     expect(text).toMatch(/excluded/i);
 
-    // p50, p95 and cost are all '—'. A $0.000 cost over zero samples is a
-    // fabricated figure: nothing was measured, so nothing is reported.
-    expect((text.match(/—/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    // p50 and p95 are '—'. A $0.000 cost over zero samples is a fabricated
+    // figure: nothing was measured, so nothing is reported.
+    //
+    // TICKET 059 — AND THE COST NO LONGER SAYS IT WITH A DASH. This row used to
+    // render its cost through `derive.ts`'s `formatUsd(null)`, i.e. `—`, which is
+    // what this count's third dash was. `—` already means "no sample" on this
+    // screen, so reusing it for "nobody priced this" makes the two
+    // indistinguishable — the confusion 052 removed one card over, and criterion
+    // 5 of 059 names this exact cell. The claim is unchanged and the assertion is
+    // strictly sharper: the cost is asserted by NAME rather than counted as one
+    // of three interchangeable dashes.
+    expect((text.match(/—/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    expect(text).toContain(COST_NOT_MEASURED_CELL);
     expect(text).not.toContain('$');
 
     expect(row).toHaveAttribute('data-failed-count', '1');

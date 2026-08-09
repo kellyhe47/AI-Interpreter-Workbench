@@ -117,6 +117,11 @@
 
 import { useEffect, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { armLabel, type ArmTag } from '../../core/arms';
+// TICKET 059 — THE ONE COST FORMATTER, reached directly for the three cells that
+// still rendered money through `derive.ts`'s `formatUsd`. `formatUsd` emits '—',
+// which on this screen already means "no sample"; a cost nobody could take is a
+// different fact and the screen already has a word for it.
+import { formatCostUsd } from '../../core/pricing';
 import {
   DIRECTION_ABSENT_KEY,
   WER_NOT_MEASURED_CELL,
@@ -125,7 +130,6 @@ import {
   deriveWerByArm,
   deriveWerByCategory,
   formatMs,
-  formatUsd,
   groupByCategory,
   groupByRecording,
   type CategoryGroupRow,
@@ -565,12 +569,12 @@ const LIVE_ROWS: ReadonlyArray<{
   {
     metric: 'cost-minute-1',
     label: 'cost per minute, first minute',
-    value: (c) => formatUsd(c ? c.costPerMinuteMinute1 : null),
+    value: (c) => formatCostUsd(c ? c.costPerMinuteMinute1 : null),
   },
   {
     metric: 'cost-final-minute',
     label: 'cost per minute, final minute',
-    value: (c) => formatUsd(c ? c.costPerMinuteFinalMinute : null),
+    value: (c) => formatCostUsd(c ? c.costPerMinuteFinalMinute : null),
   },
 ];
 
@@ -879,8 +883,31 @@ function CategoryCard(props: { rows: CategoryGroupRow[]; werRows: WerCategoryRow
             <div style={cellStyle}>{formatMs(row.p95Ms)}</div>
             {/* TICKET 052 — the derivation renders the cell; the view never
                 formats money by hand and so cannot invent a zero-dollar
-                figure for a cost nobody measured. */}
-            <div style={cellStyle}>{row.costCell}</div>
+                figure for a cost nobody measured.
+
+                059 FOLLOW-UP — ...AND ITS DENOMINATOR, in the By Recording
+                row's vocabulary verbatim. `measuredCostSamples` was computed by
+                the same `costOf` for both tables and rendered on only one of
+                them, so this table showed a cost figure with no way to tell a
+                fully priced category from a half-priced one — the money cannot
+                supply it, because summing a missing cost as 0 and skipping it
+                produce the SAME total. A denominator on one of two tables
+                reading the same records is a hole in the evidence that reads as
+                complete.
+
+                UNCONDITIONAL, where the By Recording cell guards on `n > 0`:
+                `groupByCategory` opens a group only when a sample lands in it,
+                so a category row has n >= 1 by construction and the guard there
+                would be a branch no ledger can reach and no test can turn red.
+                The zero-of-zero denominator it exists to withhold is
+                unreachable here. */}
+            <div style={cellStyle}>
+              {row.costCell}
+              <div
+                data-cost-samples=""
+                style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}
+              >{` ${row.measuredCostSamples} of ${row.n} priced`}</div>
+            </div>
             <div data-category-wer="" style={cellStyle}>
               {werCell(row)}
             </div>
@@ -930,12 +957,31 @@ function RecordingCard(props: { rows: RecordingGroupRow[] }): ReactElement {
             <div style={cellStyle}>{row.n}</div>
             <div style={cellStyle}>{formatMs(row.p50Ms)}</div>
             <div style={cellStyle}>{formatMs(row.p95Ms)}</div>
-            {/* n === 0 means nothing was measured, so there is no money to
-                report: a zero cost over zero samples reads as a measurement.
-                p50 / p95 already dash through formatMs's null.
-                TICKET 052 — and a row WITH samples but no priced one renders
-                `not measured` through the derivation's own cell. */}
-            <div style={cellStyle}>{row.n === 0 ? formatUsd(null) : row.costCell}</div>
+            {/* TICKET 059 — THE DERIVATION'S CELL, UNCONDITIONALLY. The
+                `row.n === 0` branch used to render `derive.ts`'s `formatUsd(null)`,
+                i.e. `—`, which is the last cost value on this screen that spoke a
+                second vocabulary. `—` already means "no sample" here, so reusing
+                it for "nobody priced this" makes the two indistinguishable — and
+                the branch also MASKED the cell it replaced, so a broken `costCell`
+                went unseen on every row that happened to have no samples. A row
+                with n === 0 priced nothing, and `costOf([])` already says exactly
+                that: `not measured`, never a zero-dollar figure, never a dash.
+
+                ...AND ITS DENOMINATOR, the disclosure the experiment card's
+                provenance line and the Live footer already carry. The same spend
+                over two of three samples and over three of three are different
+                claims, and the dollars cannot tell them apart. Withheld when
+                n === 0, where there
+                is no denominator to disclose rather than a zero-of-zero one. */}
+            <div style={cellStyle}>
+              {row.costCell}
+              {row.n > 0 ? (
+                <div
+                  data-cost-samples=""
+                  style={{ color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}
+                >{` ${row.measuredCostSamples} of ${row.n} priced`}</div>
+              ) : null}
+            </div>
             <div style={cellStyle}>
               {row.excludedFromExperiments ? (
                 <span style={{ color: 'var(--text-muted)' }}>

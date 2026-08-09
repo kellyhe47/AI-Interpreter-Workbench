@@ -24,12 +24,17 @@ import { armLabel } from '../../core/arms';
 import { RunLedger } from '../state/ledger';
 import { formatMs, formatUsd, groupByCategory, groupByRecording } from '../components/results/derive';
 import {
+  ARM_C_TRIPLE,
   CORPUS_CATEGORY_EXPECTATIONS,
   CORPUS_RECORDING_EXPECTATIONS,
   CORPUS_SAMPLES_PER_CATEGORY,
   CORPUS_SAMPLES_PER_RECORDING,
   CORPUS_VERSION,
+  T0,
   makeRecordingEntity,
+  makeRunEntity,
+  makeUnstampedRunEntity,
+  makeUtteranceRecord,
   runWithLatency,
   seedCorpusExclusionCases,
   seedCorpusSweep,
@@ -383,5 +388,167 @@ describe('ResultsView — the by-category table shows WHICH DIRECTION each row i
     expect(source).not.toMatch(/row\.direction\s*\?\?\s*''/);
     expect(source).not.toMatch(/>\s*\{\s*row\.direction\s*\}/);
     expect(source).toContain('data-direction={row.direction}');
+  });
+});
+
+/* ==== 059 FOLLOW-UP — the By Category cost cell discloses its denominator === */
+
+/**
+ * A DENOMINATOR ON ONE TABLE AND NOT THE OTHER IS A HOLE THAT READS AS COMPLETE.
+ *
+ * 059 gave the By Recording row `N of M priced` beside its cost cell and gave
+ * `CategoryGroupRow` the same `measuredCostSamples` field — then rendered only
+ * `{row.costCell}` here. So the field was COMPUTED, DECLARED and read by
+ * nobody, and an operator looking at the two tables on this one tab saw a
+ * disclosed denominator beside one cost column and a bare figure beside the
+ * other. There is no way to tell a fully priced category from a half-priced one
+ * from the dollars: summing a missing cost as 0 and skipping it produce the
+ * SAME total.
+ *
+ * The vocabulary is the By Recording row's, verbatim — `N of M priced` — because
+ * both tables read the same records through the same `costOf`, and a second
+ * phrasing for one fact is the thing `derive.ts:476` says the field exists to
+ * prevent.
+ *
+ * Every query below is scoped with `within(row)`. RTL appends each render to the
+ * same document, so a document-wide accessor would happily match the OTHER
+ * row's denominator — and a table that rendered one denominator for everything
+ * is exactly what that mistake lets through.
+ */
+describe('ResultsView — the by-category cost cell shows HOW MUCH of the row was priced', () => {
+  const CATEGORY = 'short-reply';
+  const REC_PARTIAL = 'rec-cat-cost-partial';
+  const REC_UNSTAMPED = 'rec-cat-cost-unstamped';
+
+  /**
+   * Two rows of ONE category that differ only in how much of them was priced.
+   * Different arms, because the row key is (category × arm × direction).
+   *
+   *   arm B — stamped, one record of two priced  → `1 of 2 priced`
+   *   arm C — no price source at all             → `0 of 2 priced`
+   */
+  function mixedPricingLedger(): RunLedger {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: REC_PARTIAL, label: 'partly priced clip' }));
+    ledger.appendRecording(makeRecordingEntity({ id: REC_UNSTAMPED, label: 'unstamped clip' }));
+
+    const records = (costs: Array<number | null>) =>
+      costs.map((cost, i) =>
+        makeUtteranceRecord({
+          utteranceId: `u${i + 1}`,
+          index: i + 1,
+          category: CATEGORY,
+          timings: { speech_end: T0, audio_queued: T0 + 700 + i },
+          cost,
+        }),
+      );
+
+    ledger.appendRun(
+      makeRunEntity({
+        id: 'run-cost-partial',
+        recordingId: REC_PARTIAL,
+        cost: 0.002,
+        utterances: records([0.002, null]),
+      }),
+    );
+    ledger.appendRun(
+      makeUnstampedRunEntity({
+        id: 'run-cost-unstamped',
+        recordingId: REC_UNSTAMPED,
+        providerTriple: { ...ARM_C_TRIPLE },
+        modelSnapshots: { ...ARM_C_TRIPLE },
+        armTag: 'C',
+        cost: 0.002,
+        utterances: records([0.002, 0.002]),
+      }),
+    );
+    return ledger;
+  }
+
+  /** The rendered by-category rows, in derivation order. */
+  const categoryRows = (): HTMLElement[] =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>(
+        `[data-card="category"] [data-category-row][data-category="${CATEGORY}"]`,
+      ),
+    );
+
+  it('each row renders its OWN denominator, in the By Recording vocabulary', () => {
+    const ledger = mixedPricingLedger();
+    const derived = groupByCategory(ledger);
+    showCorpusSecondaryTab(ledger);
+
+    const rows = categoryRows();
+    expect(rows).toHaveLength(2);
+    // NOT A CONSTANT: the two rows disagree, so one hardcoded string satisfies
+    // at most one of them — and a denominator collapsed onto n satisfies
+    // neither.
+    expect(derived.map((row) => [row.measuredCostSamples, row.n])).toEqual([
+      [1, 2],
+      [0, 2],
+    ]);
+
+    rows.forEach((row, index) => {
+      const expected = derived[index]!;
+      const cell = within(row).getByText(
+        `${expected.measuredCostSamples} of ${expected.n} priced`,
+      );
+      expect(cell).toHaveAttribute('data-cost-samples');
+      // ...and the money it qualifies sits in the same cell, so the two are
+      // never read apart.
+      expect(within(row).getByText(expected.costCell)).toBeInTheDocument();
+
+      // The SIBLING row's denominator is not in this row. Scoped, so a
+      // document-wide query cannot borrow it from the other row.
+      const other = derived[index === 0 ? 1 : 0]!;
+      expect(
+        within(row).queryByText(`${other.measuredCostSamples} of ${other.n} priced`),
+      ).toBeNull();
+    });
+  });
+
+  it('the half-priced row and the unpriced row read DIFFERENTLY on screen', () => {
+    // The failure this closes: two rows over the same category, the same N and
+    // the same stored dollars, indistinguishable in the rendered table.
+    showCorpusSecondaryTab(mixedPricingLedger());
+
+    const rows = categoryRows();
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.map((row) => within(row).getByText(/priced$/).textContent?.trim()),
+    ).toEqual(['1 of 2 priced', '0 of 2 priced']);
+  });
+
+  it('the denominator does not disturb the direction column 064 added', () => {
+    // The cell rides INSIDE the cost column, exactly as By Recording's does, so
+    // the row's identity attributes and its direction cell are untouched.
+    showCorpusSecondaryTab(mixedPricingLedger());
+
+    for (const row of categoryRows()) {
+      expect(row.getAttribute('data-n')).toBe('2');
+      expect(row.getAttribute('data-direction')).toBe('en→es');
+      expect(within(row).getByText('en→es')).toHaveAttribute('data-category-direction');
+    }
+  });
+
+  it('every rendered category row on the corpus ledger discloses a denominator', () => {
+    // Not just the fixture built for this test: the six-category corpus table
+    // has no row that shows a cost with no denominator beside it.
+    const ledger = corpusLedger();
+    const derived = groupByCategory(ledger);
+    showCorpusSecondaryTab(ledger);
+
+    const rows = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-card="category"] [data-category-row]'),
+    );
+    expect(rows).toHaveLength(derived.length);
+    rows.forEach((row, index) => {
+      const expected = derived[index]!;
+      expect(expected.measuredCostSamples).toBe(CORPUS_SAMPLES_PER_CATEGORY);
+      const cell = within(row).getByText(
+        `${expected.measuredCostSamples} of ${expected.n} priced`,
+      );
+      expect(cell).toHaveAttribute('data-cost-samples');
+    });
   });
 });

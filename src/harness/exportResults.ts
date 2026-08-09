@@ -105,7 +105,7 @@ import { deriveArmTag } from '../core/arms';
 import type { ArmTag } from '../core/arms';
 import {
   PRICING_VERSION,
-  costFromStored,
+  costFromPriceSource,
   formatCostUsd,
   sumMeasuredCosts,
 } from '../core/pricing';
@@ -361,7 +361,16 @@ function summariseArm(arm: NamedArm, runs: readonly Run[], intendedReps: number)
 
   // TICKET 052 — MEASURED runs only. An unmeasured cost contributes nothing
   // and is disclosed, rather than silently entering the total as a zero.
-  const summed = sumMeasuredCosts(aggregated.map((run) => costFromStored(run.cost)));
+  //
+  // TICKET 059 — AND MEASURED MEANS "READ UNDER A DECLARED PRICE SOURCE". The
+  // bundle is the copy that outlives the session, so a `0` from a build with no
+  // cost model must not become a measured zero here after the screen has stopped
+  // calling it one. `pricingVersion` on the ConfigurationSummary below says which
+  // rate table THE EXPORT ran under and is a different question entirely — it is
+  // never a claim about the runs, and the pre-059 runs ran under none.
+  const summed = sumMeasuredCosts(
+    aggregated.map((run) => costFromPriceSource(run.pricingVersion, run.cost)),
+  );
   const cost = { costUsd: summed.usd, measuredCostRuns: summed.measured };
 
   return {

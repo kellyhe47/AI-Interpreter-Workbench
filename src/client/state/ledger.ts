@@ -158,6 +158,7 @@
 
 import { deriveArmTag, type ArmTag, type ProviderTriple } from '../../core/arms';
 import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
+import { costFromPriceSource } from '../../core/pricing';
 import { latestWerScores, werScoreKey } from '../../core/wer';
 import type { WerScore } from '../../core/wer';
 import type { RunOrigin } from '../../core/protocol';
@@ -310,6 +311,28 @@ export interface Run {
   outputAudioPath?: string;
   /** TICKET 052 — `null` is UNMEASURED. Never rendered as `$0.00`. */
   cost: number | null;
+  /**
+   * TICKET 059 — THE PRICE SOURCE THIS RUN WAS WRITTEN UNDER, the sibling of
+   * `LiveSession.pricingVersion` (052 R2) and of `annotations.corpusVersion`.
+   *
+   * A RUN WITHOUT IT PRICED NOTHING. The three Runs in `data/runs/` carry
+   * `"cost": 0` on the Run and on all four utterance records of each complete
+   * one, written by a build with no cost model at all; read forward as
+   * measurements they render `$0.000` on Results › By Recording and `$0.000/min`
+   * on the Replay cards — two takes reporting the configuration as free. The
+   * absence of this field is the only thing on those records that says
+   * otherwise, and it is the STAMP that discriminates, never the value: a Run
+   * written today whose measured cost really is `0` still reports `$0.000`, and
+   * an unstamped Run carrying `0.021` is unpriced all the same.
+   *
+   * COPIED AT WRITE TIME, NEVER LOOKED UP LATER — the ledger is append-only, so
+   * a Run written without it can never be retro-fixed, and stamping it at read
+   * time would assert that today's rate table produced yesterday's figure.
+   *
+   * Optional, and an absent field STAYS ABSENT: `pricingVersion: ''` would be a
+   * claim, and absence is not a claim.
+   */
+  pricingVersion?: string;
   errors: string[];
   createdAt: number;
   /**
@@ -779,6 +802,19 @@ function refuseClockInversion(run: Run): Run {
 export function runSamples(run: Run): RunSample[] {
   const arm = runArmTag(run);
   const records = run.utterances;
+  // TICKET 059 — THE PRICE SOURCE IS PINNED ON THE PARENT RUN and every sample
+  // it expands into inherits that verdict, exactly as the ARM does two lines
+  // down: a record never names its own price source, so one stamp on the
+  // container answers for all four of its records. `data/runs/`'s two complete
+  // Runs store `"cost": 0` on the Run AND on every record, and a stamp honoured
+  // only at Run level would leave the aggregates — which sum the RECORDS — right
+  // where they were.
+  //
+  // NOT A GATE. `isAggregatableRun` is untouched and the sample is still emitted:
+  // an unpriced run is not an unrun run, so its latency, its status and its place
+  // in `n` are all unchanged. Only the money is absent.
+  const costOfRecord = (usd: number | null): number | null =>
+    costFromPriceSource(run.pricingVersion, usd).usd;
 
   if (records === undefined || records.length === 0) {
     return [
@@ -787,7 +823,7 @@ export function runSamples(run: Run): RunSample[] {
         arm,
         status: run.status,
         latencyMs: pairedLatencyMs(run.timings),
-        cost: run.cost,
+        cost: costOfRecord(run.cost),
       },
     ];
   }
@@ -804,7 +840,9 @@ export function runSamples(run: Run): RunSample[] {
     latencyMs: pairedLatencyMs(utterance.timings),
     // The Run's whole-clip cost, split by the manifest span (ticket 031); the
     // splits sum back to run.cost exactly, so expanding moves no money.
-    cost: utterance.cost,
+    // TICKET 059 — read through the parent's price source, so a record cannot
+    // report a measurement its container never had a rate table for.
+    cost: costOfRecord(utterance.cost),
   }));
 }
 

@@ -2209,3 +2209,70 @@ describe('TICKET 059 — runOnce stamps the price source onto the Run it writes'
     expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 059 FOLLOW-UP — THE SECOND CONSTRUCTION SITE, UNDER THE SAME RULE.
+//
+// `abandonedRunStub` is the OTHER place a `Run` is built, and it was the only
+// one with no test: removing its `pricingVersion` left the whole suite green.
+//
+// It is behaviourally inert TODAY — the stub's `cost` is always `null`, so a
+// stamped and an unstamped stub both read `not measured` — and that is exactly
+// why it needs pinning rather than why it does not. The stub rides the arm's
+// provenance denominator forever in an append-only ledger, so an unstamped one
+// is a record written by today's code that is INDISTINGUISHABLE FROM A PRE-059
+// RECORD, for a reason that has nothing to do with pricing. The moment a stub
+// carries any cost at all — or anything reads the stamp as "was this row
+// written under a price model" rather than as a cost qualifier — the absence
+// becomes a lie the ledger cannot take back out.
+//
+// A stamp reports the SOURCE, never the figure. Conditioning it on `cost !==
+// null` here would be the same collapse the locked block above forbids at the
+// real site.
+// ---------------------------------------------------------------------------
+
+describe('059 follow-up — the abandoned-run stub declares the price source too', () => {
+  const stubArgs = {
+    id: 'stub-priced',
+    recordingId: 'rec-1',
+    createdAt: 4_242,
+    reason: 'run abandoned',
+  };
+
+  it('stamps PRICING_VERSION on the stub, whose cost is null by construction', () => {
+    const stub = abandonedRunStub({ ...stubArgs, config: CASCADE_CONFIG });
+
+    // The premise: an abandoned run measured NOTHING. The stamp is therefore
+    // not a restatement of the figure — it is the only thing on the record that
+    // says which price model was in force when nothing was measured.
+    expect(stub.cost).toBeNull();
+    expect(stub.status).toBe('failed');
+    expect((stub as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+    // ABSENCE IS THE OTHER STATE, and it is expressed by a MISSING KEY — the
+    // shape the three pre-059 Runs on disk have. So the key must be present.
+    expect(Object.keys(stub)).toContain('pricingVersion');
+  });
+
+  it('stamps it for every configuration, exactly as the real Run site does', () => {
+    // One rule, not one per architecture: nothing about the arm, the transport
+    // or the language bears on which price table was in force.
+    for (const config of [CASCADE_CONFIG, REALTIME_CONFIG]) {
+      const stub = abandonedRunStub({ ...stubArgs, config });
+      expect((stub as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+    }
+  });
+
+  it('agrees with the real Run built from the SAME config — one rule, not two', async () => {
+    // The pairing the 061 block makes for the languages, made for the stamp:
+    // the two construction sites must not drift apart.
+    const h = makeHarness();
+    const done = start(h, CASCADE_CONFIG);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    const stub = abandonedRunStub({ ...stubArgs, config: CASCADE_CONFIG });
+    expect((stub as StampedRun).pricingVersion).toBe((run as StampedRun).pricingVersion);
+    // Not vacuous: both are the real constant, not two matching undefineds.
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+  });
+});

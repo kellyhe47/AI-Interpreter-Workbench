@@ -214,6 +214,41 @@ function zeroCostLedger(): RunLedger {
   return ledger;
 }
 
+/**
+ * The same shape as `zeroCostLedger()` MINUS the stamped row — the three stored
+ * Runs in `data/` as they actually are: `cost: 0`, no `pricingVersion`, at the
+ * Run level and on every record.
+ *
+ * This exists because "no dollar figure anywhere on the panel" is only a
+ * falsifiable claim over data that is entirely unpriced. Mixed in with a
+ * legitimately-priced `$0.000`, it asserts a contradiction rather than a rule.
+ */
+function unstampedOnlyLedger(): RunLedger {
+  resetEntitySeq();
+  const ledger = new RunLedger();
+  for (const id of [REC_UNSTAMPED_ZERO, REC_ALL_FAILED]) {
+    ledger.appendRecording(makeRecordingEntity({ id, label: id }));
+  }
+  ledger.appendRun(
+    makeUnstampedRunEntity({
+      id: 'run-unstamped-zero',
+      recordingId: REC_UNSTAMPED_ZERO,
+      cost: 0,
+      utterances: zeroCostRecords(),
+    }),
+  );
+  ledger.appendRun(
+    makeUnstampedRunEntity({
+      id: 'run-all-failed',
+      recordingId: REC_ALL_FAILED,
+      status: 'failed',
+      errors: ['tts: stage timed out'],
+      cost: 0,
+    }),
+  );
+  return ledger;
+}
+
 /** Renders once, switches to the secondary tab, and hands back that container. */
 function renderByRecording(ledger: RunLedger): HTMLElement {
   const { container } = render(<ResultsView ledger={ledger} />);
@@ -287,7 +322,16 @@ describe('TICKET 059 · Results › By Recording renders the STAMP, not the zero
   it('renders no $0.000 anywhere on the secondary tab for the unstamped ledger', () => {
     // The eval's own check, at the surface it names: `must_not_contain`
     // ["$0.000", "$0.00", "0.000/min"] with `must_include` "not measured".
-    const container = renderByRecording(zeroCostLedger());
+    //
+    // ORCHESTRATOR REPAIR — the ledger has to be UNSTAMPED-ONLY, as this test's
+    // title always said. It was calling `zeroCostLedger()`, which also seeds
+    // `run-stamped-zero`, and that row must render `$0.000` (the test above, and
+    // `derive.cost.test.ts`'s by-category Arm B row). Both cells live under
+    // `[data-results-tab="secondary"]` and `'$0.000'.includes('$0.00')`, so the
+    // two assertions were mutually exclusive and no implementation could pass
+    // both. Dropping the stamped row restores the falsifiable claim — that
+    // UNSTAMPED data leaks no dollar figure — without weakening it.
+    const container = renderByRecording(unstampedOnlyLedger());
     const secondary = container.querySelector('[data-results-tab="secondary"]')!;
 
     expect(secondary.textContent).toContain(COST_NOT_MEASURED_CELL);

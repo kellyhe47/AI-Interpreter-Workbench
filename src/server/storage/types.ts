@@ -130,6 +130,23 @@ export interface Run {
   outputAudioPath?: string;
   /** TICKET 052 — `null` is UNMEASURED. Never reported as `$0.00`. */
   cost: number | null;
+  /**
+   * TICKET 059 — the price source the run was written under. Mirrors
+   * `src/client/state/ledger.ts`'s `Run` field-for-field, for the same reason
+   * `languagePair` is mirrored above, and the sibling of
+   * `LiveSession.pricingVersion` below.
+   *
+   * A RUN WITHOUT IT PRICED NOTHING. The three Runs in `data/runs/` carry
+   * `"cost": 0` from a build with no cost model at all; the missing stamp is the
+   * only thing on the record that separates that from a run whose measured cost
+   * really was zero. `exportResults` reads it here, so the committed bundle and
+   * the screen cannot disagree about which zeros are measurements.
+   *
+   * OPTIONAL is load-bearing: those three Runs are read, listed and exported
+   * unchanged, and an absent stamp stays absent rather than being backfilled
+   * into an append-only store.
+   */
+  pricingVersion?: string;
   errors: string[];
   createdAt: number;
   /**

@@ -129,6 +129,7 @@ import type { CorpusCategory } from '../../../core/corpus';
 import {
   PRICING_VERSION,
   assumptionsFor,
+  costFromPriceSource,
   costFromStored,
   formatCostUsd,
   sumMeasuredCosts,
@@ -385,6 +386,13 @@ export interface RecordingGroupRow {
   costUsd: number | null;
   /** `not measured`, never `$0.00` — the same rule one tab over. */
   costCell: string;
+  /**
+   * TICKET 059 — the COST DENOMINATOR: how many of `n` carried a measured cost.
+   * `$0.06 over 2 of 3` and `$0.06 over 3 of 3` are different claims and the
+   * dollars cannot separate them. Never conflated with `n`, which counts LATENCY
+   * samples: an unpriced run still contributes its latency.
+   */
+  measuredCostSamples: number;
   /** True when NO run in the group reaches the experiment aggregates. */
   excludedFromExperiments: boolean;
   /** Why, for the runs that are excluded. Empty when nothing is excluded. */
@@ -464,6 +472,12 @@ export interface CategoryGroupRow {
   costUsd: number | null;
   /** `not measured`, never `$0.00`. */
   costCell: string;
+  /**
+   * TICKET 059 — the cost denominator, the same disclosure `RecordingGroupRow`
+   * carries. Both tables read the same records through the same `costOf`, so a
+   * denominator on only one of them would be a second vocabulary for one fact.
+   */
+  measuredCostSamples: number;
 }
 
 /** A head-to-head between two named arms, built from gate-passing Runs only. */
@@ -646,9 +660,23 @@ function distinct<T>(values: Array<T | undefined>): Set<T> {
  * through the one formatter. An unmeasured sample contributes nothing, and a
  * row where nothing was measured reports `null` / `not measured` — never `$0.00`.
  */
-function costOf(values: Array<number | null>): { costUsd: number | null; costCell: string } {
+function costOf(values: Array<number | null>): {
+  costUsd: number | null;
+  costCell: string;
+  measuredCostSamples: number;
+} {
   const sum = sumMeasuredCosts(values.map(costFromStored));
-  return { costUsd: sum.usd, costCell: formatCostUsd(sum.usd) };
+  // TICKET 059 — AND ITS DENOMINATOR. `$0.06 over 2 of 3 samples` and `$0.06
+  // over 3 of 3` are different claims and the money cannot tell them apart:
+  // summing a missing cost as 0 and skipping it produce the SAME total. The
+  // experiment card's provenance line and the Live footer already disclose it;
+  // these rows were the one place on the screen that did not.
+  //
+  // The samples arrive here already read through their parent Run's price source
+  // (`runSamples`), so an unstamped Run contributes `null`s and this counts 0 of
+  // them — while `n` beside it is untouched, because an unpriced run is not an
+  // unrun run.
+  return { costUsd: sum.usd, costCell: formatCostUsd(sum.usd), measuredCostSamples: sum.measured };
 }
 
 /**
@@ -692,15 +720,17 @@ function liveCostOf(sessions: LiveSession[]): {
   measuredCostUtterances: number;
 } {
   const costs = sessions.flatMap((s) =>
-    s.utterances.map((u) =>
-      // A SESSION WITH NO PRICE SOURCE PRICED NOTHING. The stored sessions
-      // written before this ticket carry `costUsd: 0` on every utterance,
-      // because the build that wrote them hardcoded it; reading those forward
-      // publishes takes asserting the configuration was free. The stamp is the
-      // discriminator, not the value — a session written TODAY that really did
-      // cost 0 still reports, which is what keeps 0 and null distinct.
-      s.pricingVersion === undefined ? costFromStored(null) : costFromStored(u.costUsd),
-    ),
+    // A SESSION WITH NO PRICE SOURCE PRICED NOTHING. The stored sessions written
+    // before 052 R2 carry `costUsd: 0` on every utterance, because the build that
+    // wrote them hardcoded it; reading those forward publishes takes asserting
+    // the configuration was free. The stamp is the discriminator, not the value —
+    // a session written TODAY that really did cost 0 still reports, which is what
+    // keeps 0 and null distinct.
+    //
+    // TICKET 059 — and the rule now lives in ONE place (`costFromPriceSource`),
+    // shared with the Run side, so the Live footer and the two Run-fed surfaces
+    // cannot drift into different opinions about the same absence.
+    s.utterances.map((u) => costFromPriceSource(s.pricingVersion, u.costUsd)),
   );
   const sum = sumMeasuredCosts(costs);
   return {

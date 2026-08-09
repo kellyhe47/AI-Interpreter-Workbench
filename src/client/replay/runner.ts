@@ -195,6 +195,7 @@
 
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag, type ArmTag, type RunConfig } from '../../core/arms';
 import type { CorpusUtterance } from '../../core/corpus';
+import { PRICING_VERSION } from '../../core/pricing';
 import { readWav, writeWav } from '../../harness/wav';
 import { SAMPLE_RATE } from '../../core/protocol';
 import { CLOCK_INVERSION } from '../../core/timing';
@@ -609,6 +610,12 @@ export function abandonedRunStub(args: {
     transcripts: {},
     // TICKET 052 — an abandoned run measured NOTHING, cost included.
     cost: null,
+    // TICKET 059 — the SECOND construction site, under the same rule as the real
+    // Run below: a record written by today's code declares today's price source,
+    // whatever it measured. The figure here is `null` either way, so nothing on
+    // screen moves — but a stub that omitted the stamp would be indistinguishable
+    // from a pre-059 record for a reason that has nothing to do with pricing.
+    pricingVersion: PRICING_VERSION,
     errors: [args.reason],
     createdAt: args.createdAt,
   };
@@ -1301,6 +1308,15 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       transport.costPerMinUsd > 0
         ? transport.costPerMinUsd * (recording.durationMs / 60_000)
         : null,
+    // TICKET 059 — THE PRICE SOURCE THIS RUN RAN UNDER, copied onto the record
+    // at the moment of the run exactly as `corpusVersion` is. It reports the
+    // SOURCE, never the figure: it is written whatever `cost` came to and
+    // whatever `status` says, because a stamp conditioned on either would be a
+    // restatement of them rather than the discriminator that separates "measured,
+    // and it came to 0" from "written before a cost model existed". The three
+    // pre-059 Runs on disk carry no stamp and must keep carrying none — that
+    // absence is what makes them read `not measured` instead of `$0.000`.
+    pricingVersion: PRICING_VERSION,
     utterances,
     errors,
     createdAt: deps.now(),

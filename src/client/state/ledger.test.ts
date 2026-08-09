@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, type ProviderTriple } from '../../core/arms';
+import { PRICING_VERSION } from '../../core/pricing';
 import type { UtteranceRecord } from '../../core/timing';
 import {
   LEDGER_STORAGE_KEY,
@@ -432,6 +433,14 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     transcripts: { source: 'hello', target: 'hola' },
     outputAudioPath: `runs/run-${entitySeq}.out.wav`,
     cost: 0.01,
+    // TICKET 059 — A GATE-PASSING RUN BUILT BY TODAY'S CODE DECLARES TODAY'S
+    // PRICE SOURCE, exactly as `runner.ts` now writes it and as `makeRunEntity`
+    // already does. Every run this builder makes carries a real, priced cost, and
+    // without the stamp those figures would read as unmeasured — the `cost: 0.01`
+    // assertions below are about a MEASUREMENT, not about a pre-059 record. A
+    // fixture standing in for one of the three unstamped Runs on disk says so by
+    // deleting the key, never by a builder that forgets it.
+    pricingVersion: PRICING_VERSION,
     errors: [],
     createdAt: 1_700_000_000_000 + entitySeq,
     ...overrides,
