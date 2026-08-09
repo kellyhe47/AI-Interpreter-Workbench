@@ -13,6 +13,7 @@ import {
   type LiveSession,
   type Recording,
   type Run,
+  type RunUtterance,
   type StorageAdapter,
 } from './ledger';
 
@@ -1138,5 +1139,191 @@ describe('TICKET 061 — a fieldless Run stays readable, and stays excluded on t
     const asSweep: Run = { ...run, origin: 'sweep' };
     expect(asSweep.languagePair).toBeUndefined();
     expect(isAggregatableRun(asSweep)).toBe(false);
+  });
+});
+
+/**
+ * TICKET 055b — A PHYSICALLY IMPOSSIBLE INTERVAL IS NOT A MEASUREMENT.
+ *
+ * Run 7acb0cc9 is on disk with every utterance `complete` and two of them
+ * reporting output audio BEFORE the speech that produced it ended:
+ *
+ *   utterance | speech_end      | audio_queued    | audio_queued − speech_end
+ *   u-1       | 1786148881751   | 1786148885175   | +3424 ms
+ *   u-2       | 1786148887949   | 1786148889180   | +1231 ms
+ *   u-3       | 1786148893911   | 1786148892476   | −1435 ms
+ *   u-4       | 1786148899148   | 1786148896784   | −2364 ms
+ *   ENVELOPE  | 1786148899148   | 1786148885175   | −13973 ms  (u-4's speech
+ *                                                   end against u-1's audio)
+ *
+ * Nearest-rank p50 over [−2364, −1435, 1231, 3424] is sorted[ceil(0.5·4)−1] =
+ * sorted[1] = −1435 ms — exactly the `-1.44 s` Results renders.
+ *
+ * TWO SEPARATE CLAIMS LIVE HERE, and neither is the fix for the other:
+ *
+ *  - THE BACKSTOP. A record carrying such an interval is refused AT WRITE TIME:
+ *    stored `failed`, reason `clock-inversion`, NAMING which utterances
+ *    inverted. Landing this alone would merely relabel the run and hide the
+ *    drift, which is why the runner's own half — never PRODUCING such a record
+ *    — is asserted in `src/client/replay/runner.test.ts`.
+ *
+ *  - THE ARITHMETIC. A non-positive latency sample is dropped from the
+ *    NUMERATOR AND THE DENOMINATOR of an aggregate, and the drop shows up as a
+ *    lower `n` rather than silently halving a percentile.
+ *
+ * WHAT IS NOT CLAIMED, because it is false: that 7acb0cc9 drags a live p50.
+ * It is `origin: 'manual'` and contributes ZERO samples today — `isAggregatableRun`
+ * is working, and this ticket is about a wrong number being DISPLAYED. The
+ * fixtures below are `origin: 'sweep'` precisely so the gate cannot pass them
+ * for the wrong reason.
+ */
+describe('TICKET 055b — a clock inversion is refused at write time and named', () => {
+  const INVERTED_SPEECH_END = [1786148881751, 1786148887949, 1786148893911, 1786148899148];
+  const INVERTED_AUDIO_QUEUED = [1786148885175, 1786148889180, 1786148892476, 1786148896784];
+  /** Hand-derived from the two columns above; u-3 and u-4 are impossible. */
+  const INVERTED_DELTAS = [3424, 1231, -1435, -2364];
+
+  const CATEGORIES = ['short-reply', 'numbers-dates', 'disfluency', 'proper-nouns'] as const;
+
+  /** The four records of 7acb0cc9, exactly as the runner wrote them. */
+  function driftedUtterances(): RunUtterance[] {
+    return INVERTED_SPEECH_END.map((speechEnd, i) => ({
+      utteranceId: `u-${i + 1}`,
+      index: i + 1,
+      category: CATEGORIES[i]!,
+      timings: { speech_end: speechEnd, audio_queued: INVERTED_AUDIO_QUEUED[i]! },
+      transcripts: { source: `src ${i}`, target: `tgt ${i}` },
+      cost: 0.01,
+      status: 'complete' as const,
+      errors: [],
+    }));
+  }
+
+  /** A gate-PASSING run that nonetheless holds two impossible intervals. */
+  function driftedRun(): Run {
+    return makeRun({
+      id: '7acb0cc9',
+      origin: 'sweep',
+      status: 'complete',
+      errors: [],
+      timings: { speech_end: 1786148899148, audio_queued: 1786148885175 },
+      utterances: driftedUtterances(),
+    });
+  }
+
+  it('the arithmetic that made this ticket: two of four deltas are negative and the p50 of the four is −1435', () => {
+    expect(INVERTED_AUDIO_QUEUED.map((a, i) => a - INVERTED_SPEECH_END[i]!)).toEqual(
+      INVERTED_DELTAS,
+    );
+    expect(1786148885175 - 1786148899148).toBe(-13973);
+    const sorted = [...INVERTED_DELTAS].sort((a, b) => a - b);
+    expect(sorted[Math.ceil(0.5 * sorted.length) - 1]).toBe(-1435);
+  });
+
+  it('a run holding an inverted utterance is STORED failed, with the clock-inversion reason', () => {
+    const ledger = new RunLedger();
+    const run = driftedRun();
+    expect(run.status).toBe('complete');
+    ledger.appendRun(run);
+
+    const stored = ledger.getRuns()[0]!;
+    expect(stored.status).toBe('failed');
+    expect(stored.errors.join(' | ')).toContain('clock-inversion');
+    // Still on record — a refused run is real information (PRD §12), and a
+    // relabel that dropped the evidence would hide the drift it exists to flag.
+    expect(ledger.getRuns()).toHaveLength(1);
+    expect(stored.utterances).toHaveLength(4);
+  });
+
+  it('the stored error names WHICH utterances inverted, not merely that one did', () => {
+    const ledger = new RunLedger();
+    ledger.appendRun(driftedRun());
+    const errors = ledger.getRuns()[0]!.errors.join(' | ');
+
+    // Golden eval 02: `inverted_utterances_named: 2`.
+    expect(errors).toContain('u-3');
+    expect(errors).toContain('u-4');
+    // ...and only those two: a verdict that named all four would lose the
+    // signal just as thoroughly as one that named none.
+    expect(errors).not.toContain('u-1');
+    expect(errors).not.toContain('u-2');
+  });
+
+  it('it contributes ZERO latency samples, through the status clause — no second gate', () => {
+    const ledger = new RunLedger();
+    ledger.appendRun(driftedRun());
+    const stored = ledger.getRuns()[0]!;
+
+    const contributed = Object.values(ledger.runAggregates().perArm).reduce((n, a) => n + a.n, 0);
+    expect(contributed).toBe(0);
+    expect(isAggregatableRun(stored)).toBe(false);
+    // THE EXCLUSION RIDES `status`, which `isAggregatableRun` ALREADY rejects.
+    // Force the status back and the same record passes the gate again: proof
+    // that no clause was added to the one place that decides aggregation
+    // (explicitly out of scope for this ticket).
+    expect(isAggregatableRun({ ...stored, status: 'complete' })).toBe(true);
+  });
+
+  it('a run whose intervals are all positive is untouched — the guard is not vacuous', () => {
+    const ledger = new RunLedger();
+    const healthy = makeRun({
+      id: 'healthy',
+      utterances: driftedUtterances().map((u, i) => ({
+        ...u,
+        // Every answer 500 ms AFTER its own speech end.
+        timings: { speech_end: INVERTED_SPEECH_END[i]!, audio_queued: INVERTED_SPEECH_END[i]! + 500 },
+      })),
+      timings: { speech_end: INVERTED_SPEECH_END[3]!, audio_queued: INVERTED_SPEECH_END[3]! + 500 },
+    });
+    ledger.appendRun(healthy);
+
+    const stored = ledger.getRuns()[0]!;
+    expect(stored.status).toBe('complete');
+    expect(stored.errors).toEqual([]);
+    expect(ledger.runAggregates().perArm['B']).toMatchObject({ n: 4, p50Ms: 500, p95Ms: 500 });
+  });
+});
+
+describe('TICKET 055b — a non-positive latency sample is dropped from the numerator AND the denominator', () => {
+  it('drops the impossible samples from the percentile pool and from n', () => {
+    const ledger = new RunLedger();
+    // Seven gate-passing sweep runs. Three are not measurements: two inverted
+    // and one claiming the answer began sounding at the instant the speech
+    // ended. Four are real: 500, 900, 1231, 3424.
+    for (const ms of [-1435, -2364, 0, 500, 900, 1231, 3424]) {
+      ledger.appendRun(runWithLatency(ms, { cost: 0.01 }));
+    }
+
+    const agg = ledger.runAggregates().perArm['B']!;
+    // Nearest-rank over the FOUR that survive: sorted [500, 900, 1231, 3424],
+    // p50 = sorted[ceil(0.5·4) − 1] = sorted[1] = 900,
+    // p95 = sorted[ceil(0.95·4) − 1] = sorted[3] = 3424.
+    expect(agg.n).toBe(4);
+    expect(agg.p50Ms).toBe(900);
+    expect(agg.p95Ms).toBe(3424);
+
+    // THE DENOMINATOR IS THE HALF THAT GETS FORGOTTEN. Keeping all seven in the
+    // pool gives p50 = sorted[ceil(3.5) − 1] = sorted[3] = 500 over n = 7 —
+    // the arithmetic this test exists to forbid.
+    expect(agg.n).not.toBe(7);
+    expect(agg.p50Ms).not.toBe(500);
+    expect(agg.p50Ms).not.toBe(-1435);
+
+    // The drop is REPORTED, not silent: every rep is still on record and the
+    // figure's own n is what fell.
+    expect(ledger.getRuns()).toHaveLength(7);
+  });
+
+  it('an arm whose every sample is non-positive reports no percentile at all, never a zero', () => {
+    const ledger = new RunLedger();
+    for (const ms of [-1435, -2364, 0]) ledger.appendRun(runWithLatency(ms, { cost: 0.01 }));
+
+    const agg = ledger.runAggregates().perArm['B'];
+    // Unmeasured is null and renders `not measured` — never a 0, never a
+    // negative figure dressed up as a latency.
+    expect(agg?.p50Ms ?? null).toBeNull();
+    expect(agg?.p95Ms ?? null).toBeNull();
+    expect(agg?.n ?? 0).toBe(0);
+    expect(ledger.getRuns()).toHaveLength(3);
   });
 });

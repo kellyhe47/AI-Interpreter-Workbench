@@ -1640,3 +1640,275 @@ describe('TICKET 061 — the abandoned-run stub records the languages of the run
     expect(Object.keys(stub)).not.toContain('direction');
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 055b — THE RUN ENVELOPE AND THE PER-UTTERANCE DRIFT ARE TWO DEFECTS.
+//
+// Run 7acb0cc9 renders `total -13973 ms` in Replay. It has TWO distinct causes
+// and fixing either alone leaves the other in place:
+//
+//  1. THE ENVELOPE. `runner.ts` sets the Run-level `speech_end` from the
+//     RECORDING (`t0 + recording.speechEndMs`, i.e. where the LAST utterance's
+//     speech ends) and the Run-level `audio_queued` from `firstAudioAt` (the
+//     FIRST utterance's audio). The two marks are on the SAME clock — this is
+//     last-wins vs first-wins at the envelope, not a two-clock problem, and a
+//     same-clock assertion would not catch it. Pairing utterance 4's speech end
+//     with utterance 1's audio is what produces `885175 − 899148 = −13973`.
+//
+//  2. THE DRIFT. Per utterance, `audio_queued − speech_end` is
+//     +3424 / +1231 / −1435 / −2364 ms: the later two are physically
+//     impossible on their OWN marks, independent of the envelope. Nearest-rank
+//     p50 over those four is −1435 ms — exactly the `-1.44 s` Results renders.
+//     The UI is faithfully reporting a real measurement defect.
+//
+// EVERY NUMBER BELOW IS HAND-DERIVED FROM THE RECORD ON DISK, never recomputed
+// from the model under test:
+//
+//   data/recordings/rec_msjjjc0m001_f1314d52.json — durationMs 20940,
+//     speechEndMs 19797, manifest trueSpeechEndMs 2400 / 8598 / 14560 / 19797
+//   data/ledger.jsonl run 7acb0cc9 — per-utterance speech_end
+//     …881751 / …887949 / …893911 / …899148 and audio_queued
+//     …885175 / …889180 / …892476 / …896784
+//
+//   t0            = 1786148881751 − 2400 = 1786148879351 (and the same t0
+//                   reproduces all four speech ends, so the anchor is sound)
+//   audio offsets = 885175 − 879351 = 5824, then 9829, 13125, 17433
+//   deltas        = 5824 − 2400  = +3424
+//                   9829 − 8598  = +1231
+//                   13125 − 14560 = −1435
+//                   17433 − 19797 = −2364
+//   envelope      = 5824 − 19797 = −13973   (utterance 1's audio against
+//                                            utterance 4's speech end)
+//
+// NOTE ON THE DELIBERATE SPLIT OF RESPONSIBILITY. The runner's half of the
+// write-time guard is stated here as the STRONG form — the Run it POSTs
+// carries no negative interval at any level — because a fix that leaves the
+// negative marks in place and merely relabels the run `failed` hides the drift
+// (the ticket says so explicitly). The BACKSTOP half, "a record that already
+// carries an inverted interval is refused, named and excluded", is asserted
+// against `RunLedger.appendRun` in `src/client/state/ledger.test.ts`, which is
+// the surface golden eval 02 drives.
+// ---------------------------------------------------------------------------
+
+/** The manifest of `rec_msjjjc0m001_f1314d52`, verbatim (ids shortened). */
+const DRIFT_MANIFEST: CorpusUtterance[] = [
+  { id: 'u-1', index: 1, category: 'short-reply', trueSpeechEndMs: 2400 },
+  { id: 'u-2', index: 2, category: 'numbers-dates', trueSpeechEndMs: 8598 },
+  { id: 'u-3', index: 3, category: 'disfluency', trueSpeechEndMs: 14560 },
+  { id: 'u-4', index: 4, category: 'proper-nouns', trueSpeechEndMs: 19797 },
+];
+
+const DRIFT_SPEECH_END_MS = [2400, 8598, 14560, 19797] as const;
+
+/** Offsets from t0 at which run 7acb0cc9's four answers really began sounding. */
+const DRIFT_AUDIO_AT_MS = [5824, 9829, 13125, 17433] as const;
+
+/** What that pairing produced, per utterance. Two of them are impossible. */
+const DRIFT_DELTAS_MS = [3424, 1231, -1435, -2364] as const;
+
+/** The headline figure: utterance 1's audio against utterance 4's speech end. */
+const DRIFT_ENVELOPE_MS = -13973;
+
+/**
+ * The Recording 7acb0cc9 replayed. `speechEndMs` is the LAST utterance's true
+ * speech end (19797) — which is exactly why the envelope's first-wins
+ * `audio_queued` reproduces −13973 against it.
+ */
+const DRIFT_RECORDING: Partial<Recording> = {
+  origin: 'corpus',
+  durationMs: 20_940,
+  speechEndMs: 19_797,
+  utterances: DRIFT_MANIFEST,
+  corpusVersion: 'corpus-v1',
+};
+
+/** One well-formed answer per utterance, its audio landing at `audioAtMs[utt]`. */
+function timelineScript(audioAtMs: readonly number[]): FixtureScriptEvent[] {
+  return audioAtMs.flatMap((audioAt, utt): FixtureScriptEvent[] => [
+    { at: audioAt - 20, type: 'sourceText', kind: 'final', text: `src ${utt}`, utt },
+    { at: audioAt, type: 'audio', pcm: ramp(240), utt },
+    { at: audioAt + 5, type: 'targetText', kind: 'final', text: `tgt ${utt}`, utt },
+    { at: audioAt + 10, type: 'utteranceComplete', record: { utt } },
+  ]);
+}
+
+/**
+ * A harness on the REAL clip length. 20940 ms at 1x is exactly 1047 frames, and
+ * the length is load-bearing: SEGMENTATION_IDLE_MS is armed when PACING ends,
+ * so a stub clip would finish the run 5 s in and the later answers — the
+ * inverted ones — would never be delivered at all.
+ */
+function timelineHarness(audioAtMs: readonly number[]) {
+  return makeHarness({
+    recording: DRIFT_RECORDING,
+    samples: ramp(FRAME_SAMPLES * 1047),
+    transportFactory: () =>
+      new FixtureTransport({
+        armId: 'fx',
+        kind: 'cascade',
+        script: timelineScript(audioAtMs),
+        costPerMinUsd: CORPUS_COST_PER_MIN,
+      }),
+  });
+}
+
+/** Pacing is 20.94 s of virtual time; every script above settles inside it. */
+async function runTimeline(h: Harness) {
+  const done = start(h);
+  await vi.advanceTimersByTimeAsync(30_000);
+  return done;
+}
+
+/** `audio_queued − speech_end` out of ONE timings map. Null if either is absent. */
+function pairedDelta(timings: Record<string, number | null>): number | null {
+  const speechEnd = timings.speech_end;
+  const audioQueued = timings.audio_queued;
+  if (typeof speechEnd !== 'number' || typeof audioQueued !== 'number') return null;
+  return audioQueued - speechEnd;
+}
+
+describe('TICKET 055b — the Run envelope pairs marks from ONE utterance', () => {
+  it('a run whose every per-utterance delta is POSITIVE cannot report a negative run-level delta', async () => {
+    // Each answer lands 50 ms after its own true speech end: +50, +50, +50, +50.
+    const audioAt = DRIFT_SPEECH_END_MS.map((ms) => ms + 50);
+    const h = timelineHarness(audioAt);
+    const { run, t0 } = await runTimeline(h);
+
+    // THE PREMISE, asserted rather than assumed — the test is not vacuous.
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(4);
+    expect(utterances.map((u) => pairedDelta(u.timings))).toEqual([50, 50, 50, 50]);
+
+    // THE CLAIM. Today the envelope pairs `t0 + 19797` (the Recording's speech
+    // end, i.e. the LAST utterance's) with `t0 + 2450` (the FIRST utterance's
+    // audio) and reports −17347 for a run in which nothing whatsoever inverted.
+    const envelope = pairedDelta(run.timings);
+    expect(envelope).not.toBeNull();
+    expect(envelope!).toBeGreaterThanOrEqual(0);
+    // ...and the same claim about the record that actually reaches the store.
+    expect(h.posted).toHaveLength(1);
+    expect(pairedDelta(h.posted[0]!.timings)!).toBeGreaterThanOrEqual(0);
+    // The marks are still real instants of THIS run, not a repaired constant.
+    expect(run.timings.audio_queued).not.toBeNull();
+    expect(audioAt.map((ms) => t0 + ms)).toContain(run.timings.audio_queued);
+  });
+
+  it('the envelope\'s two marks come from the SAME utterance — never last-wins against first-wins', async () => {
+    const audioAt = DRIFT_SPEECH_END_MS.map((ms) => ms + 50);
+    const h = timelineHarness(audioAt);
+    const { run, t0 } = await runTimeline(h);
+
+    const pairs = utterancesOf(run).map((u) => ({
+      speech_end: u.timings.speech_end,
+      audio_queued: u.timings.audio_queued,
+    }));
+    // Hand-derived, not recomputed from the run: t0 + the manifest anchors and
+    // t0 + the scripted audio instants.
+    expect(pairs).toEqual([
+      { speech_end: t0 + 2400, audio_queued: t0 + 2450 },
+      { speech_end: t0 + 8598, audio_queued: t0 + 8648 },
+      { speech_end: t0 + 14560, audio_queued: t0 + 14610 },
+      { speech_end: t0 + 19797, audio_queued: t0 + 19847 },
+    ]);
+
+    // THE CLAIM: whichever utterance the envelope speaks for, it speaks for ONE.
+    expect(pairs).toContainEqual({
+      speech_end: run.timings.speech_end,
+      audio_queued: run.timings.audio_queued,
+    });
+    // Named explicitly, because this exact mixture is the defect: utterance 4's
+    // speech end (t0 + 19797) against utterance 1's audio (t0 + 2450).
+    expect({
+      speech_end: run.timings.speech_end,
+      audio_queued: run.timings.audio_queued,
+    }).not.toEqual({ speech_end: t0 + 19797, audio_queued: t0 + 2450 });
+  });
+
+  it('run 7acb0cc9\'s own timeline no longer produces the headline −13973 ms', async () => {
+    const h = timelineHarness(DRIFT_AUDIO_AT_MS);
+    const { run, t0 } = await runTimeline(h);
+
+    // The reproduction is exact: the stored run reads
+    // speech_end 1786148899148, audio_queued 1786148885175, and
+    // 885175 − 899148 = −13973.
+    expect(pairedDelta(run.timings)).not.toBe(DRIFT_ENVELOPE_MS);
+    expect({
+      speech_end: run.timings.speech_end,
+      audio_queued: run.timings.audio_queued,
+    }).not.toEqual({ speech_end: t0 + 19797, audio_queued: t0 + 5824 });
+    // Deliberately NOT asserted here: that this envelope is non-negative. On
+    // THIS timeline the last utterance really did answer before its own speech
+    // end, so an honest same-utterance envelope may still be negative. That is
+    // the per-utterance defect below, and conflating the two is what lets a fix
+    // to one of them look complete.
+    expect(pairedDelta(h.posted[0]!.timings)).not.toBe(DRIFT_ENVELOPE_MS);
+  });
+});
+
+describe('TICKET 055b — no utterance may report audio BEFORE its own speech end', () => {
+  it('reproduces the recorded drift: +3424 / +1231 / −1435 / −2364 on the marks as assigned today', async () => {
+    // The falsification target, pinned as literals so the fix has something to
+    // move. This is the ONE assertion in the ticket that is expected to keep
+    // passing after the fix only in its `.not` form below.
+    const h = timelineHarness(DRIFT_AUDIO_AT_MS);
+    const { run, t0 } = await runTimeline(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(4);
+    // Ground truth, both sides, hand-derived from the two files on disk.
+    expect(utterances.map((u) => u.timings.speech_end)).toEqual(
+      DRIFT_SPEECH_END_MS.map((ms) => t0 + ms),
+    );
+    expect(DRIFT_AUDIO_AT_MS.map((a, i) => a - DRIFT_SPEECH_END_MS[i]!)).toEqual([
+      ...DRIFT_DELTAS_MS,
+    ]);
+  });
+
+  it('every stored utterance reports a NON-NEGATIVE delta, or no delta at all', async () => {
+    const h = timelineHarness(DRIFT_AUDIO_AT_MS);
+    const { run, t0 } = await runTimeline(h);
+
+    const utterances = utterancesOf(run);
+    // The attribution SURVIVES: dropping the records would hide the drift, and
+    // golden eval 02 requires the report to name which utterances inverted.
+    expect(utterances).toHaveLength(4);
+
+    // Every anchor is still manifest ground truth — the fix may not re-anchor
+    // an utterance onto the Recording, onto VAD, or onto a repaired constant.
+    const anchors = DRIFT_SPEECH_END_MS.map((ms) => t0 + ms);
+    for (const u of utterances) expect(anchors).toContain(u.timings.speech_end);
+
+    // Every audio mark is an instant at which output audio REALLY arrived, or
+    // null for "not measured" — never clamped to the anchor, never a zero.
+    const instants: Array<number | null> = [...DRIFT_AUDIO_AT_MS.map((ms) => t0 + ms), null];
+    for (const u of utterances) expect(instants).toContain(u.timings.audio_queued);
+
+    // THE CLAIM. Today utterances 3 and 4 report −1435 and −2364 ms.
+    const deltas = utterances.map((u) => pairedDelta(u.timings));
+    expect(deltas).not.toEqual([...DRIFT_DELTAS_MS]);
+    expect(deltas.filter((ms) => ms !== null && ms < 0)).toEqual([]);
+    // ...and not by nulling the whole run out: the two utterances that DID
+    // answer after their own speech end keep their measurement.
+    expect(deltas.filter((d) => d !== null).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('the Run the runner POSTs carries no negative interval at ANY level', async () => {
+    const h = timelineHarness(DRIFT_AUDIO_AT_MS);
+    await runTimeline(h);
+
+    expect(h.posted).toHaveLength(1);
+    const stored = h.posted[0]!;
+    // Unconditional on purpose: "no negative anywhere", collected rather than
+    // asserted behind an `if`, so an implementation that stops emitting records
+    // cannot make this pass by having nothing left to check (the length
+    // assertion below is the other half of that).
+    const intervals = [stored.timings, ...(stored.utterances ?? []).map((u) => u.timings)].map(
+      pairedDelta,
+    );
+    expect(intervals.filter((ms) => ms !== null && ms < 0)).toEqual([]);
+    // The evidence is still there to be read — a run that stored nothing is
+    // half of what made this invisible (PRD §12).
+    expect(stored.utterances).toHaveLength(4);
+    expect(stored.transcripts.target).toBe('tgt 3');
+  });
+});
