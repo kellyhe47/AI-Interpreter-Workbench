@@ -1,13 +1,13 @@
 ---
 id: 060
 title: The coverage card cites two commit hashes that do not exist — the app displays fabricated evidence
-status: pending
+status: done
 source: spec-audit + qa
 depends_on: []
 touches: [src/client/views/ResultsView.tsx, src/client/views/coverageCitations.ts, scripts/verify-citations.mjs, package.json]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — verified
@@ -174,3 +174,61 @@ Note `digits_rendered: 0` is literal: an unresolvable tile carries **no numerals
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2351 passing / 0 failing. **`npm run eval` is 13 pass / 0 fail — every golden case green.**
+
+Citations now live in `src/client/views/coverageCitations.ts` as typed
+`{ direction, commit, addedLines, note }`; the view renders fields and holds no hash literal.
+`scripts/verify-citations.mjs` resolves each non-null commit against real history.
+
+### The honest numbers, which contradict the fabricated card
+
+The card claimed *"one language constant, +11 lines"*. Neither `a4f21c` nor `9d0e77` resolves. What
+actually happened, verified by the orchestrator against git and now checked by the script on every
+run:
+
+| commit | insertions | what it did |
+|---|---|---|
+| `a6ca500` | **+694** | ticket 061 — the Replay target-language control; before it, no screen could ask for Cantonese |
+| `a57cd3a` | **+657** | ticket 062 — carried the chosen pair through both arms and both paths |
+
+**1351 whole-commit insertions for the first additional pair**, because the plumbing did not exist.
+Only the *next* pair is cheap — one entry in `pairs` (`sessionMachine.ts:216-219`) — and that entry
+carries `commit: null` / `addedLines: null` because nobody has done it. The fourth entry states that
+EN→YUE on Realtime has no mechanism at any price. `addedLines` is **whole-commit insertions, every
+path, tests included** — no exclusion rule, pinned by test and enforced by the script.
+
+Ticket 057 should carry this: the real onboarding-cost finding is the *shape* of the curve, not a
+single cheap number.
+
+### Adversarial review — RED, and the findings were about the GATE, not the card
+
+The card work was clean and the eval-executor edit was judged **strictly stronger** (it executes two
+`must_include` clauses that were previously dead code, and the old executor was proven *structurally
+unsatisfiable* — it asserted the whole coverage card contained no digits, which is only true if the
+card cites nothing). But three findings, all now closed:
+
+1. **The ticket's own sin, one level up.** The locked assertion "a verifier that reports and exits 0
+   is not a gate" was a regex for `process.exit(1)` — and the script's own JSDoc header **spelled
+   that literal call**. With every real exit deleted, the comment alone kept the suite green. Prose
+   standing in for evidence, in the gate for a ticket about prose standing in for evidence. The
+   header was reworded so the assertion bites.
+2. **The verifier was pinned only by grepping its own source**, so `catch { continue }` (silently
+   passing an unresolvable hash) and a regex-form test-file exclusion both survived. It is now an
+   **injectable seam** — `verifyCitations(citations, runGit)` is pure and unit-tested against a fake
+   git, with the CLI a thin wrapper. 16 tests, no `.git` required.
+3. **The gate was wired into nothing.** `verify-citations` appeared in no aggregate script, so
+   `commit: 'deadbee', addedLines: 694` passed 2335/2335 and 13/13. A fabricated citation reached
+   the screen with both declared gates green. Added `npm run check` =
+   `typecheck && test && eval && verify-citations`. **Verified by the orchestrator: `check` exits 1
+   on a fabricated citation and 0 when clean.**
+
+Deliberately NOT added to `build` — builds must stay runnable where `.git` is absent (container,
+tarball, shallow checkout), and failing a bundle for a missing object would be a failure unrelated to
+the bundle. `test` and `eval` stay git-free for the same reason.
+
+### New: `npm run check`
+
+One command that runs every gate. Use it before any claim that the project is green.

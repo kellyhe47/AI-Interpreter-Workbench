@@ -688,10 +688,12 @@ describe('ResultsView — coverage card rows are DIRECTIONS with per-stage cells
     }
   });
 
-  // TICKET 060 — REWRITTEN. This test previously pinned `commit a4f21c`,
-  // `+11 lines` and `commit 9d0e77` — two hashes that resolve to nothing in
-  // this repository. Pinning them made the suite GREEN over fabricated
-  // evidence, so the assertions could not survive the fix that removes them.
+  // TICKET 060 — REWRITTEN. This test previously pinned the card's two
+  // six-character citations and the `+N lines` beside them — hashes that
+  // resolve to nothing in this repository. Pinning them made the suite GREEN
+  // over fabricated evidence, so the assertions could not survive the fix that
+  // removes them. The hashes are NOT quoted here: "appear nowhere under src/"
+  // below holds every file under src/ to that rule, this one included.
   // What is still true and still worth pinning: the observation note, and that
   // the strip renders one tile per citation the module declares — the tile
   // CONTENT is now asserted against that module, below.

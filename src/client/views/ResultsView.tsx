@@ -80,7 +80,8 @@
  *   [data-direction="<slug>"]      coverage row (a DIRECTION, never a pair)
  *   [data-stage="realtime"|"stt"|"mt"|"tts"]  coverage per-stage cell
  *   [data-observation]             coverage per-cell observation note
- *   [data-time-to-add]             one of the three time-to-add tiles
+ *   [data-time-to-add]             one time-to-add tile per COVERAGE_CITATIONS
+ *                                  entry, in module order (ticket 060)
  *   [data-category-row][data-category="<category>"][data-n="<n>"]
  *                                  [data-direction="<direction>"]
  *   [data-category-direction]      ticket 061 — that row's direction, VISIBLE:
@@ -141,6 +142,11 @@ import {
   type WerAggregate,
   type WerCategoryRow,
 } from '../components/results/derive';
+// TICKET 060 — the onboarding-cost citations, as DATA. Every hash and every
+// diffstat on this card lives there and is checked by `npm run verify-citations`
+// against real git history; this file renders the fields and cites nothing of
+// its own.
+import { COVERAGE_CITATIONS, type CoverageCitation } from './coverageCitations';
 import { hydrateLedger, type LedgerHydrationSource } from '../state/hydrateLedger';
 import type { LiveContextPolicy, RunLedger } from '../state/ledger';
 
@@ -741,11 +747,30 @@ const COVERAGE_ROWS: ReadonlyArray<{
   },
 ];
 
-const TIME_TO_ADD: readonly string[] = [
-  'Spanish → English on cascade · commit a4f21c · +11 lines · one language constant',
-  'English → Cantonese on cascade · commit 9d0e77 · +14 lines · one voice id per direction',
-  'English → Cantonese on Realtime · no mechanism exists at any price',
-];
+/**
+ * TICKET 060 — THE TILES RENDER FIELDS, AND THIS FILE HOLDS NO HASH.
+ *
+ * They used to be three prose strings written here, two of them citing commits
+ * that do not exist in this repository. Nothing in a string can be checked, so
+ * the citations moved to `coverageCitations.ts` — a typed list that
+ * `scripts/verify-citations.mjs` resolves against real git history. What is
+ * left here is the rendering, and it BRANCHES ON `=== null`: an entry with no
+ * commit has no line count either, and its tile therefore emits no numeral an
+ * operator could read as a measurement (golden eval 10's `digits_rendered: 0`,
+ * taken literally). A `!` or a cast here would put the fabrication back.
+ */
+function citationEvidence(entry: CoverageCitation): string | null {
+  if (entry.commit === null || entry.addedLines === null) return null;
+  return `commit ${entry.commit} · +${entry.addedLines} lines`;
+}
+
+const timeToAddTileStyle: CSSProperties = {
+  background: 'var(--surface-sunken)',
+  borderRadius: 'var(--radius-md)',
+  padding: 'var(--space-3)',
+  color: 'var(--text-secondary)',
+  fontSize: 'var(--text-sm)',
+};
 
 function CoverageCard(): ReactElement {
   return (
@@ -786,26 +811,25 @@ function CoverageCard(): ReactElement {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
+          gridTemplateColumns: 'repeat(2, 1fr)',
           gap: 'var(--space-3)',
           marginTop: 'var(--space-3)',
         }}
       >
-        {TIME_TO_ADD.map((tile) => (
-          <div
-            key={tile}
-            data-time-to-add=""
-            style={{
-              background: 'var(--surface-sunken)',
-              borderRadius: 'var(--radius-md)',
-              padding: 'var(--space-3)',
-              color: 'var(--text-secondary)',
-              fontSize: 'var(--text-sm)',
-            }}
-          >
-            {tile}
-          </div>
-        ))}
+        {COVERAGE_CITATIONS.map((entry) => {
+          const evidence = citationEvidence(entry);
+          return (
+            <div key={entry.direction} data-time-to-add="" style={timeToAddTileStyle}>
+              <div>{entry.direction}</div>
+              {evidence === null ? null : (
+                <div data-mono="" style={monoStyle}>
+                  {evidence}
+                </div>
+              )}
+              <div style={{ marginTop: 'var(--space-2)' }}>{entry.note}</div>
+            </div>
+          );
+        })}
       </div>
     </Card>
   );

@@ -11,10 +11,12 @@
     "start": "NODE_ENV=production tsx src/server/index.ts",
     "export-results": "tsx scripts/export-results.mjs",
     "score-wer": "tsx scripts/score-wer.mjs",
+    "verify-citations": "tsx scripts/verify-citations.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "eval": "vitest run --config vitest.eval.config.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+    "check": "npm run typecheck && npm run test && npm run eval && npm run verify-citations"
   },
   "dependencies": {
     "express": "^4.21.2",

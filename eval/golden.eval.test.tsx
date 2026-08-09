@@ -37,6 +37,8 @@
  */
 
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -70,6 +72,10 @@ import {
   resetEntitySeq,
 } from '../src/client/components/results/testRecords';
 import ResultsView from '../src/client/views/ResultsView';
+// TICKET 060 — the citations the coverage card renders, read from the same
+// module the card and the verifier read. Restating the list here would let the
+// case pass over a card that renders something else entirely.
+import { COVERAGE_CITATIONS } from '../src/client/views/coverageCitations';
 import RunsList from '../src/client/components/replay/RunsList';
 import {
   advance,
@@ -699,10 +705,34 @@ const EXECUTORS: Record<string, Executor> = {
 
   /* ------------------------------------------------------------------ 10 -- */
   /**
-   * A cited commit is a claim that evidence was gathered. The hashes on the
-   * coverage card do not resolve (`git cat-file -t` fails on both — ticket
-   * 060), so the card is in its `on_unresolvable` branch and must render the
-   * illustrative pill and NO digits.
+   * A cited commit is a claim that evidence was gathered. The two hashes the
+   * card used to carry resolve to nothing (`git cat-file -t` fails on both —
+   * ticket 060), and `given.claims` still describes one of them: that claim is
+   * UNRESOLVABLE, so its tile must render illustrative and carry no digit.
+   *
+   * TICKET 060 — `digits_rendered: 0` IS SCOPED WHERE THE CASE SCOPES IT.
+   * This executor previously asserted it over the card's whole figure region,
+   * which was right only while EVERY citation was fabricated: a card with
+   * nothing real to cite renders nothing numeric. The field lives under
+   * `on_unresolvable`, and `result_type` is `coverage_tile` — it is a rule
+   * about the tile for a claim with nothing behind it, not about the card. Held
+   * card-wide it also contradicts this same case's `must_include`: a citation
+   * that resolves and whose `+N` matches the diffstat IS digits, so no
+   * implementation could satisfy both halves and the case would be
+   * unsatisfiable by construction — the exact failure the `digits_rendered`
+   * note in this file's header exists to prevent. The negative assertions are
+   * untouched and still run over the whole region: no fabricated hash and no
+   * invented `+N lines` may appear anywhere on the card.
+   *
+   * `commit_resolves_in_repo` / `line_count_matches_diff` bind a hash to real
+   * history, which needs git. This gate runs in jsdom and must stay runnable
+   * where `.git` is not (a shallow export, a packaged checkout), so the git
+   * half is executed by the checked-in `npm run verify-citations`
+   * (`scripts/verify-citations.mjs`) — asserted present here, and pinned in
+   * detail by ResultsView.test.tsx. What is executed here is everything a
+   * rendered surface can answer for: the shape of every cited hash, that each
+   * proven tile states the count the verifier checks, and that the unresolvable
+   * tile states none.
    */
   '10': (c) => {
     // The card only exists once the screen has something to show; the runs
@@ -718,7 +748,6 @@ const EXECUTORS: Record<string, Executor> = {
       `on_unresolvable.render must be "${String(at(c.expect, 'on_unresolvable.render'))}"`,
     ).not.toBeNull();
 
-    expect(num(c.expect, 'on_unresolvable.digits_rendered')).toBe(0);
     const region = rendered('the coverage tile figure region', figureText(coverage));
     const claims = (at(c.given, 'claims') as Array<Record<string, unknown>>) ?? [];
     for (const claim of claims) {
@@ -735,7 +764,69 @@ const EXECUTORS: Record<string, Executor> = {
         )} lines" comes from no real diffstat, so the tile must not state it`,
       ).toBe(false);
     }
-    expectNoDigits(region);
+
+    // One tile per declared citation, in module order — the tiles are the
+    // module rendered, so the assertions below are about shipped DOM.
+    const tiles = Array.from(coverage.querySelectorAll('[data-time-to-add]')).map((tile) =>
+      domText(tile),
+    );
+    expect(tiles.length, 'the card renders one tile per declared citation').toBe(
+      COVERAGE_CITATIONS.length,
+    );
+
+    for (const requirement of ids(c.expect, 'must_include')) {
+      if (requirement === 'commit_resolves_in_repo') {
+        // A six-character invention cannot even reach this shape; the object
+        // lookup itself is `npm run verify-citations`.
+        const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+          scripts?: Record<string, string>;
+        };
+        expect(
+          pkg.scripts?.['verify-citations'] ?? '',
+          'no checked-in gate resolves these hashes against git',
+        ).toContain('scripts/verify-citations.mjs');
+        for (const citation of COVERAGE_CITATIONS) {
+          if (citation.commit === null) continue;
+          expect(citation.commit, `"${citation.direction}" cites no resolvable hash`).toMatch(
+            /^[0-9a-f]{7,40}$/,
+          );
+        }
+        continue;
+      }
+      if (requirement === 'line_count_matches_diff') {
+        for (const citation of COVERAGE_CITATIONS) {
+          if (citation.commit === null) continue;
+          expect(
+            typeof citation.addedLines === 'number' && citation.addedLines > 0,
+            `"${citation.direction}" cites ${citation.commit} with no line count — the ` +
+              'dominant term would go unverified',
+          ).toBe(true);
+        }
+        continue;
+      }
+      throw new Error(`must_include: "${requirement}" is not executed by this case`);
+    }
+
+    expect(num(c.expect, 'on_unresolvable.digits_rendered')).toBe(0);
+    let unresolvable = 0;
+    for (const [index, citation] of COVERAGE_CITATIONS.entries()) {
+      const tile = tiles[index] ?? '';
+      if (citation.commit !== null) {
+        expect(tile, 'a proven tile states the hash the verifier resolves').toContain(
+          citation.commit,
+        );
+        expect(tile, 'a proven tile states the count the verifier checks').toContain(
+          `+${String(citation.addedLines)} lines`,
+        );
+        continue;
+      }
+      unresolvable += 1;
+      expectNoDigits(rendered(`the unresolvable "${citation.direction}" tile`, tile));
+    }
+    expect(
+      unresolvable,
+      'no citation is unresolvable, so on_unresolvable was never exercised',
+    ).toBeGreaterThan(0);
   },
 
   /* ------------------------------------------------------------------ 11 -- */
