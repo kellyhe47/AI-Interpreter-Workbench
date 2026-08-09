@@ -256,3 +256,64 @@ Then the adversarial reviewer, then commit. Same loop as 062 / 061 / 056.
 - **`src/core/protocol.test.ts:122-138`** — the "session.start has no extra field" guard is
   structurally vacuous (`Array<keyof SessionStart>` widens, so the `Exclude` is `never`
   unconditionally). Filed as a background task chip, not a ticket.
+
+## RUN COMPLETE — 2026-08-09
+
+Every ticket in the queue is closed. Final gates, run by the orchestrator:
+
+```
+npx vitest run   2426 passing / 0 failing   (from 2087 passing / 34 failing)
+npm run eval     13 pass / 0 fail           (from 8 pass / 5 fail)
+npm run check    exit 0                     (new: typecheck && test && eval && verify-citations)
+```
+
+| # | Ticket | Commit |
+|---|---|---|
+| 062 | language pair never reached the wire | `a57cd3a` |
+| 061 | Runs record no direction | `a6ca500` |
+| 056 | retain output audio (buildable half) | `3295e84` |
+| 064 | trimmed sessions pooled into default | `0769b4e` |
+| 055b | the −13973 ms envelope + drift | `8565e5c` |
+| 055a | ledger divergence + provenance floor | `929d27d` |
+| 059 | $0.000 on two surfaces | `2e4edc2` |
+| 060 | fabricated commit citations | `cf00b8a` |
+| 065+066 | sweep dialog + selection persistence | `8d8239d` |
+| 054+058 | delete the fabrications | `ae90c80` |
+| 057 | FINDINGS.md | `434dc9c` |
+
+Deferred, untouched: 050, 026, 053 (branch `tdd/053` intact and unmerged; its worktree removed).
+Closed invalid earlier: 022, 063.
+
+## What this run learned — carry it forward
+
+**A stable pass/fail COUNT is not evidence the same cases pass.** `npm run eval` read 8/5 before and
+after ticket 062 while its composition swapped (061 fixed case 11; 062's language contract broke case
+12). Reported as "unchanged" three times before being checked against a worktree at the baseline
+commit. Enumerate case ids, never totals.
+
+**Four eval cases turned out not to gate their own ticket** — 056/case 12, 055a/case 04, 059/case 07,
+060/case 10. Each passed or failed for a reason other than the defect it named. The locked unit tests
+carried the load every time. Do not treat the eval board as a completion signal on its own.
+
+**Three locked tests were logically unsatisfiable** and in each case the implementer stopped and said
+so rather than routing around it — 059's "no `$0.000` anywhere" over a ledger that also seeded a
+stamped zero; 065's AC2/AC6 pair; golden eval 04's fixture that never encoded its own `given`. That
+behaviour is worth more than the tests were.
+
+**The adversarial reviewer found something real on every single ticket** — 062:4, 061:2, 064:4,
+055b:5, 055a:6, 059:2, 060:3, 065+066:6. Almost all were *unpinned intent*: correct code with no test
+that bit. The two sharpest were the repo's own signature failure recurring verbatim
+(`browserDeps.ts`'s `selectionStore` deletable with a green suite) and a gate whose own JSDoc comment
+satisfied the regex asserting it was a gate.
+
+## Still open, and all of it is operator time — not code
+
+- ES takes 1–3 — blocked on a Spanish-speaking coworker, the only externally-blocked item
+- YUE takes 1–3 — blocked on nobody, simply not recorded
+- One 5-minute Live session per arm — the rubric's stability benchmark, never once executed
+- **Listening to EN→YUE output** — audible only, and the project's most distinctive expected finding
+- A blind-compare pair has never been scored; WER has no samples behind it
+- Re-running the three EN takes is now SAFE and worth more than any further code change: 062 means
+  Arm A no longer answers in German, and cascade no longer defaults to Spanish
+
+`FINDINGS.md` is written as a fill-in — every hole names the exact run that closes it.
