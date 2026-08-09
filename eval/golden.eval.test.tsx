@@ -755,11 +755,18 @@ const EXECUTORS: Record<string, Executor> = {
   '12': async (c) => {
     const armC = String(at(c.given, 'run.armTag'));
     expect(armC).toBe('C');
+    // TICKET 056 — the language triple is read OFF THE CASE, not restated here.
+    // Ticket 062 made a run that names no target language a refusal, so a
+    // `given` that omits `targetLanguage` describes a run that never starts —
+    // and the case would then be red for a reason that has nothing to do with
+    // retained audio. `EN↔YUE` + `en→yue` makes Cantonese the only coherent
+    // target; it lives in the JSON so the `given` is well-formed on its face.
     const config = {
       architecture: 'cascade' as const,
       providers: { ...ARM_C_TRIPLE },
-      languagePair: 'EN↔YUE',
-      direction: 'en→yue',
+      languagePair: String(at(c.given, 'run.languagePair')),
+      direction: String(at(c.given, 'run.direction')),
+      targetLanguage: String(at(c.given, 'run.targetLanguage')),
     };
     const first = await runRealOnce(config, { idPrefix: 'run-armc' });
     const second = await runRealOnce(

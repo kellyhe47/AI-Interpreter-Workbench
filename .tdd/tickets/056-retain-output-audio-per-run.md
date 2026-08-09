@@ -1,11 +1,11 @@
 ---
 id: 056
 title: Retain output audio per run — without it the project's most distinctive finding cannot be produced
-status: pending
+status: blocked-on-operator
 source: spec-audit + operator (Cantonese track kept)
 depends_on: []
 touches: [src/client/replay/runner.ts, src/server/routes/runs.ts, src/client/components/replay/RunsList.tsx, src/client/components/replay/BlindCompare.tsx]
-iterations: 0
+iterations: 1
 test_files: []
 branch: ""
 ---
@@ -265,3 +265,65 @@ ones this ticket needs:
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09) — buildable half done; real-data half remains Kelly's
+
+### The premise was wrong, and the correction matters
+
+The handoff listed golden eval case 12 as a failure owned by this ticket. **It was passing at
+baseline** (`3637c6f`) — verified by running the eval in a worktree at that commit. Baseline failures
+were 01, 02, 04, 10, **11**, not 12.
+
+Case 12 went red *during this run*, when ticket 062 introduced the contract that a run naming no
+target language is refused. Case 12's config declared `EN↔YUE` / `en→yue` and no `targetLanguage`, so
+`runRealOnce` correctly stored `failed`. The fixture was stale under a newer, correct contract — the
+product was never broken. Repaired by putting the language triple in the JSON `given` and having the
+executor read it. **The `expect` block was not touched**, and case 12 goes green because its `given`
+became well-formed, NOT because the product changed.
+
+### The wiring is genuinely pinned — 20 mutations, none survived
+
+This ticket exists because the audio path was "landed and green but never exercised", which is this
+repo's #1 historical failure mode. It was mutation-tested end to end: upload function, call site,
+assignment, Arm A media-tap fallback, WAV sample rate, play gate (constant and inverted), server
+route, the Web Audio `connect()` graph, the tap's zero gain, Live's absence of a tap, the empty-audio
+guard, upload-failure handling, the REST client, storage layout drift, `takeOutputAudio`, the
+speaking-window gate, cascade PCM buffering, cancelled-run upload, the `NO_AUDIO` literal, and the
+WAV content type. **Every one went red.** All four "already satisfied" claims are real, including the
+two flagged as historically hollow (the tap is asserted on the *constructed transport*, and the
+`connect()` graph is asserted).
+
+### But case 12 itself was a weak gate — now fixed
+
+The eval harness substitutes its own `RunsClient` and never touches the server, so case 12 stayed
+GREEN under a wrong sample rate, a constant play gate, a server that writes nothing, and a client
+that fabricates the path. It could only ever fail on the runner's *decision* to upload, never on the
+audio — while this ticket's own AC demands every `.out.wav` read 24000 Hz / 1 ch / 16-bit.
+
+`eval/harness/replay.ts`'s fake now refuses what the real `POST /api/runs/:id/audio` refuses: it
+parses with `readWav` (enforcing PCM/mono/16-bit) and asserts the rate against `SAMPLE_RATE`. Verified
+independently by the orchestrator: writing 16000 Hz now turns case 12 red.
+
+### One claim in this ticket's own context table is wrong
+
+It says `no output audio stored` "is not a literal … do not grep for the sentence." It **is** a
+literal — `RunsList.tsx:60`, `const NO_AUDIO = 'no output audio stored'`. The `must_not_contain`
+assertion is real and reachable.
+
+### Flagged, not changed
+
+`ReplayView.tsx:637` selects blind-compare pairs on `status === 'complete'` alone, with no
+stored-audio predicate, so BlindCompare can offer a play button for a run with no `.out.wav`. This
+may be deliberate — gating inside BlindCompare would leak which sample is which arm and deanonymize
+the comparison — and a 404 already surfaces as `[data-replay-playback-notice]`. Adding a predicate
+would also violate this ticket's own "no second has-audio predicate" rule. Kelly's call.
+
+### STILL OPEN — blocked on Kelly, not on code
+
+- At least one NEW run on disk carrying `outputAudioPath` + a non-empty `.out.wav` (today: 0 of 3)
+- A stored Arm A run and a stored Arm B/C run, each with non-empty audio (different capture paths)
+- The Arm A file is not mostly silence (duration ≤ 2× cascade's, < the Recording's `durationMs`)
+- A playable Arm A vs Arm B blind-compare pair, scored into `data/comparisons.jsonl`
+- A playable EN→YUE pair — needs a YUE Recording, and `data/recordings/` holds only 3 EN takes
+- **The listen itself.** Whether the TTS speaks Cantonese or Mandarin on EN→YUE. No test can produce
+  it, and PRD §15A calls it the project's most distinctive finding.

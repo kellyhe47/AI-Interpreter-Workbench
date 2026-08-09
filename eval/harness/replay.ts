@@ -16,7 +16,7 @@
 import { vi } from 'vitest';
 
 import { SAMPLE_RATE } from '../../src/core/protocol';
-import { writeWav } from '../../src/harness/wav';
+import { readWav, writeWav } from '../../src/harness/wav';
 import { FRAME_SAMPLES } from '../../src/client/replay/pacer';
 import { ApiError, type RecordingsClient, type RunsClient } from '../../src/client/replay/recordingsClient';
 import { runOnce, type RunOnceConfig, type RunnerDeps } from '../../src/client/replay/runner';
@@ -87,10 +87,35 @@ export function makeReplayHarness(opts: ReplayHarnessOptions = {}) {
     },
     list: async () => posted,
     getAudio: async () => new Uint8Array(0),
-    uploadAudio: async (id: string) =>
-      opts.uploadReportsNothing
-        ? { id, outputAudioPath: undefined as unknown as string, bytes: 0 }
-        : { id, outputAudioPath: `runs/${id}.out.wav`, bytes: 0 },
+    // TICKET 056 — THE FAKE STORE REFUSES WHAT THE REAL ONE WOULD REFUSE.
+    //
+    // Reporting a path unconditionally is what made case 12 unable to fail for
+    // any AUDIO reason: the runner could hand this seam a 16 kHz file, a stereo
+    // file or an empty buffer and the case would still count a playable pair.
+    // That is the ticket's own criterion ("every stored .out.wav header reads
+    // 24000 Hz, 1 channel, 16-bit, so blind compare cannot tell the arms apart
+    // by format") going unchecked at the one gate that claims to check it.
+    //
+    // So the bytes are PARSED, exactly as `POST /api/runs/:id/audio` parses
+    // them before writing. `readWav` already refuses non-PCM, non-mono and
+    // non-16-bit; the sample RATE is the one thing it reports rather than
+    // enforces, so it is asserted here against the single source of truth.
+    // A throw here is not a harness crash: `uploadOutputAudio` catches it,
+    // pushes the reason onto `run.errors` and leaves `outputAudioPath` unset —
+    // which is precisely the shape the case's `must_include` already tests.
+    uploadAudio: async (id: string, wavBytes: Uint8Array) => {
+      if (opts.uploadReportsNothing) {
+        return { id, outputAudioPath: undefined as unknown as string, bytes: 0 };
+      }
+      const { samples, rate } = readWav(wavBytes);
+      if (rate !== SAMPLE_RATE) {
+        throw new Error(`stored output audio is ${rate} Hz, not ${SAMPLE_RATE} Hz`);
+      }
+      if (samples.length === 0) {
+        throw new Error('stored output audio is empty — an empty WAV is not a playable artifact');
+      }
+      return { id, outputAudioPath: `runs/${id}.out.wav`, bytes: wavBytes.length };
+    },
   };
 
   const deps: RunnerDeps = {
