@@ -355,3 +355,158 @@ describe('deriveLiveModel — the context-policy axis (TICKET 064)', () => {
     expect(model.empty).toBe(true);
   });
 });
+
+/* ========================================== TICKET 064 — ADVERSARIAL REVIEW */
+
+/**
+ * FINDING 3 — `sessionsWithoutContextPolicy` WAS NEVER ASSERTED ON ITS NONZERO
+ * PATH.
+ *
+ * The tests above pin that a policy-less session opens no column and joins none.
+ * NOTHING pinned the number the card then prints. Replacing the count with a
+ * constant (`count > 0 ? 99 : 0`) left the whole suite green, and the card
+ * published "99 sessions excluded from every column" — a fabricated count, on
+ * the one line whose entire job is to size the hole in the evidence, in the
+ * ticket whose thesis is that a wrong number is worse than a missing one.
+ *
+ * The count is a MEASUREMENT of the ledger, so it is asserted the way every
+ * other measurement here is: against hand-counted ledgers whose answers differ.
+ */
+
+/** A pre-012 session under a caller-chosen id, so a ledger can hold several. */
+function prePolicySessionNamed(id: string) {
+  return makeLiveSessionEntity({
+    id,
+    architecture: 'realtime',
+    providerTriple: undefined,
+    contextPolicy: undefined,
+    modelSnapshots: { realtime: REALTIME_MODEL },
+    utterances: [utterance(`${id}-u1`, realtimeMarks(8_000))],
+    latency: { p50: 8_000, p95: 8_000, driftMinute1ToEnd: null },
+    stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+  });
+}
+
+describe('deriveLiveModel — the exclusion COUNT is derived, not a flag (TICKET 064)', () => {
+  it('DOMINANT — one policy-less session among real ones counts exactly 1', () => {
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    ledger.appendLiveSession(prePolicySession());
+
+    // The card prints this number verbatim. Any constant on the nonzero path
+    // publishes a count nobody measured.
+    expect(deriveLiveModel(ledger).sessionsWithoutContextPolicy).toBe(1);
+  });
+
+  it('counts each excluded session — two of them read 2, not "some"', () => {
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    ledger.appendLiveSession(prePolicySession());
+    ledger.appendLiveSession(prePolicySessionNamed('live-pre-012-b'));
+
+    const model = deriveLiveModel(ledger);
+    expect(model.sessionsWithoutContextPolicy).toBe(2);
+    // ...and the columns are untouched by either of them.
+    expect(model.columns.filter((c) => c.arm === 'A')).toHaveLength(1);
+    expect(model.columns.find((c) => c.arm === 'A')!.utterancesCompleted).toBe(3);
+  });
+
+  it('a ledger of NOTHING BUT policy-less sessions counts all of them', () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(prePolicySession());
+    ledger.appendLiveSession(prePolicySessionNamed('live-pre-012-b'));
+
+    const model = deriveLiveModel(ledger);
+    expect(model.empty).toBe(true);
+    // The count survives the empty state — it is what the empty card discloses.
+    expect(model.sessionsWithoutContextPolicy).toBe(2);
+  });
+
+  it('GUARD: a ledger where every session declares a policy counts 0', () => {
+    // Otherwise the assertions above are satisfiable by a nonzero constant.
+    expect(deriveLiveModel(policyLedger()).sessionsWithoutContextPolicy).toBe(0);
+    expect(deriveLiveModel(new RunLedger()).sessionsWithoutContextPolicy).toBe(0);
+  });
+});
+
+/**
+ * FINDING 1 — THE ORDER OF THE POLICY CHECK AGAINST THE REALNESS GATE.
+ *
+ * `deriveLiveModel` runs `isMeasuredLiveSession` FIRST and only then reads
+ * `contextPolicy`. `deriveLive.fixture.test.ts` and `deriveLive.empty.test.ts`
+ * carry comments asserting that order — but every session they build declares a
+ * policy (`makeLiveSessionEntity` auto-assigns one from the architecture), so
+ * the count is 0 under BOTH orderings and neither test could see the swap.
+ *
+ * Swapped, a `?fixture=1` soak session stored before ticket 012 would be
+ * disclosed on the card as an evidence hole — "1 session excluded: no context
+ * policy recorded" — when it is really refused for being FABRICATED. That is a
+ * false statement about why evidence is missing, and it makes the policy axis a
+ * SECOND gate: `isAggregatableLiveSession` is the one gate, and this is the
+ * assertion that keeps it that way.
+ *
+ * The two shapes live with their own gates (fixture → deriveLive.fixture.test.ts,
+ * empty → deriveLive.empty.test.ts). Pinned here as well because this is where
+ * the count is otherwise specified: refused BEFORE the policy is read.
+ */
+describe('deriveLiveModel — the realness gate runs BEFORE the policy is read (TICKET 064)', () => {
+  const FIXTURE_TRIPLE = { stt: 'fixture', mt: 'fixture', tts: 'fixture' };
+
+  it('DOMINANT — a pre-012 FIXTURE session is a fixture exclusion, never a policy one', () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(
+      makeLiveSessionEntity({
+        id: 'live-fixture-pre-012',
+        // Explicitly absent: `makeLiveSessionEntity` only auto-assigns when the
+        // key is missing from overrides, so this is a genuine pre-012 session.
+        contextPolicy: undefined,
+        providerTriple: { ...FIXTURE_TRIPLE },
+        modelSnapshots: { ...FIXTURE_TRIPLE },
+        utterances: [utterance('lu-fx-1', cascadeMarks(980))],
+        latency: { p50: 980, p95: 980, driftMinute1ToEnd: 0 },
+        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+      }),
+    );
+
+    // Reading the policy first would count 1 here and the card would say the
+    // session was dropped for declaring no policy. It was dropped for being
+    // fabricated, and PRD §8 does not want that renamed.
+    expect(deriveLiveModel(ledger)).toEqual({
+      columns: [],
+      empty: true,
+      sessionsWithoutContextPolicy: 0,
+    });
+  });
+
+  it('a pre-012 session that produced NOTHING is an empty-session exclusion, not a policy one', () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(
+      makeLiveSessionEntity({
+        id: 'live-empty-pre-012',
+        contextPolicy: undefined,
+        architecture: 'realtime',
+        providerTriple: undefined,
+        modelSnapshots: { realtime: REALTIME_MODEL },
+        utterances: [],
+        latency: { p50: null, p95: null, driftMinute1ToEnd: null },
+        cost: { totalUsd: 0, perMinuteMinute1: null, perMinuteFinalMinute: null },
+        stability: { utterancesCompleted: 0, disconnects: 0, heapStart: null, heapEnd: null },
+      }),
+    );
+
+    expect(deriveLiveModel(ledger)).toEqual({
+      columns: [],
+      empty: true,
+      sessionsWithoutContextPolicy: 0,
+    });
+  });
+
+  it('CONTROL — the same session, REAL and with utterances, IS a policy exclusion', () => {
+    // Without this the two assertions above are satisfiable by never counting
+    // anything. The only difference from the fixture case is the realness gate.
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(prePolicySessionNamed('live-pre-012-control'));
+
+    expect(deriveLiveModel(ledger).sessionsWithoutContextPolicy).toBe(1);
+  });
+});

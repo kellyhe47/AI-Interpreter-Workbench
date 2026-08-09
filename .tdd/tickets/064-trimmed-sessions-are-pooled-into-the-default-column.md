@@ -1,13 +1,13 @@
 ---
 id: 064
 title: "REALTIME · TRIMMED renders empty while its samples are silently pooled into the DEFAULT column"
-status: pending
+status: done
 source: verification (corrects the spec audit's P1-6)
 depends_on: []
 touches: [src/client/views/ResultsView.tsx, src/client/components/results/derive.ts]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — and the mechanism is worse than reported
@@ -224,3 +224,69 @@ AudioContext/MediaStream/RTCPeerConnection, so never construct one.
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2208 passing / 0 failing. Eval unchanged at 9 pass / 4 fail (01, 02, 04 → 055; 10 → 060).
+
+Both halves fixed — either alone would have left the screen unchanged:
+
+- `deriveLiveModel` groups by the pair, key `contextPolicy === 'n/a' ? arm : ${arm}·${contextPolicy}`.
+  `LiveArmColumn` carries `contextPolicy` as a first-class field; `LiveModel` gains
+  `sessionsWithoutContextPolicy`.
+- `LIVE_COLUMNS` entries bind `{arm, contextPolicy}` — `arm: null` is gone, so there is nothing left
+  to coerce — and `columnFor` matches the pair.
+- `undefined` policy → counted and excluded, checked **after** `isMeasuredLiveSession` so the realness
+  gate stays the one gate and the new key never becomes a second way into the model.
+- `'n/a'` → a positive statement that the arm has no policy axis; cascade stays one column.
+
+### The number this actually changes
+
+Recomputed independently from `data/live-sessions.jsonl` by the reviewer, replicating
+`anchoredLatencyMs` and nearest rank:
+
+| column | sessions | n | p50 | p95 |
+|---|---|---|---|---|
+| `realtime · default` | 1 | 7 | **260 ms** | 512 ms |
+| `realtime · trimmed` | 2 | 8 | **423 ms** | 449 ms |
+| pooled (the bug) | 3 | 15 | 399 ms | 512 ms |
+| `cascade` | 5 | 16 | 1487 ms | 2858 ms |
+
+**`realtime · default` moves 399 → 260 ms.** Two riders for the write-up: p95 is *unchanged* by the
+fix (512 either way — the pooled p95 lands on the default session's own tail), and all 8 stored
+sessions declare a policy, so the exclusion note is dormant on real data.
+
+### Adversarial review — RED, four survivors, all closed
+
+The headline defect is dead: every mutation reintroducing pooling, the `arm: null` blank, the cast
+shortcut, the `?? 'default'` naive fix, and a partial "trimmed fills but default stays pooled" went
+red on the DOMINANT assertions. Four survived, all in the disclosure/labelling periphery, all
+dormant on today's data — but three of them let the card print something false:
+
+1. **Nothing pinned a header LABEL to its column KEY.** Swapping the two `label` strings left the
+   suite green while the card rendered `realtime · trimmed` above the default figures and vice versa
+   — this ticket's own failure mode, a number under the wrong policy name. Every DOM accessor
+   addresses cells by `data-live-column`, so nothing could see it.
+2. **The exclusion COUNT was never asserted.** `count > 0 ? 99 : 0` stayed green — the card could
+   print "99 sessions excluded", a fabricated number, in a ticket whose thesis is that a wrong
+   number is worse than a missing one. Singular/plural now pinned too.
+3. **The exclusion note on the `model.empty` branch** could be deleted with the suite green.
+4. **The gate ORDERING was unverified** while two test files carried comments asserting it. The
+   fixture auto-assigns `contextPolicy`, so the count was 0 under both orderings. A pre-012
+   `?fixture=1` session would have been disclosed as an evidence hole when it is really refused for
+   being fabricated.
+
+19 assertions added, each watched fail under its mutation first. **No production change was needed
+for any of the four** — the code was already correct; nothing bit.
+
+Not a finding, deliberately left alone: dropping the `'n/a'` special case from the key is an
+**equivalent mutant** — both forms are injective over `(arm, policy)`, so no ledger can distinguish
+them and no test should be written.
+
+### Residual hole — flagged, not fixed
+
+`resultsAreEmpty` (`ResultsView.tsx:1100-1106`) blanks the whole view when the live model is empty
+and every recording is fixture-only. So a user whose **only** Live evidence is pre-012 policy-less
+sessions, with no Replay runs, sees the global "No runs recorded" state with **no disclosure at
+all**. The count derives correctly; nothing renders it. Fixing it means changing `resultsAreEmpty`
+or the global empty state — a production decision outside this ticket.

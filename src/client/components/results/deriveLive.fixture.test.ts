@@ -80,6 +80,26 @@ const FIXTURE_SHAPES: ReadonlyArray<{ name: string; overrides: Partial<LiveSessi
       modelSnapshots: { realtime: 'fixture' },
     },
   },
+  /**
+   * TICKET 064 — THE ROW THAT MAKES THE COMMENT BELOW LOAD-BEARING.
+   *
+   * Every other row here declares a context policy: `makeLiveSessionEntity`
+   * auto-assigns one from the architecture, so `sessionsWithoutContextPolicy`
+   * is 0 whether the realness gate runs before the policy check or after it,
+   * and the assertion could not see the difference. Only a session that
+   * declares NO policy AND is fabricated separates the two orderings.
+   *
+   * `contextPolicy: undefined` is honoured rather than auto-filled (the helper
+   * checks `'contextPolicy' in overrides`), so this is a genuine `?fixture=1`
+   * soak session stored before ticket 012 — and the card must call it what it
+   * is. Read policy-first it would be disclosed as "1 session excluded: no
+   * context policy recorded", which is a false account of why the evidence is
+   * missing: it was refused for being FABRICATED (PRD §8).
+   */
+  {
+    name: 'a pre-012 fixture session that declares no context policy at all',
+    overrides: { contextPolicy: undefined },
+  },
 ];
 
 describe('ticket 018 — deriveLiveModel excludes fixture-sourced LiveSessions', () => {
@@ -90,8 +110,17 @@ describe('ticket 018 — deriveLiveModel excludes fixture-sourced LiveSessions',
       ledger.appendLiveSession(fixtureLiveSession(overrides));
 
       // Byte-for-byte the same model an untouched ledger derives (locked in
-      // derive.test.ts: `{ columns: [], empty: true }`), not a zeroed column.
-      expect(deriveLiveModel(ledger)).toEqual({ columns: [], empty: true });
+      // derive.test.ts), not a zeroed column.
+      //
+      // TICKET 064 — `sessionsWithoutContextPolicy` is 0: a fixture session is
+      // refused by the REALNESS gate before its context policy is ever read, so
+      // it is not disclosed as a policy exclusion. The new group key is not a
+      // second way into the model.
+      expect(deriveLiveModel(ledger)).toEqual({
+        columns: [],
+        empty: true,
+        sessionsWithoutContextPolicy: 0,
+      });
       expect(deriveLiveModel(ledger)).toEqual(deriveLiveModel(new RunLedger()));
     },
   );

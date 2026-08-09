@@ -106,7 +106,8 @@
  *   (PRD §9), its scores are `wer: null`, they are counted in `notApplicable`
  *   and they NEVER enter the mean. An arm whose every sample is not applicable
  *   reports `WER_NOT_APPLICABLE_CELL`, never '0.0%'.
- * - deriveLiveModel(ledger): one column per derived arm over LiveSessions.
+ * - deriveLiveModel(ledger): one column per derived (arm, contextPolicy) pair
+ *   over LiveSessions (TICKET 064 — the arm alone pooled two policies).
  *   wer is ALWAYS null (PRD 7).
  * - formatMs(ms): null -> '—'; ms < 10000 -> seconds with 2 decimals + ' s';
  *   otherwise mm:ss with zero-padded seconds.
@@ -142,6 +143,7 @@ import {
   isRealRun,
   runArmTag,
   runSamples,
+  type LiveContextPolicy,
   type LiveSession,
   type Run,
   type RunLedger,
@@ -470,9 +472,27 @@ export interface ComparisonModel {
   provenanceB: Provenance;
 }
 
-/** One column of the conversation-length screen. Sourced from LiveSessions. */
+/**
+ * One column of the conversation-length screen. Sourced from LiveSessions.
+ *
+ * TICKET 064 — A COLUMN IS A PAIR `(arm, contextPolicy)`, NOT AN ARM. Two
+ * sessions can be identical in configuration and still not be commensurable:
+ * a trimmed-context realtime take is `architecture: realtime` with the same
+ * `modelSnapshots.realtime`, so it derives arm A exactly like a default-context
+ * take, and grouping on the arm alone pooled the two under `realtime · default`
+ * — a p50 that was not wrong-by-omission but WRONG, and it is the number §7's
+ * controllability claim rests on. `arm` therefore no longer identifies a
+ * column: `arm` and `contextPolicy` together do.
+ */
 export interface LiveArmColumn {
   arm: ArmTag;
+  /**
+   * The context policy every session behind this column ran. `'n/a'` says the
+   * arm has NO policy axis (cascade replays no context by construction), which
+   * is why it collapses to a single column rather than opening a
+   * `cascade · n/a` fourth one.
+   */
+  contextPolicy: LiveContextPolicy;
   label: string;
   sessions: number;
   utterancesCompleted: number;
@@ -501,6 +521,16 @@ export interface LiveArmColumn {
 export interface LiveModel {
   columns: LiveArmColumn[];
   empty: boolean;
+  /**
+   * TICKET 064 — measured sessions that declared NO context policy at all
+   * (`contextPolicy` is optional at `ledger.ts:339` so sessions stored before
+   * ticket 012 still parse). They are counted in NO column: `undefined` is the
+   * absence of a fact, not a synonym for `'default'`, and defaulting them in
+   * would put unknown-context turns behind the default-context p50 — the very
+   * pooling this ticket exists to remove. Excluding them silently would be a
+   * second dishonesty, so the card DISCLOSES this count.
+   */
+  sessionsWithoutContextPolicy: number;
 }
 
 /* ------------------------------------------------------- shared v2 helpers -- */
@@ -1266,25 +1296,55 @@ function isMeasuredLiveSession(ledger: RunLedger, session: LiveSession): boolean
  * (`isAggregatableLiveSession`). A ledger holding nothing but empty sessions
  * therefore derives that same explicit empty state rather than a column of
  * zeros: a zero is not a measurement.
+ *
+ * TICKET 064 — THE GROUP IS THE PAIR `(arm, contextPolicy)`. Arm membership is
+ * still DERIVED (`liveArmTag`, never a declared field), but the arm alone did
+ * not identify a comparable set of turns: a trimmed-context realtime take
+ * derives arm A exactly like a default-context one, so its samples were pooled
+ * into `realtime · default`, and that column's p50 silently answered for
+ * "realtime, all policies". Two policies on one arm are now two columns.
+ *
+ * The two non-obvious cases, and they are NOT the same case:
+ *  - `'n/a'` is a POSITIVE statement that the arm has no policy axis. Cascade
+ *    replays no context by construction, so keying its column on the pair would
+ *    fragment nothing today but would name a knob that does not exist. Its key
+ *    is the arm alone, and a second cascade take joins the one cascade column.
+ *  - `undefined` is the ABSENCE of the fact (the field is optional so pre-012
+ *    sessions still parse). It opens no column and joins none — see
+ *    `LiveModel.sessionsWithoutContextPolicy`, which the card discloses.
  */
 export function deriveLiveModel(ledger: RunLedger): LiveModel {
-  const order: ArmTag[] = [];
-  const groups = new Map<ArmTag, LiveSession[]>();
+  interface LiveGroup {
+    arm: ArmTag;
+    contextPolicy: LiveContextPolicy;
+    sessions: LiveSession[];
+  }
+  const order: string[] = [];
+  const groups = new Map<string, LiveGroup>();
+  let sessionsWithoutContextPolicy = 0;
 
   for (const session of ledger.getLiveSessions()) {
     if (!isMeasuredLiveSession(ledger, session)) continue;
-    const arm = liveArmTag(session);
-    let group = groups.get(arm);
-    if (!group) {
-      group = [];
-      groups.set(arm, group);
-      order.push(arm);
+    const contextPolicy = session.contextPolicy;
+    if (contextPolicy === undefined) {
+      sessionsWithoutContextPolicy += 1;
+      continue;
     }
-    group.push(session);
+    const arm = liveArmTag(session);
+    // 'n/a' means the arm has no policy axis, so the policy is not part of what
+    // distinguishes this column from another on the same arm.
+    const key = contextPolicy === 'n/a' ? arm : `${arm}·${contextPolicy}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { arm, contextPolicy, sessions: [] };
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.sessions.push(session);
   }
 
-  const columns = order.map((arm): LiveArmColumn => {
-    const sessions = groups.get(arm)!;
+  const columns = order.map((key): LiveArmColumn => {
+    const { arm, contextPolicy, sessions } = groups.get(key)!;
     // TICKET 051 R2-2 — THE SAME ANCHOR AS EVERYWHERE ELSE IN THE TICKET.
     // This read `speech_end`, which Live NEVER carries (option (c) deliberately
     // never stamps it), so `samples` was always empty and the column fell
@@ -1304,6 +1364,7 @@ export function deriveLiveModel(ledger: RunLedger): LiveModel {
 
     return {
       arm,
+      contextPolicy,
       label: armLabel(arm),
       sessions: sessions.length,
       utterancesCompleted: sessions.reduce((sum, s) => sum + s.stability.utterancesCompleted, 0),
@@ -1333,5 +1394,5 @@ export function deriveLiveModel(ledger: RunLedger): LiveModel {
     };
   });
 
-  return { columns, empty: columns.length === 0 };
+  return { columns, empty: columns.length === 0, sessionsWithoutContextPolicy };
 }

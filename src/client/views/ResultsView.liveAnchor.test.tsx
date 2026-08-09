@@ -13,11 +13,12 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { REALTIME_MODEL } from '../../core/arms';
 import {
   makeLiveSessionEntity,
+  seedCleanSweep,
   seedLiveSessions,
   seedTrimmedLiveSession,
 } from '../components/results/testRecords';
@@ -259,6 +260,197 @@ describe('the Results Live card DISCLOSES a session that declared no context pol
   it('GUARD: a ledger where every session declares a policy discloses no exclusion', () => {
     render(<ResultsView ledger={policyLedger()} />);
     // Otherwise the disclosure above is satisfiable by a constant string.
+    expect(textOf(liveCard())).not.toMatch(/exclud/i);
+  });
+});
+
+/* ========================================== TICKET 064 — ADVERSARIAL REVIEW */
+
+/**
+ * FINDING 2 — NOTHING PINNED A HEADER LABEL TO ITS COLUMN KEY.
+ *
+ * Every accessor in this file, and every one in the locked ResultsView.test.tsx,
+ * addresses a cell by `data-live-column`. The two `label` strings in
+ * `LIVE_COLUMNS` could therefore be swapped with the whole suite green, and the
+ * card would render `realtime · trimmed` above the DEFAULT-policy figures and
+ * `realtime · default` above the trimmed ones — this ticket's own failure mode,
+ * a number published under the wrong policy name, moved from the derivation into
+ * the header row. The existing check (ResultsView.test.tsx) only asserts both
+ * strings appear SOMEWHERE in the card, which a swap satisfies exactly.
+ *
+ * So the assertion has to travel through the key: read the header cell BY its
+ * `data-live-column`, and require the label above the figures that cell governs.
+ */
+
+/** The header cell for `key`, scoped to the render under test (RTL appends). */
+function liveHeaderCell(container: HTMLElement, key: string): HTMLElement {
+  const card = container.querySelector('[data-card="live"]');
+  if (card === null) throw new Error('expected the live card to render');
+  const cell = card.querySelector(`[data-grid-header] [data-live-column="${key}"]`);
+  if (cell === null) throw new Error(`missing live header cell: ${key}`);
+  return cell as HTMLElement;
+}
+
+describe('the Results Live card labels each column with ITS OWN name (TICKET 064)', () => {
+  const HEADERS: ReadonlyArray<{ key: string; label: string }> = [
+    { key: 'realtime-default', label: 'realtime · default' },
+    { key: 'realtime-trimmed', label: 'realtime · trimmed' },
+    { key: 'cascade', label: 'cascade' },
+  ];
+
+  it.each(HEADERS)('the $key column is headed "$label"', ({ key, label }) => {
+    const { container } = render(<ResultsView ledger={policyLedger()} />);
+    const cell = liveHeaderCell(container, key);
+
+    // Scoped to the cell the key selects, so a swapped pair of labels cannot
+    // satisfy this by appearing elsewhere in the card.
+    expect(within(cell).getByText(label)).toBeInTheDocument();
+    expect(cell.textContent?.trim()).toBe(label);
+  });
+
+  it('DOMINANT — the header above the DEFAULT-only p50 says default, not trimmed', () => {
+    const { container } = render(<ResultsView ledger={policyLedger()} />);
+
+    // 1.10 s is the default-only p50 and 4.00 s the trimmed one (hand-derived
+    // above). Pairing each figure with the header of the SAME key is what makes
+    // a label swap a failing test rather than a cosmetic one.
+    expect(liveHeaderCell(container, 'realtime-default').textContent?.trim()).toBe(
+      'realtime · default',
+    );
+    expect(liveCell('p50', 'realtime-default')).toBe('1.10 s');
+    expect(liveHeaderCell(container, 'realtime-trimmed').textContent?.trim()).toBe(
+      'realtime · trimmed',
+    );
+    expect(liveCell('p50', 'realtime-trimmed')).toBe('4.00 s');
+  });
+});
+
+/**
+ * FINDING 3 — THE EXCLUSION COUNT WAS NEVER ASSERTED, ANYWHERE.
+ *
+ * The only nonzero-path assertions were the regexes /exclud/i and /context
+ * polic/i above: they pin that a sentence appears, never that the NUMBER in it
+ * is the number of excluded sessions. Replacing the count with a constant 99 on
+ * the nonzero path left the suite green, and the card then printed "99 sessions
+ * excluded from every column" — a fabricated count, in the ticket whose thesis
+ * is that a wrong number is worse than a missing one, on the one line that
+ * exists to say how big the hole in the evidence is.
+ *
+ * The singular/plural branch is pinned for the same reason: it is the only other
+ * thing the sentence computes.
+ */
+
+/** A pre-012 session under a caller-chosen id, so a ledger can hold several. */
+function prePolicySessionNamed(id: string) {
+  return makeLiveSessionEntity({
+    id,
+    architecture: 'realtime',
+    providerTriple: undefined,
+    contextPolicy: undefined,
+    modelSnapshots: { realtime: REALTIME_MODEL },
+    utterances: [8_000, 8_100].map((ms, i) => ({
+      id: `${id}-u${i + 1}`,
+      timings: { server_speech_stopped: 0, audio_queued: ms },
+      costUsd: 1,
+    })),
+    latency: { p50: 8_000, p95: 8_100, driftMinute1ToEnd: 700 },
+    cost: { totalUsd: 2, perMinuteMinute1: 0.9, perMinuteFinalMinute: 0.9 },
+    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: null, heapEnd: null },
+  });
+}
+
+describe('the Results Live card reports HOW MANY sessions it excluded (TICKET 064)', () => {
+  it('DOMINANT — one excluded session is disclosed as "1 session", not as some other count', () => {
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    ledger.appendLiveSession(prePolicySession());
+    render(<ResultsView ledger={ledger} />);
+
+    const text = textOf(liveCard());
+    expect(text).toContain('1 session excluded');
+    // A constant in place of the count publishes a fabricated number under a
+    // sentence that reads as a measurement.
+    expect(text).not.toMatch(/\b(?!1\b)\d+ sessions? excluded/);
+  });
+
+  it('two excluded sessions read "2 sessions" — the count is derived and the noun agrees', () => {
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    ledger.appendLiveSession(prePolicySession());
+    ledger.appendLiveSession(prePolicySessionNamed('live-pre-012-b'));
+    render(<ResultsView ledger={ledger} />);
+
+    const text = textOf(liveCard());
+    expect(text).toContain('2 sessions excluded');
+    expect(text).not.toContain('1 session excluded');
+    // ...and the singular noun is not printed for a plural count.
+    expect(text).not.toContain('2 session excluded');
+  });
+
+  it('GUARD: the singular case does not print the plural noun', () => {
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    ledger.appendLiveSession(prePolicySession());
+    render(<ResultsView ledger={ledger} />);
+
+    expect(textOf(liveCard())).not.toContain('1 sessions excluded');
+  });
+});
+
+/**
+ * FINDING 4 — THE EXCLUSION NOTE WAS UNTESTED ON THE `empty` BRANCH.
+ *
+ * A ledger whose sessions ALL lack a context policy derives no column at all
+ * (`deriveLive.anchor.test.ts` pins that), so the card takes its `model.empty`
+ * path. Deleting the disclosure from that branch left the suite green, and the
+ * card then rendered the plain "no live sessions recorded" empty state over
+ * evidence that had been thrown away — exactly the hole-that-reads-as-complete
+ * the code comment beside `LiveExclusionNote` says it exists to prevent. The
+ * empty state is the branch where the omission is WORST: there is no other
+ * figure on the card to hint that anything was measured at all.
+ *
+ * The ledger carries a Replay sweep as well, because `resultsAreEmpty` blanks
+ * the WHOLE view (no cards at all) when the live model is empty and every
+ * recording is fixture-only — so a ledger of nothing but policy-less sessions
+ * never reaches `LiveCard`. Runs present, live sessions all policy-less, is the
+ * state in which this branch actually renders.
+ */
+describe('the Results Live EMPTY card still discloses the exclusion (TICKET 064)', () => {
+  function policylessOnlyLedger(): RunLedger {
+    const ledger = new RunLedger();
+    seedCleanSweep(ledger);
+    ledger.appendLiveSession(prePolicySession());
+    return ledger;
+  }
+
+  it('DOMINANT — a ledger of nothing but policy-less sessions says why the card is empty', () => {
+    render(<ResultsView ledger={policylessOnlyLedger()} />);
+
+    const text = textOf(liveCard());
+    expect(text).toMatch(/exclud/i);
+    expect(text).toMatch(/context polic/i);
+    // The count is derived on this branch too, not just on the populated one.
+    expect(text).toContain('1 session excluded');
+  });
+
+  it('it is the empty state that carries it — no column was derived to hang it on', () => {
+    const { container } = render(<ResultsView ledger={policylessOnlyLedger()} />);
+
+    // No column headers at all: the card really is on the `model.empty` path,
+    // so the disclosure above cannot have come from the populated branch.
+    expect(
+      container.querySelectorAll('[data-card="live"] [data-grid-header] [data-live-column]'),
+    ).toHaveLength(0);
+    expect(within(liveCard()).getByText(/no live/i)).toBeInTheDocument();
+  });
+
+  it('GUARD: the same card with no policy-less session discloses NOTHING', () => {
+    // Otherwise the empty-branch disclosure is satisfiable by a constant.
+    const ledger = new RunLedger();
+    seedCleanSweep(ledger);
+    render(<ResultsView ledger={ledger} />);
+
+    expect(textOf(liveCard())).toMatch(/no live sessions/i);
     expect(textOf(liveCard())).not.toMatch(/exclud/i);
   });
 });

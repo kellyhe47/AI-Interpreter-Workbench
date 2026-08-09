@@ -130,7 +130,43 @@ describe('ticket 041 — deriveLiveModel refuses a session that produced nothing
 
     // Byte-for-byte the model an untouched ledger derives — not a column of
     // zeros, and not "2 sessions" behind no numbers.
-    expect(deriveLiveModel(ledger)).toEqual({ columns: [], empty: true });
+    // TICKET 064 — `sessionsWithoutContextPolicy` is 0, not 2: these sessions
+    // DO declare a policy and are refused by the ONE aggregation gate for
+    // producing nothing. The policy axis must not become a second way in, nor a
+    // second reason to report an exclusion.
+    expect(deriveLiveModel(ledger)).toEqual({
+      columns: [],
+      empty: true,
+      sessionsWithoutContextPolicy: 0,
+    });
+    expect(deriveLiveModel(ledger)).toEqual(deriveLiveModel(new RunLedger()));
+  });
+
+  /**
+   * TICKET 064 — the case that makes the comment above load-bearing.
+   *
+   * Both sessions in the previous test declare a policy (`makeLiveSessionEntity`
+   * auto-assigns one from the architecture), so `sessionsWithoutContextPolicy`
+   * is 0 whichever order `deriveLiveModel` applies its two refusals in. Only a
+   * session that produced nothing AND declares no policy separates them: read
+   * policy-first, this one is disclosed as "1 session excluded: no context
+   * policy recorded", when it was really refused by the ONE aggregation gate
+   * for producing nothing. `isAggregatableLiveSession` stays the only gate;
+   * the policy axis is not a second one, nor a second reason to report.
+   */
+  it('a session that produced nothing AND declares no policy is refused by the GATE, not the policy check', () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(
+      // Honoured rather than auto-filled: the helper only assigns when the key
+      // is absent from overrides, so this is a genuine pre-012 session.
+      emptySession({ id: 'live-empty-pre-012', contextPolicy: undefined }),
+    );
+
+    expect(deriveLiveModel(ledger)).toEqual({
+      columns: [],
+      empty: true,
+      sessionsWithoutContextPolicy: 0,
+    });
     expect(deriveLiveModel(ledger)).toEqual(deriveLiveModel(new RunLedger()));
   });
 

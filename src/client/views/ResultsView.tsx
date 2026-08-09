@@ -138,7 +138,7 @@ import {
   type WerCategoryRow,
 } from '../components/results/derive';
 import { hydrateLedger, type LedgerHydrationSource } from '../state/hydrateLedger';
-import type { RunLedger } from '../state/ledger';
+import type { LiveContextPolicy, RunLedger } from '../state/ledger';
 
 export interface ResultsViewProps {
   ledger: RunLedger;
@@ -510,19 +510,34 @@ const UNMEASURED_ROWS: ReadonlyArray<{ metric: string; label: string }> = [
 /* --------------------------------------------------- conversation length -- */
 
 /**
- * The three columns of the conversation-length card. 'realtime · trimmed' has
- * no arm behind it: a trimmed-context policy is not something a LiveSession
- * declares yet, so the column renders absent rather than borrowing the default
- * realtime figures.
+ * The three columns of the conversation-length card.
+ *
+ * TICKET 064 — EACH COLUMN NAMES A PAIR, NOT AN ARM. 'realtime · trimmed' used
+ * to carry `arm: null`, and `columnFor` answered `undefined` for a null arm, so
+ * that column rendered absent UNCONDITIONALLY — never because of the data. The
+ * doc comment justifying it ("a trimmed-context policy is not something a
+ * LiveSession declares yet") had been stale since ticket 012.
+ *
+ * The damage was not the blank column. Both realtime columns derive arm A, so
+ * with the arm as the only key the trimmed sessions were pooled into
+ * `realtime · default` and its p50 answered for "realtime, all policies". A
+ * repair that coerced the null away (`column.arm as ArmTag`) would have filled
+ * the blank with the SAME pooled column under both labels — the identity has to
+ * be the pair, which is why `contextPolicy` is a field here and on
+ * `LiveArmColumn` rather than an arm that the view casts.
+ *
+ * `cascade` binds to `'n/a'`: the arm has no context knob, which is a different
+ * statement from "we did not record which knob it was".
  */
 const LIVE_COLUMNS: ReadonlyArray<{
   key: string;
   label: string;
-  arm: ArmTag | null;
+  arm: ArmTag;
+  contextPolicy: LiveContextPolicy;
 }> = [
-  { key: 'realtime-default', label: 'realtime · default', arm: 'A' },
-  { key: 'realtime-trimmed', label: 'realtime · trimmed', arm: null },
-  { key: 'cascade', label: 'cascade', arm: 'B' },
+  { key: 'realtime-default', label: 'realtime · default', arm: 'A', contextPolicy: 'default' },
+  { key: 'realtime-trimmed', label: 'realtime · trimmed', arm: 'A', contextPolicy: 'trimmed' },
+  { key: 'cascade', label: 'cascade', arm: 'B', contextPolicy: 'n/a' },
 ];
 
 const LIVE_ROWS: ReadonlyArray<{
@@ -559,10 +574,40 @@ const LIVE_ROWS: ReadonlyArray<{
   },
 ];
 
+/**
+ * TICKET 064 — THE SESSIONS THAT BELONG TO NO COLUMN, SAID OUT LOUD.
+ *
+ * `contextPolicy` is optional on `LiveSession`, so a session stored before
+ * ticket 012 declares none. It cannot be folded into `realtime · default` —
+ * that is the pooling this ticket removes, one source further back — and it
+ * cannot open a column of its own, because "we do not know which context
+ * policy ran" is not a context policy. What is left is exclusion, and an
+ * exclusion nobody can see is a hole in the evidence that reads as complete.
+ * Rendered only when there is something to report, so the sentence can never
+ * be a constant.
+ */
+function LiveExclusionNote(props: { count: number }): ReactElement | null {
+  if (props.count === 0) return null;
+  const noun = props.count === 1 ? 'session' : 'sessions';
+  return (
+    <p data-live-exclusions="" data-mono="" style={monoStyle}>
+      {`${props.count} ${noun} excluded from every column: no context policy recorded, ` +
+        'so there is no policy this session can be compared under'}
+    </p>
+  );
+}
+
 function LiveCard(props: { model: LiveModel }): ReactElement {
   const { model } = props;
-  const columnFor = (arm: ArmTag | null): LiveArmColumn | undefined =>
-    arm === null ? undefined : model.columns.find((column) => column.arm === arm);
+  // TICKET 064 — matched on the PAIR. Matching on `arm` alone would hand the
+  // same column to both realtime labels and print one set of figures twice.
+  const columnFor = (target: {
+    arm: ArmTag;
+    contextPolicy: LiveContextPolicy;
+  }): LiveArmColumn | undefined =>
+    model.columns.find(
+      (column) => column.arm === target.arm && column.contextPolicy === target.contextPolicy,
+    );
 
   const sessions = model.columns.reduce((sum, column) => sum + column.sessions, 0);
   const utterances = model.columns.reduce((sum, column) => sum + column.utterancesCompleted, 0);
@@ -570,7 +615,10 @@ function LiveCard(props: { model: LiveModel }): ReactElement {
   return (
     <Card card="live" eyebrow={LIVE_EYEBROW} title={LIVE_TITLE}>
       {model.empty ? (
-        <EmptyCardNote card="live">{LIVE_EMPTY}</EmptyCardNote>
+        <>
+          <EmptyCardNote card="live">{LIVE_EMPTY}</EmptyCardNote>
+          <LiveExclusionNote count={model.sessionsWithoutContextPolicy} />
+        </>
       ) : (
         <>
           <p data-provenance="live" data-mono="" style={monoStyle}>
@@ -585,6 +633,7 @@ function LiveCard(props: { model: LiveModel }): ReactElement {
               'latency from detected end of speech to first audio · ' +
               'no reference text, so no WER'}
           </p>
+          <LiveExclusionNote count={model.sessionsWithoutContextPolicy} />
 
           <div style={{ marginTop: 'var(--space-3)' }}>
             <div data-grid-header="" style={gridStyle(METRIC_COLUMNS, true)}>
@@ -601,7 +650,7 @@ function LiveCard(props: { model: LiveModel }): ReactElement {
                 <div style={labelCellStyle}>{row.label}</div>
                 {LIVE_COLUMNS.map((column) => (
                   <div key={column.key} data-live-column={column.key} style={cellStyle}>
-                    {row.value(columnFor(column.arm))}
+                    {row.value(columnFor(column))}
                   </div>
                 ))}
               </div>

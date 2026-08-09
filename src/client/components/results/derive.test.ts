@@ -505,7 +505,14 @@ describe('deriveLiveModel — LiveSessions only, never mixed with Runs', () => {
   it('is empty for a ledger that holds only Runs', () => {
     const ledger = new RunLedger();
     seedComparisonSweep(ledger);
-    expect(deriveLiveModel(ledger)).toEqual({ columns: [], empty: true });
+    // TICKET 064 — the model gained `sessionsWithoutContextPolicy`, and this
+    // exact-shape assertion is kept exact: a ledger with no LiveSession at all
+    // has nothing to disclose, so the count is 0 and not merely absent.
+    expect(deriveLiveModel(ledger)).toEqual({
+      columns: [],
+      empty: true,
+      sessionsWithoutContextPolicy: 0,
+    });
   });
 });
 
@@ -516,7 +523,11 @@ describe('empty states — no zeros masquerading as measurements', () => {
     expect(groupByRecording(ledger)).toEqual([]);
     expect(groupByCategory(ledger)).toEqual([]);
     expect(deriveComparison(ledger, 'A', 'B')).toBeNull();
-    expect(deriveLiveModel(ledger)).toEqual({ columns: [], empty: true });
+    expect(deriveLiveModel(ledger)).toEqual({
+      columns: [],
+      empty: true,
+      sessionsWithoutContextPolicy: 0,
+    });
   });
 
   it('a fixture-sourced ledger aggregates to the same explicit empty state', () => {
