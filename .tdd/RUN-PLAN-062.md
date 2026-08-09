@@ -8,6 +8,7 @@ Owner: orchestrating agent. Kelly owns git. Sub-agents run NO git commands.
 |---|---|---|
 | 062 | Realtime/cascade ignore the selected language pair | **DONE** — `a57cd3a`, reviewed GREEN |
 | 061 | Runs record no languagePair / direction | **DONE** — tests `856c7f3`, impl `a6ca500`, reviewed GREEN |
+| 056 | Retain output audio per run | **DONE (buildable half)** — `3295e84`; rest blocked on operator |
 | 064 | REALTIME · TRIMMED pooled into default column | queued |
 | 055 | One ledger, one truth + run envelope (split 055a/055b) | queued |
 | 059 | $0.000 on Results + Replay | queued |
@@ -167,3 +168,54 @@ case with no place in the stated queue. Needs a decision: work it, defer it expl
 
 064 → 055 (split 055a ledger / 055b runner envelope) → 059 → 060 → 065 → 066 → 054 → 058 (never
 parallel with 054) → 057.
+
+## CORRECTION — the eval scoreboard was misread all run (2026-08-09)
+
+`npm run eval` read 8 pass / 5 fail before and after 062, so it was reported as "unchanged". It was
+not: **the composition swapped.** Verified by running the eval in a worktree at baseline `3637c6f`.
+
+| | 01 | 02 | 04 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|
+| baseline `3637c6f` | ✗ | ✗ | ✗ | ✗ | **✗** | ✓ |
+| after 062 + 061 | ✗ | ✗ | ✗ | ✗ | **✓** | **✗** |
+| after 056 | ✗ | ✗ | ✗ | ✗ | ✓ | ✓ |
+
+061/062 fixed case 11; 062's no-target-language contract broke case 12, whose fixture declared
+`EN↔YUE`/`en→yue` with no `targetLanguage`. Two sub-agents reported the composition wrongly and the
+orchestrator relayed it before checking.
+
+**Lesson for the rest of this run: a stable pass/fail COUNT is not evidence the same cases pass.**
+Enumerate the failing case ids every time, not just the totals.
+
+**056 was never a failing-eval ticket.** The handoff's claim that it owned a red case was wrong.
+
+## 056 — DONE (buildable half), `3295e84`
+
+In scope: PRD §15A rules it in explicitly under "Explicitly NOT cut" — retaining output audio
+"becomes load-bearing, because that finding is audible only. It moves ahead of the sweep."
+
+The audio path was "landed and green but never exercised" — this repo's #1 failure mode. Mutation-
+tested end to end over **20 mutations; none survived.** All four "already satisfied" claims are real.
+
+But golden eval case 12 was a weak gate: the harness substitutes its own `RunsClient` and never
+touches the server, so it stayed green under a wrong sample rate, a constant play gate, a server that
+writes nothing, and a client that fabricates the path. The fake now refuses what the real route
+refuses. Verified: 16000 Hz turns case 12 red.
+
+Ticket status → `blocked-on-operator`. Remaining ACs are real-data only (see the ticket).
+
+### Flagged for Kelly, deliberately not changed
+
+`ReplayView.tsx:637` picks blind-compare pairs on `status === 'complete'` alone, with no stored-audio
+predicate, so BlindCompare can offer a play button for a run with no `.out.wav`. Possibly deliberate
+— gating inside BlindCompare would leak which sample is which arm — and adding one would violate
+056's own "no second has-audio predicate" rule.
+
+### Ticket 056's own context table has an error
+
+It says `no output audio stored` "is not a literal … do not grep for the sentence." It **is** a
+literal (`RunsList.tsx:60`). Corrected in the ticket.
+
+## Queue from here
+
+064 → 055 (split 055a/055b) → 059 → 060 → 065 → 066 → 054 → 058 (never parallel with 054) → 057.
