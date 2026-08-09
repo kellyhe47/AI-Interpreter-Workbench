@@ -29,7 +29,7 @@ import {
   SERVER_RUNS,
   staticHydrationSource,
 } from './hydrationFixtures';
-import { RunLedger, type LiveSession } from './ledger';
+import { RunLedger, isAggregatableLiveSession, type LiveSession } from './ledger';
 import { makeLiveSessionEntity } from '../components/results/testRecords';
 
 afterEach(() => vi.restoreAllMocks());
@@ -209,5 +209,116 @@ describe('ticket 041 — the load stays ATOMIC (empty is not the same as unreach
     await expect(hydrateLedger(ledger, source)).rejects.toBeInstanceOf(ApiError);
     expect(ledger.getLiveSessions()).toEqual([]);
     expect(ledger.getRuns()).toEqual([]);
+  });
+});
+
+/* ===== TICKET 055a — THE LISTING IS THE SERVER'S ACKNOWLEDGEMENT ===========
+ *
+ * `deriveLive.empty.test.ts`'s 055a block turns on ONE asymmetry: a session the
+ * browser appended locally versus a session the server NAMED in its listing.
+ * Hydration is where that answer arrives, so hydration is where the mark has to
+ * be settled.
+ *
+ * THE TRAP THIS BLOCK EXISTS FOR: `hydrateLedger.ts:137-142` is ADD-ONLY and
+ * NEVER REPLACES — a session already in the store is skipped on id. A stale
+ * `localStorage` blob therefore survives every reload untouched, so an
+ * implementation that expects re-hydration to overwrite the local copy fixes
+ * nothing on the machine that has the problem. The second test below is exactly
+ * that case: the server DOES hold the session, the browser's copy says
+ * otherwise, and dedupe alone leaves it wrong forever.
+ *
+ * AND IT CUTS BOTH WAYS (third test). Hydration may not silently UN-mark: a
+ * session the listing does not name is still one the repo never received, and
+ * "we loaded some sessions" is not an acknowledgement of a different one.
+ *
+ * `syncState` is this ticket's proposed field, read through a narrow local cast.
+ * ========================================================================== */
+
+/** This ticket's proposed record state, until it exists on `LiveSession`. */
+type SyncedLiveSession = LiveSession & { syncState?: string };
+
+function syncStateOf(session: LiveSession): string | undefined {
+  return (session as SyncedLiveSession).syncState;
+}
+
+/** The same record, as the local-first append leaves it when the POST failed. */
+function unsyncedCopy(session: LiveSession): LiveSession {
+  const copy: SyncedLiveSession = { ...session, syncState: 'unsynced' };
+  return copy;
+}
+
+/** A measured take that exists ONLY in this browser. */
+function localOnlyTake(id: string): LiveSession {
+  return unsyncedCopy(
+    makeLiveSessionEntity({
+      id,
+      utterances: [{ id: `${id}-u1`, timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.01 }],
+    }),
+  );
+}
+
+function serverSource(): LedgerHydrationSource {
+  return staticHydrationSource(SERVER_RECORDINGS, SERVER_RUNS, SERVER_LIVE_SESSIONS).source;
+}
+
+describe('TICKET 055a — hydration settles the mark, and dedupe alone cannot', () => {
+  it('a session hydrated FROM the server is synced and reaches the gate', async () => {
+    const ledger = new RunLedger();
+
+    await hydrateLedger(ledger, serverSource());
+
+    const stored = ledger.getLiveSessions();
+    expect(stored.map((s) => s.id)).toEqual(SERVER_LIVE_SESSIONS.map((s) => s.id));
+    for (const session of stored) {
+      expect(syncStateOf(session)).not.toBe('unsynced');
+      // Both server fixtures carry a measured utterance, so the gate's OTHER
+      // clause cannot be what is answering here.
+      expect(isAggregatableLiveSession(session)).toBe(true);
+    }
+  });
+
+  it('the server’s acknowledgement REACHES a copy the ledger already holds', async () => {
+    const ledger = new RunLedger();
+    const acknowledged = SERVER_LIVE_SESSIONS[0]!;
+    // The POST failed at Stop; the server got this take another way (a retry, a
+    // second tab, the export). The browser's copy is stale and add-only dedupe
+    // will skip it — which is why re-hydration cannot be the mechanism.
+    ledger.appendLiveSession(unsyncedCopy(acknowledged));
+
+    await hydrateLedger(ledger, serverSource());
+
+    const copies = ledger.getLiveSessions().filter((s) => s.id === acknowledged.id);
+    // Still ONE record: 041's dedupe is untouched.
+    expect(copies).toHaveLength(1);
+    expect(syncStateOf(copies[0]!)).not.toBe('unsynced');
+    expect(isAggregatableLiveSession(copies[0]!)).toBe(true);
+  });
+
+  it('hydration cannot silently UN-mark a session the listing never named', async () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(localOnlyTake('live-never-posted'));
+
+    await hydrateLedger(ledger, serverSource());
+
+    const local = ledger.getLiveSessions().find((s) => s.id === 'live-never-posted');
+    expect(local).toBeDefined();
+    expect(syncStateOf(local!)).toBe('unsynced');
+    expect(isAggregatableLiveSession(local!)).toBe(false);
+    // Stored and listed beside the server's own, exactly as before.
+    expect(ledger.getLiveSessions().map((s) => s.id)).toEqual([
+      'live-never-posted',
+      ...SERVER_LIVE_SESSIONS.map((s) => s.id),
+    ]);
+  });
+
+  it('hydrating twice re-marks nothing — the second pass changes no state', async () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(localOnlyTake('live-never-posted'));
+
+    await hydrateLedger(ledger, serverSource());
+    const afterFirst = ledger.getLiveSessions().map((s) => [s.id, syncStateOf(s)]);
+    await hydrateLedger(ledger, serverSource());
+
+    expect(ledger.getLiveSessions().map((s) => [s.id, syncStateOf(s)])).toEqual(afterFirst);
   });
 });

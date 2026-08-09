@@ -4,6 +4,7 @@ import type { UtteranceRecord } from '../../core/timing';
 import {
   LEDGER_STORAGE_KEY,
   RunLedger,
+  isAggregatableLiveSession,
   isAggregatableRun,
   isAggregatableUtterance,
   isRealRecord,
@@ -1496,5 +1497,87 @@ describe('TICKET 055b — a 0 ms interval is refused as a sample but never as an
     const stored = ledger.getRuns()[0]!;
     expect(stored.status).toBe('failed');
     expect(stored.errors.join(' | ')).toContain('clock-inversion');
+  });
+});
+
+/* ===== TICKET 055a — A LIVESESSION THE SERVER NEVER RECEIVED IS NOT EVIDENCE ==
+ *
+ * `useSessionController.ts:759` appends a finished LiveSession to the client
+ * ledger UNCONDITIONALLY and then fires `liveSessions.create(session)` with its
+ * rejection SWALLOWED (`:766`). The order is correct and deliberate (ticket 023:
+ * the operator's take is not contingent on a reachable server) — the defect is
+ * that the same store is then AGGREGATED FROM. The audit measured 14 sessions
+ * on screen over 8 on the server; PRD §8: "One ledger under every view… a metric
+ * cannot drift between screens or between a screen and the write-up."
+ *
+ * THE EXCLUSION IS CARRIED BY STATE ON THE RECORD, and it is enforced by the ONE
+ * gate that already decides this — `isAggregatableLiveSession`, the sibling of
+ * `isAggregatableRun` — never by a second gate and never by a filter local to
+ * `deriveLiveModel`. `syncState` is this ticket's proposed field, read here
+ * through a narrow local cast so no production type moves before the
+ * implementation does.
+ *
+ * RUNS ARE OUT OF SCOPE AND THE LAST TEST PINS THAT: `appendRun` has exactly one
+ * caller (`hydrateLedger.ts:131`), so a Run cannot diverge and nothing about a
+ * Run's aggregation may move.
+ * ========================================================================== */
+
+/** This ticket's proposed record state, until it exists on `LiveSession`. */
+type SyncedLiveSession = LiveSession & { syncState?: string };
+
+function syncStateOf(session: LiveSession): string | undefined {
+  return (session as SyncedLiveSession).syncState;
+}
+
+function unsyncedLiveSession(overrides: Partial<LiveSession> = {}): LiveSession {
+  const session: SyncedLiveSession = { ...makeLiveSession(overrides), syncState: 'unsynced' };
+  return session;
+}
+
+describe('TICKET 055a — a LiveSession the server never got is stored, listed, never aggregated', () => {
+  it('the ONE gate refuses it — and the SAME session without the mark passes', () => {
+    // Identical in every other respect: real recipe, two utterances. The sync
+    // state is the only thing that differs, so it is the only thing being read.
+    expect(isAggregatableLiveSession(makeLiveSession({ id: 'live-synced' }))).toBe(true);
+    expect(isAggregatableLiveSession(unsyncedLiveSession({ id: 'live-unsynced' }))).toBe(false);
+  });
+
+  it('it is nevertheless STORED and LISTED — the ledger is append-only', () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(unsyncedLiveSession({ id: 'live-unsynced' }));
+
+    // Never deleted: a take the server never received is a FINDING, and
+    // deleting it would delete the evidence of the divergence.
+    expect(ledger.getLiveSessions().map((s) => s.id)).toEqual(['live-unsynced']);
+    // ...and the state rides the RECORD, so it survives the deep copy the
+    // getter returns rather than living in a side table the getter cannot see.
+    expect(syncStateOf(ledger.getLiveSessions()[0]!)).toBe('unsynced');
+    expect(isAggregatableLiveSession(ledger.getLiveSessions()[0]!)).toBe(false);
+  });
+
+  it('the state survives export → import, exactly like the record it is part of', () => {
+    const source = new RunLedger();
+    source.appendLiveSession(unsyncedLiveSession({ id: 'live-unsynced' }));
+    source.appendLiveSession(makeLiveSession({ id: 'live-synced' }));
+
+    const target = new RunLedger();
+    target.importRuns(source.exportRuns());
+
+    const restored = target.getLiveSessions();
+    expect(restored.map((s) => s.id)).toEqual(['live-unsynced', 'live-synced']);
+    expect(syncStateOf(restored[0]!)).toBe('unsynced');
+    expect(restored.filter((s) => isAggregatableLiveSession(s)).map((s) => s.id)).toEqual([
+      'live-synced',
+    ]);
+  });
+
+  it('and it moves NO Run figure — Runs cannot diverge, so nothing about them changes', () => {
+    const ledger = new RunLedger();
+    const run = runWithLatency(500, { cost: 0.01 });
+    ledger.appendRun(run);
+    ledger.appendLiveSession(unsyncedLiveSession({ id: 'live-unsynced' }));
+
+    expect(isAggregatableRun(ledger.getRuns()[0]!)).toBe(true);
+    expect(ledger.runAggregates().perArm['B']).toMatchObject({ n: 1, p50Ms: 500 });
   });
 });

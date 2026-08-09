@@ -22,7 +22,7 @@ import { resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { armLabel } from '../../core/arms';
-import { RunLedger } from '../state/ledger';
+import { RunLedger, type LiveSession, type Run } from '../state/ledger';
 import {
   STT_UNCHANGED_CELL,
   deriveComparison,
@@ -35,7 +35,9 @@ import {
 import {
   ADHOC_RECORDING_ID,
   ARM_B_TRIPLE,
+  ARM_C_TRIPLE,
   CLEAN_RECORDING_ID,
+  CORPUS_VERSION,
   EXCLUDED_COST_USD,
   EXCLUDED_LATENCY_MS,
   FAILED_RECORDING_ID,
@@ -49,6 +51,7 @@ import {
   SHORT_SWEEP_COMPLETED_REPS,
   SHORT_SWEEP_INTENDED_REPS,
   SHORT_SWEEP_SURVIVING_P50_MS,
+  makeLiveSessionEntity,
   makeRecordingEntity,
   runWithLatency,
   seedCategorySweep,
@@ -882,6 +885,182 @@ describe('ResultsView — no excluded run reaches a rendered experiment aggregat
     // ...yet the failed run is still findable on the secondary tab.
     showSecondaryTab();
     expect(recordingRow(SHORT_RECORDING_ID)).toBeInTheDocument();
+  });
+});
+
+/* ===== TICKET 055a — WHAT THE OPERATOR IS ACTUALLY SHOWN ====================
+ *
+ * The pure-derivation half of this ticket (`deriveLive.empty.test.ts`,
+ * `derive.test.ts`, `ledger.test.ts`) can be satisfied end to end by a change
+ * that never reaches a screen. These two facts are the ones the operator sees:
+ *
+ *  1. THE DISCLOSURE. Golden eval 01 `must_surface: unsynced-count` — "a session
+ *     the server never got is a finding, not a silence". Excluding it from the
+ *     figures and saying nothing would replace one dishonesty with another.
+ *  2. THE PROVENANCE DENOMINATOR. Golden eval 04 — `2 of 3 reps completed`, and
+ *     never the `N of N` AGENTS.md names verbatim.
+ *
+ * THE DOM CONTRACT (normative, and modelled exactly on ticket 064's
+ * `[data-live-exclusions]` note, which this sits beside): the live card renders
+ *
+ *     [data-live-unsynced]
+ *
+ * carrying the COUNT, and renders it ONLY when there is something to report —
+ * so the sentence can never be a constant, and "nothing diverged" is silence
+ * rather than a zero. (`deriveLive.empty.test.ts` pins the whole model by
+ * `toEqual` for an empty ledger, so zero may legitimately be an absent key;
+ * zero and absent are the same claim here.)
+ *
+ * `syncState` is this ticket's proposed field, written through a narrow local
+ * cast so no production type moves before the implementation does.
+ * ========================================================================== */
+
+/** A measured cascade take the server never acknowledged. */
+function unsyncedTake(id: string, latencyMs: number): LiveSession {
+  const session: LiveSession & { syncState: string } = {
+    ...makeLiveSessionEntity({
+      id,
+      architecture: 'cascade',
+      providerTriple: { ...ARM_B_TRIPLE },
+      modelSnapshots: { ...ARM_B_TRIPLE },
+      utterances: Array.from({ length: 5 }, (_, i) => ({
+        id: `${id}-u-${i + 1}`,
+        timings: { speech_end: 0, audio_queued: latencyMs },
+        costUsd: 0.02,
+      })),
+      latency: { p50: latencyMs, p95: latencyMs, driftMinute1ToEnd: null },
+      cost: { totalUsd: 0.1, perMinuteMinute1: 0.02, perMinuteFinalMinute: 0.02 },
+      stability: { utterancesCompleted: 5, disconnects: 0, heapStart: null, heapEnd: null },
+    }),
+    syncState: 'unsynced',
+  };
+  return session;
+}
+
+/**
+ * `seedLiveSessions` alone: 2 sessions, 3 + 3 utterances. Hand-derived, and
+ * DIFFERENT from every figure the two local-only takes below would produce
+ * (4 sessions / 16 utterances / a cascade p50 of 5 000 rather than 700).
+ */
+const SYNCED_LIVE_LINE = 'LiveSessions only · 2 sessions · 6 utterances completed';
+const POOLED_LIVE_LINE = 'LiveSessions only · 4 sessions · 16 utterances completed';
+const SYNCED_CASCADE_P50_MS = 700;
+const LOCAL_ONLY_LATENCY_MS = 5_000;
+
+/** The sweep's DECLARED retained rep count, stamped on every row it writes. */
+type SweepPlanAnnotations = {
+  utteranceId?: string;
+  category?: string;
+  repIndex?: number;
+  corpusVersion?: string;
+  intendedReps?: number;
+};
+
+const LOSSY_RECORDING_ID = 'rec-lossy-plan';
+/** Golden eval 04's `given`: 3 reps intended, 2 rows landed, 1 POST unacknowledged. */
+const LOSSY_DECLARED_REPS = 3;
+const LOSSY_LANDED_MS = [800, 1000] as const;
+/** Nearest rank over the two that landed: sorted[⌈0.5·2⌉−1] = 800. */
+const LOSSY_P50_MS = 800;
+
+/** Arm C rows from a sweep that declared 3 reps and lost one entirely. */
+function seedLossyPlanSweep(ledger: RunLedger): void {
+  ledger.appendRecording(makeRecordingEntity({ id: LOSSY_RECORDING_ID, label: 'lossy plan clip' }));
+  LOSSY_LANDED_MS.forEach((ms, i) => {
+    const annotations: SweepPlanAnnotations = {
+      utteranceId: 'u1',
+      category: 'numbers-dates',
+      repIndex: i + 1,
+      corpusVersion: CORPUS_VERSION,
+      intendedReps: LOSSY_DECLARED_REPS,
+    };
+    ledger.appendRun(
+      runWithLatency(ms, {
+        id: `run-lossy-${i + 1}`,
+        recordingId: LOSSY_RECORDING_ID,
+        providerTriple: { ...ARM_C_TRIPLE },
+        modelSnapshots: { ...ARM_C_TRIPLE },
+        armTag: 'C',
+        cost: 0.004,
+        annotations,
+      } as Partial<Run>),
+    );
+  });
+}
+
+/** Every `N of M reps completed` clause on a provenance line, in order. */
+function repClauses(line: string): string[] {
+  return line.match(/\d+ of \d+ reps completed/g) ?? [];
+}
+
+describe('TICKET 055a — Results DISCLOSES the takes the server never received', () => {
+  it('renders a NON-ZERO unsynced count, and keeps those takes out of every figure', () => {
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    ledger.appendLiveSession(unsyncedTake('live-local-1', LOCAL_ONLY_LATENCY_MS));
+    ledger.appendLiveSession(unsyncedTake('live-local-2', LOCAL_ONLY_LATENCY_MS));
+    renderView(ledger);
+
+    // The disclosure itself — the operator is TOLD, and told how many.
+    const notice = card('live').querySelector('[data-live-unsynced]');
+    expect(notice).not.toBeNull();
+    expect(notice!.textContent ?? '').toContain('2');
+
+    // …and the figures beside it are the SERVER's. Literals, hand-derived: a
+    // render compared against a model that moved with it proves nothing.
+    const provenance = card('live').querySelector('[data-provenance="live"]');
+    expect(provenance).not.toBeNull();
+    expect(provenance!.textContent ?? '').toContain(SYNCED_LIVE_LINE);
+    expect(provenance!.textContent ?? '').not.toContain(POOLED_LIVE_LINE);
+
+    const p50 = document.querySelector(
+      '[data-card="live"] [data-metric="p50"] [data-live-column="cascade"]',
+    );
+    expect((p50!.textContent ?? '').trim()).toBe(formatMs(SYNCED_CASCADE_P50_MS));
+    expect((p50!.textContent ?? '').trim()).not.toBe(formatMs(LOCAL_ONLY_LATENCY_MS));
+
+    // Excluded from the figures — never deleted from the store.
+    expect(ledger.getLiveSessions().map((s) => s.id)).toContain('live-local-1');
+    expect(ledger.getLiveSessions().map((s) => s.id)).toContain('live-local-2');
+  });
+
+  it('renders NO such notice when every session is synced', () => {
+    // Non-vacuous by construction: the same card, the same seed, one fact
+    // removed. `cleanup()` runs between tests (afterEach), so this render is
+    // the only one in the document and the accessors mean what they say.
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    renderView(ledger);
+
+    // The card is populated — the absence below is not an empty card.
+    const provenance = card('live').querySelector('[data-provenance="live"]');
+    expect(provenance).not.toBeNull();
+    expect(provenance!.textContent ?? '').toContain(SYNCED_LIVE_LINE);
+
+    expect(card('live').querySelector('[data-live-unsynced]')).toBeNull();
+    // Not "0 sessions unsynced" either: nothing diverged is silence.
+    expect(card('live').textContent ?? '').not.toMatch(/unsynced/i);
+  });
+});
+
+describe('TICKET 055a — the rendered provenance keeps the denominator it was given', () => {
+  it('a sweep that declared 3 reps and landed 2 renders "2 of 3", never "2 of 2"', () => {
+    const ledger = new RunLedger();
+    seedCleanSweep(ledger); // Arm B, 5 of 5 — the exp-2 left column
+    seedLossyPlanSweep(ledger); // Arm C, 2 rows of a 3-rep plan
+    renderView(ledger);
+
+    const line = document.querySelector('[data-provenance="exp2"]')!.textContent ?? '';
+    const clauses = repClauses(line);
+    expect(clauses).toContain(`2 of ${LOSSY_DECLARED_REPS} reps completed`);
+    // AGENTS.md names this failure verbatim: the denominator silently falls
+    // back to the numerator and every line reads a clean N of N.
+    expect(clauses).not.toContain('2 of 2 reps completed');
+    expect(clauses).not.toContain('3 of 3 reps completed');
+
+    // Line and number agree: the p50 is the two rows that landed, and the
+    // vanished rep adds no sample — the denominator is a REP count, not `n`.
+    expect(cell('exp2', 'p50', 'b')).toBe(formatMs(LOSSY_P50_MS));
   });
 });
 

@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { armLabel } from '../../../core/arms';
-import { RunLedger } from '../../state/ledger';
+import { RunLedger, type LiveSession, type Run } from '../../state/ledger';
 import {
   DIRECTION_NOT_RECORDED_CELL,
   PINNED_ENDPOINTING_MS,
@@ -45,6 +45,7 @@ import {
   SHORT_SWEEP_INTENDED_REPS,
   SHORT_SWEEP_SURVIVING_P50_MS,
   SHORT_SWEEP_SURVIVING_P95_MS,
+  makeLiveSessionEntity,
   makeRecordingEntity,
   runWithLatency,
   seedCategorySweep,
@@ -902,5 +903,137 @@ describe('TICKET 055b — a 0 ms sample is dropped from every percentile, by whi
     expect(byRecording.p95Ms).toBe(card.p95Ms);
     expect(byCategory.p50Ms).toBe(card.p50Ms);
     expect(byCategory.p95Ms).toBe(card.p95Ms);
+  });
+});
+
+/* ====== TICKET 055a — PROVENANCE REPORTS ACTUAL N, AND KEEPS ITS DENOMINATOR ==
+ *
+ * Golden eval `04-provenance-reports-actual-n.json`: a sweep that INTENDED 3
+ * reps, 2 rows in the ledger, 1 POST the store never acknowledged. The line
+ * must read `2 of 3 reps completed` and never `2 of 2` — AGENTS.md names this
+ * failure verbatim: "the denominator silently falls back to the numerator and
+ * every line reads a clean N of N."
+ *
+ * TODAY'S MECHANISM IS NOT ENOUGH, AND batch/runner.ts:436-439 SAYS SO:
+ *   "KNOWN RESIDUAL — the rendered provenance still reads '2 of 2' rather than
+ *    '2 of 3' for a lost rep, because `intendedReps` is distinct `repIndex`
+ *    over sweep ROWS and this rep has none."
+ * A rep whose row never landed leaves NOTHING in the ledger, so no derivation
+ * over the surviving rows can recover the 3. The sweep's own PLAN is the only
+ * evidence that survives, and it survives only if the rows CARRY it — the same
+ * decision `annotations.corpusVersion` already embodies ("COPIED, NOT LOOKED UP
+ * LATER", ledger.ts:221-231).
+ *
+ * THE FIELD NAME BELOW IS THIS TICKET'S PROPOSAL, NOT A DISCOVERY.
+ * `annotations.intendedReps` — the retained rep count the sweep DECLARED
+ * (`BatchOptions.reps`, already surfaced as `BatchConfigSummary.intendedReps`),
+ * stamped on every row by `createRunOnceExecutor` exactly where it already
+ * stamps `repIndex`. It is read here through a narrow local cast so no
+ * production type moves before the implementation does.
+ *
+ * IT IS A FLOOR, NEVER A CEILING (second test): a declaration can only ever
+ * RAISE the denominator. Letting it lower one would hand a stale plan the power
+ * to hide a rep that demonstrably ran — the same "N of N" dishonesty from the
+ * other direction.
+ * ========================================================================== */
+
+/** The sweep's DECLARED retained rep count, stamped on every row it writes. */
+type SweepPlanAnnotations = { repIndex?: number; corpusVersion?: string; intendedReps?: number };
+
+const PLAN_RECORDING_ID = 'rec-plan-sweep';
+
+/** One row of a sweep that DECLARED `declared` reps and is writing rep `rep`. */
+function planRow(rep: number, ms: number, declared: number, overrides: Partial<Run> = {}): Run {
+  const annotations: SweepPlanAnnotations = {
+    repIndex: rep,
+    corpusVersion: CORPUS_VERSION,
+    intendedReps: declared,
+  };
+  return runWithLatency(ms, {
+    id: `run-plan-${rep}`,
+    recordingId: PLAN_RECORDING_ID,
+    cost: 0.002,
+    annotations,
+    ...overrides,
+  });
+}
+
+describe('TICKET 055a — a rep whose row never landed stays in the DENOMINATOR', () => {
+  /** Golden eval 04's `given`, exactly: 3 intended, 2 rows, 1 POST unacknowledged. */
+  const DECLARED_REPS = 3;
+  const LANDED = [800, 1000] as const;
+
+  function lossyLedger(): RunLedger {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: PLAN_RECORDING_ID }));
+    // Rep 3 ran. Its POST went unacknowledged, so it has NO row here — that is
+    // the whole scenario, and it is why the plan has to ride the rows that did
+    // land.
+    LANDED.forEach((ms, i) => ledger.appendRun(planRow(i + 1, ms, DECLARED_REPS)));
+    return ledger;
+  }
+
+  it('renders `2 of 3 reps completed`, never `2 of 2`', () => {
+    const arm = deriveExperimentAggregates(lossyLedger()).perArm['B']!;
+
+    // latency_samples: the two rows that landed. The lost rep adds no sample —
+    // the denominator that must survive is the REP count, not `n`.
+    expect(arm.n).toBe(2);
+    expect(arm.p50Ms).toBe(800);
+
+    expect(arm.provenance.completedReps).toBe(2);
+    expect(arm.provenance.intendedReps).toBe(DECLARED_REPS);
+    expect(arm.provenance.line).toContain('2 of 3 reps completed');
+
+    // Asserted against the REP CLAUSE alone, exactly as the golden runner does:
+    // ticket 052's `cost measured on 2 of 2 samples` is a different and
+    // legitimately-`2 of 2` figure on the same line.
+    const repsClause = /\d+ of \d+ reps completed/.exec(arm.provenance.line)?.[0] ?? '';
+    expect(repsClause).not.toBe('2 of 2 reps completed');
+    expect(repsClause).not.toBe('3 of 3 reps completed');
+  });
+
+  it('the declaration is a FLOOR: it can never shrink a denominator the rows prove', () => {
+    // A stale plan says 3; four reps demonstrably ran (one of them failed).
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: PLAN_RECORDING_ID }));
+    [800, 900, 1100].forEach((ms, i) => ledger.appendRun(planRow(i + 1, ms, DECLARED_REPS)));
+    ledger.appendRun(
+      planRow(4, 5_000, DECLARED_REPS, { status: 'failed', errors: ['tts stage timed out'] }),
+    );
+
+    const arm = deriveExperimentAggregates(ledger).perArm['B']!;
+    expect(arm.n).toBe(3);
+    expect(arm.provenance.completedReps).toBe(3);
+    // 4, from the rows — NOT the declared 3, which would delete a rep that ran.
+    expect(arm.provenance.intendedReps).toBe(4);
+    expect(arm.provenance.line).toContain('3 of 4 reps completed');
+  });
+
+  /**
+   * THE TWO HALVES OF THIS TICKET PULL IN OPPOSITE DIRECTIONS, so this is
+   * asserted rather than assumed: 055a's other half REMOVES unsynced
+   * LiveSessions from every aggregate, and a fix that reached for "anything the
+   * server did not acknowledge is out" would take the rep denominator with it.
+   * LiveSessions and Runs share a ledger and nothing else.
+   */
+  it('the unsynced-LiveSession work must not shrink the rep denominator', () => {
+    const ledger = lossyLedger();
+    const before = deriveExperimentAggregates(ledger).perArm['B']!.provenance;
+
+    for (const id of ['live-unsynced-1', 'live-unsynced-2']) {
+      // Narrow local cast at the assertion site: `syncState` is this ticket's
+      // proposed field and does not exist on `LiveSession` yet.
+      const session: LiveSession & { syncState: string } = {
+        ...makeLiveSessionEntity({ id }),
+        syncState: 'unsynced',
+      };
+      ledger.appendLiveSession(session);
+    }
+
+    const after = deriveExperimentAggregates(ledger).perArm['B']!.provenance;
+    expect(after).toEqual(before);
+    expect(after.intendedReps).toBe(DECLARED_REPS);
+    expect(after.line).toContain('2 of 3 reps completed');
   });
 });

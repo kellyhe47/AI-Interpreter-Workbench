@@ -28,6 +28,7 @@ import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
 import type { LiveSession } from '../state/ledger';
+import { isAggregatableLiveSession } from '../state/ledger';
 import {
   advance,
   cascadeUtteranceScript,
@@ -254,5 +255,144 @@ describe('TICKET 062 — a Live utterance RECORD names the selected languages', 
     // The pair is order-free and stays EN↔ES; the DIRECTION is what moved.
     expect(records[0]!.languagePair).toBe('EN↔ES');
     expect(records[0]!.direction).toBe('es→en');
+  });
+});
+
+/* ===== TICKET 055a — A POST THE SERVER NEVER ACKNOWLEDGED IS MARKED ========
+ *
+ * `useSessionController.ts:738-747` writes the take to the ledger FIRST and
+ * UNCONDITIONALLY, then fires `liveSessions.create(session).catch(() => {})`.
+ * The ORDER is correct and deliberate (ticket 023: the operator's take is not
+ * contingent on a reachable server) and NOTHING here may make the local append
+ * conditional. The defect is that the same store is then AGGREGATED FROM: the
+ * audit measured 14 sessions on screen over 8 in the repo.
+ *
+ * THIS IS THE WIRING HALF. `ledger.test.ts` / `deriveLive.empty.test.ts` pin
+ * the pure derivation, and every one of those can be satisfied by a change no
+ * caller reaches. These drive the REAL seam — `SessionDeps.liveSessions`, the
+ * one the controller actually calls — through <App/>, so the mark can only be
+ * produced by the code path that ships.
+ *
+ * `syncState` is this ticket's proposed field, read through a narrow local cast
+ * so no production type moves before the implementation does. The gate is
+ * `isAggregatableLiveSession` — the ONE gate — never a second filter.
+ *
+ * ADDITIVE to ticket 041's block above: none of its assertions move, and the
+ * first test below re-pins 041's order from INSIDE the POST.
+ * ========================================================================== */
+
+/** This ticket's proposed record state, until it exists on `LiveSession`. */
+type SyncedLiveSession = LiveSession & { syncState?: string };
+
+function syncStateOf(session: LiveSession): string | undefined {
+  return (session as SyncedLiveSession).syncState;
+}
+
+interface SyncHarness {
+  kit: TestDeps;
+  /** `getLiveSessions().length` READ FROM INSIDE `create`, per call. */
+  storedWhenPosted: number[];
+  create: ReturnType<typeof vi.fn>;
+  setNow: (ms: number) => void;
+}
+
+/** One cascade take wired to a `create` that resolves — or rejects. */
+function renderTake(opts: { rejecting: boolean }): SyncHarness {
+  let t = 0;
+  const kit = makeDeps({
+    now: () => t,
+    initialState: { mode: 'cascade' },
+    scripts: { cascade: cascadeUtteranceScript() },
+  });
+  const storedWhenPosted: number[] = [];
+  const create = vi.fn(async (session: LiveSession) => {
+    // Read the LOCAL store from inside the POST: whatever the server is about
+    // to answer, the take must ALREADY be stored when it is asked.
+    storedWhenPosted.push(kit.ledger.getLiveSessions().length);
+    if (opts.rejecting) throw new Error('offline');
+    return session;
+  });
+  render(createElement(App, { deps: { ...kit.deps, liveSessions: { create } } }));
+  return { kit, storedWhenPosted, create, setNow: (ms: number) => (t = ms) };
+}
+
+/** Start, produce one utterance, stop at `ms`, and let the POST settle. */
+async function runOneTake(h: SyncHarness, ms = 60_000): Promise<void> {
+  await clickStartMicrophone();
+  await advance(1_400);
+  h.setNow(ms);
+  fireEvent.click(screen.getByRole('button', { name: 'Stop session' }));
+  await advance(100);
+}
+
+/** The single stored take — asserted to be single, so nothing reads a stale one. */
+function storedTake(h: SyncHarness): LiveSession {
+  const stored = h.kit.ledger.getLiveSessions();
+  expect(stored).toHaveLength(1);
+  return stored[0]!;
+}
+
+describe('TICKET 055a — a rejected POST leaves the take UNSYNCED, never deleted', () => {
+  it('the local append happens FIRST and UNCONDITIONALLY — the POST finds it already stored', async () => {
+    // Ticket 023's order, asserted from inside the seam rather than after it:
+    // an implementation that made the append wait for (or depend on) the
+    // server would read 0 here, and the operator would lose the take that the
+    // unreachable backend was supposed to cost nothing.
+    const h = renderTake({ rejecting: true });
+    await runOneTake(h);
+
+    expect(h.create).toHaveBeenCalledTimes(1);
+    expect(h.storedWhenPosted).toEqual([1]);
+    expect(h.kit.ledger.getLiveSessions()).toHaveLength(1);
+  });
+
+  it('a REJECTED create marks the ledger’s copy unsynced — stored, listed, out of the ONE gate', async () => {
+    const h = renderTake({ rejecting: true });
+    await runOneTake(h);
+
+    const take = storedTake(h);
+    expect(syncStateOf(take)).toBe('unsynced');
+    // The exclusion is the ONE gate reading state on the record.
+    expect(isAggregatableLiveSession(take)).toBe(false);
+    // ...and the take is NEVER deleted: it is the evidence of the divergence.
+    expect(h.kit.ledger.getLiveSessions().map((s) => s.id)).toEqual([take.id]);
+    expect(take.utterances).toHaveLength(1);
+    // The local write still went first — the mark may not be bought with order.
+    expect(h.storedWhenPosted).toEqual([1]);
+  });
+
+  it('a RESOLVED create leaves the same take synced and inside the gate', async () => {
+    const h = renderTake({ rejecting: false });
+    await runOneTake(h);
+
+    const take = storedTake(h);
+    expect(syncStateOf(take)).not.toBe('unsynced');
+    expect(isAggregatableLiveSession(take)).toBe(true);
+  });
+
+  it('the server’s ANSWER is the only difference between the two takes', async () => {
+    // Two separate renders, so `cleanup()` is mandatory: RTL APPENDS, and the
+    // helpers here are `screen.getByRole`. Without it the second run drives the
+    // FIRST app and this compares a take against itself — a comparison that can
+    // never fail (the shape caught three times in this project already).
+    const rejected = renderTake({ rejecting: true });
+    await runOneTake(rejected);
+    const offline = storedTake(rejected);
+
+    cleanup();
+
+    const resolved = renderTake({ rejecting: false });
+    await runOneTake(resolved);
+    const acknowledged = storedTake(resolved);
+
+    // Two ledgers, two takes — identical in everything the session produced…
+    expect(rejected.kit.ledger).not.toBe(resolved.kit.ledger);
+    expect(offline.id).toBe(acknowledged.id);
+    expect(offline.utterances).toHaveLength(acknowledged.utterances.length);
+    expect(offline.durationMs).toBe(acknowledged.durationMs);
+    // …and separated by exactly one thing: whether the repo got it.
+    expect(syncStateOf(offline)).not.toBe(syncStateOf(acknowledged));
+    expect(isAggregatableLiveSession(offline)).toBe(false);
+    expect(isAggregatableLiveSession(acknowledged)).toBe(true);
   });
 });

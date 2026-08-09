@@ -26,7 +26,7 @@ import {
   SERVER_RUNS,
   staticHydrationSource,
 } from './hydrationFixtures';
-import { RunLedger, type Recording, type Run } from './ledger';
+import { RunLedger, isAggregatableLiveSession, type LiveSession, type Recording, type Run } from './ledger';
 import { makeLiveSessionEntity } from '../components/results/testRecords';
 
 afterEach(() => vi.restoreAllMocks());
@@ -188,5 +188,67 @@ describe('ticket 019 — a failed listing REJECTS (empty is not the same as unre
     await expect(hydrateLedger(ledger, source)).rejects.toBeInstanceOf(ApiError);
     // Whatever the implementation writes, it must not claim it has the Runs.
     expect(ledger.getRuns()).toEqual([]);
+  });
+});
+
+/* ===== TICKET 055a — A HOST WITH NO LIVE LISTING LEARNS NOTHING ============
+ *
+ * The pre-041 source shape (recordings + runs, no `liveSessions` key) is a host
+ * with NO live-session backend. It carries no statement about which sessions the
+ * repo received, so hydrating it may not move a mark in either direction —
+ * neither promoting a local take to "the server has it" (which would invent an
+ * acknowledgement out of a listing that was never asked for), nor demoting one.
+ *
+ * AND THE SECOND TEST FENCES THE TICKET'S SCOPE. Runs canNOT diverge —
+ * `appendRun` has exactly one caller, `hydrateLedger.ts:131` — so no Run figure
+ * may move when unsynced LiveSessions are present. A fix that reached for
+ * "anything the server did not acknowledge is out" would take the Runs with it.
+ * ========================================================================== */
+
+/** This ticket's proposed record state, until it exists on `LiveSession`. */
+type SyncedLiveSession = LiveSession & { syncState?: string };
+
+function syncStateOf(session: LiveSession): string | undefined {
+  return (session as SyncedLiveSession).syncState;
+}
+
+/** A measured take, optionally marked as one the server never acknowledged. */
+function take(id: string, unsynced: boolean): LiveSession {
+  const session: SyncedLiveSession = makeLiveSessionEntity({
+    id,
+    utterances: [{ id: `${id}-u1`, timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.01 }],
+  });
+  if (unsynced) session.syncState = 'unsynced';
+  return session;
+}
+
+describe('TICKET 055a — hydration with no live listing moves no mark', () => {
+  it('a source with no `liveSessions` key leaves both marks exactly as they were', async () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(take('live-acknowledged', false));
+    ledger.appendLiveSession(take('live-unsynced', true));
+
+    // The pre-041 source shape: recordings + runs and nothing else.
+    await hydrateLedger(ledger, staticHydrationSource().source);
+
+    const [first, second] = ledger.getLiveSessions();
+    expect([first?.id, second?.id]).toEqual(['live-acknowledged', 'live-unsynced']);
+    expect(syncStateOf(first!)).not.toBe('unsynced');
+    expect(isAggregatableLiveSession(first!)).toBe(true);
+    expect(syncStateOf(second!)).toBe('unsynced');
+    expect(isAggregatableLiveSession(second!)).toBe(false);
+  });
+
+  it('and no Run figure moves because unsynced sessions are present', async () => {
+    const withUnsynced = new RunLedger();
+    withUnsynced.appendLiveSession(take('live-unsynced-1', true));
+    withUnsynced.appendLiveSession(take('live-unsynced-2', true));
+    const clean = new RunLedger();
+
+    await hydrateLedger(withUnsynced, staticHydrationSource().source);
+    await hydrateLedger(clean, staticHydrationSource().source);
+
+    expect(withUnsynced.getRuns().map((r) => r.id)).toEqual(clean.getRuns().map((r) => r.id));
+    expect(withUnsynced.runAggregates()).toEqual(clean.runAggregates());
   });
 });
