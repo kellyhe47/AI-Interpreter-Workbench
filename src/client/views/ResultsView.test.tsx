@@ -17,8 +17,8 @@
 // type augmentation is visible to `tsc -p tsconfig.json`, whose include does
 // not cover the setup file.
 import '@testing-library/jest-dom/vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { armLabel } from '../../core/arms';
@@ -181,6 +181,83 @@ function comparisonLedger(): RunLedger {
   const ledger = new RunLedger();
   seedComparisonSweep(ledger);
   return ledger;
+}
+
+/* ------------------------------------------- ticket 060 — citations seam -- */
+
+/**
+ * TICKET 060 — the shape the coverage card's onboarding-cost tiles must render
+ * FROM, and the shape `scripts/verify-citations.mjs` must be able to consume.
+ *
+ * Declared locally rather than imported so `tsc -p tsconfig.json` stays clean
+ * while `src/client/views/coverageCitations.ts` does not yet exist: these tests
+ * are meant to be RED, not to break the typecheck. The module is reached by a
+ * variable specifier for the same reason — a literal `import('./coverageCitations')`
+ * is a compile error until the file lands, which would hide the red behind a
+ * typecheck failure instead of a test failure.
+ *
+ * `commit` is a real, resolvable abbreviated SHA or it is `null`. There is no
+ * third state: a plausible-looking hash with no object behind it is the exact
+ * fabrication this ticket exists to remove. `addedLines` is the WHOLE-COMMIT
+ * insertion count — every file in the commit, tests included, no exclusion rule
+ * — because that is the number `git show --numstat <sha>` sums directly and is
+ * therefore the number the verifier can check without a convention of its own.
+ */
+type CoverageCitation = {
+  direction: string;
+  commit: string | null;
+  addedLines: number | null;
+  note: string;
+};
+
+/** Where the typed citations module must live, and what it must export. */
+const CITATIONS_SPECIFIER = './coverageCitations';
+const CITATIONS_EXPORT = 'COVERAGE_CITATIONS';
+const CITATIONS_FILE = 'src/client/views/coverageCitations.ts';
+
+/** An abbreviated git SHA git itself would print: at least 7 hex digits. */
+const HASH_SHAPE = /^[0-9a-f]{7,40}$/;
+
+async function loadCitations(): Promise<readonly CoverageCitation[]> {
+  const loaded = (await import(/* @vite-ignore */ CITATIONS_SPECIFIER)) as Record<string, unknown>;
+  const exported = loaded[CITATIONS_EXPORT];
+  if (!Array.isArray(exported)) {
+    throw new Error(`${CITATIONS_FILE} must export ${CITATIONS_EXPORT} as an array`);
+  }
+  for (const entry of exported as unknown[]) {
+    const record = entry as Partial<CoverageCitation>;
+    if (typeof record.direction !== 'string' || record.direction.trim() === '') {
+      throw new Error(`${CITATIONS_EXPORT}: every entry needs a non-empty direction`);
+    }
+    if (typeof record.note !== 'string' || record.note.trim() === '') {
+      throw new Error(`${CITATIONS_EXPORT}: every entry needs a non-empty note`);
+    }
+    if (record.commit !== null && typeof record.commit !== 'string') {
+      throw new Error(`${CITATIONS_EXPORT}: commit must be a string or null, never absent`);
+    }
+    if (record.addedLines !== null && typeof record.addedLines !== 'number') {
+      throw new Error(`${CITATIONS_EXPORT}: addedLines must be a number or null, never absent`);
+    }
+  }
+  return exported as readonly CoverageCitation[];
+}
+
+/** Every tile of the coverage card's onboarding-cost strip, in render order. */
+function timeToAddTiles(): string[] {
+  return Array.from(card('coverage').querySelectorAll('[data-time-to-add]')).map((tile) =>
+    (tile.textContent ?? '').trim(),
+  );
+}
+
+/** Every checked-in file under a directory, recursively. */
+function filesUnder(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...filesUnder(full));
+    else out.push(full);
+  }
+  return out;
 }
 
 /* ================================================================ header == */
@@ -611,20 +688,182 @@ describe('ResultsView — coverage card rows are DIRECTIONS with per-stage cells
     }
   });
 
-  it('carries a per-cell observation note and three time-to-add tiles citing commit and diff size', () => {
+  // TICKET 060 — REWRITTEN. This test previously pinned `commit a4f21c`,
+  // `+11 lines` and `commit 9d0e77` — two hashes that resolve to nothing in
+  // this repository. Pinning them made the suite GREEN over fabricated
+  // evidence, so the assertions could not survive the fix that removes them.
+  // What is still true and still worth pinning: the observation note, and that
+  // the strip renders one tile per citation the module declares — the tile
+  // CONTENT is now asserted against that module, below.
+  it('carries a per-cell observation note and one time-to-add tile per declared citation', async () => {
     renderView(comparisonLedger());
     const observation = card('coverage').querySelector('[data-observation]');
     expect(observation).not.toBeNull();
     expect(observation!.textContent).toContain('Observation · English → Cantonese on Realtime');
     expect(observation!.textContent).toMatch(/Mandarin, not Cantonese/);
 
-    const tiles = card('coverage').querySelectorAll('[data-time-to-add]');
-    expect(tiles).toHaveLength(3);
-    const tileText = Array.from(tiles).map((t) => t.textContent ?? '');
-    expect(tileText[0]).toContain('commit a4f21c');
-    expect(tileText[0]).toContain('+11 lines');
-    expect(tileText[1]).toContain('commit 9d0e77');
-    expect(tileText[2]).toContain('no mechanism exists at any price');
+    const citations = await loadCitations();
+    expect(citations.length).toBeGreaterThan(0);
+    expect(timeToAddTiles()).toHaveLength(citations.length);
+  });
+});
+
+/* ======================= TICKET 060 — cited commits must actually exist ==== */
+
+/**
+ * PRD §11 stakes this card on "onboarding cost is proven by commit, not
+ * claimed." A wrong number is an error; a wrong citation is a claim that
+ * evidence was gathered when it never was.
+ *
+ * The split of duties these tests assume:
+ *   - `scripts/verify-citations.mjs` binds each non-null `commit` to REALITY —
+ *     `git cat-file -t` must print `commit`, and `addedLines` must equal the
+ *     whole-commit insertion count from the diffstat.
+ *   - these tests pin what that script cannot see: that the module exists and
+ *     is typed, that the VIEW renders from it rather than from prose of its
+ *     own, that an unproven claim carries `null` on BOTH fields, and that the
+ *     unproven tile emits no numeral an operator could read as a measurement.
+ */
+describe('ResultsView — TICKET 060: onboarding-cost citations are data, not prose', () => {
+  it('reads its citations from a typed module: direction, commit, addedLines, note', async () => {
+    const citations = await loadCitations();
+    // The card answers two named Key Impact Metrics; one tile is not a card.
+    expect(citations.length).toBeGreaterThanOrEqual(3);
+    for (const entry of citations) {
+      expect(typeof entry.direction).toBe('string');
+      expect(entry.direction.trim()).not.toBe('');
+      expect(typeof entry.note).toBe('string');
+      expect(entry.note.trim()).not.toBe('');
+      // No third state, and no `undefined`: the field is present and it is
+      // either a real abbreviated SHA or an explicit null.
+      expect(entry.commit === null || typeof entry.commit === 'string').toBe(true);
+      if (entry.commit !== null) expect(entry.commit).toMatch(HASH_SHAPE);
+    }
+  });
+
+  it('pairs null with null: an unproven claim has no commit AND no line count', async () => {
+    const citations = await loadCitations();
+    const unproven = citations.filter((entry) => entry.commit === null);
+    // Realtime EN→YUE has no mechanism at any price — there is nothing to
+    // cite, and the card must say so rather than invent something to cite.
+    expect(unproven.length).toBeGreaterThan(0);
+    for (const entry of unproven) {
+      // Absence is not zero. A 0 here would read as "it cost nothing".
+      expect(entry.addedLines).toBeNull();
+      expect(entry.addedLines).not.toBe(0);
+    }
+
+    // The other half of the same invariant: a claim that DOES cite a commit
+    // must carry the diffstat the verifier checks it against. A cited hash
+    // with a null line count leaves the dominant term unverified.
+    const proven = citations.filter((entry) => entry.commit !== null);
+    expect(proven.length).toBeGreaterThan(0);
+    for (const entry of proven) {
+      expect(typeof entry.addedLines).toBe('number');
+      expect(entry.addedLines).toBeGreaterThan(0);
+    }
+  });
+
+  it('renders the module — every tile carries its own entry’s note, in order', async () => {
+    const citations = await loadCitations();
+    renderView(comparisonLedger());
+    const tiles = timeToAddTiles();
+
+    expect(tiles).toHaveLength(citations.length);
+    for (const [index, entry] of citations.entries()) {
+      // Derived, not coincidental: change a note in the module and this tile
+      // changes with it. A view keeping prose of its own fails here.
+      expect(tiles[index] ?? '').toContain(entry.note);
+    }
+  });
+
+  it('a proven tile shows its hash and its +N lines — so "no digits" is not vacuous', async () => {
+    const citations = await loadCitations();
+    renderView(comparisonLedger());
+    const tiles = timeToAddTiles();
+
+    let provenTiles = 0;
+    for (const [index, entry] of citations.entries()) {
+      if (entry.commit === null) continue;
+      provenTiles += 1;
+      const text = tiles[index] ?? '';
+      expect(text).toContain(entry.commit);
+      expect(text).toContain(`+${String(entry.addedLines)} lines`);
+      expect(text).toMatch(/\d/);
+    }
+    // Anchors the negative assertions in the next test: the card DOES render
+    // digits and hashes somewhere, so a tile that renders none is a decision,
+    // not an empty card.
+    expect(provenTiles).toBeGreaterThan(0);
+  });
+
+  it('an unproven tile renders its note and NOT ONE NUMERAL — no +N lines, no hash', async () => {
+    const citations = await loadCitations();
+    renderView(comparisonLedger());
+    const tiles = timeToAddTiles();
+
+    for (const [index, entry] of citations.entries()) {
+      if (entry.commit !== null) continue;
+      const text = tiles[index] ?? '';
+      // It says what it knows...
+      expect(text).toContain(entry.note);
+      // ...and golden eval 10's `digits_rendered: 0`, taken literally.
+      expect(text).not.toMatch(/\d/);
+      // Named separately so a reintroduced diffstat is legible in the failure.
+      expect(text).not.toMatch(/\+\s*\d+\s*lines/);
+      expect(text).not.toMatch(/commit\s+[0-9a-f]{6,40}/i);
+      expect(text).not.toMatch(/\b[0-9a-f]{7,40}\b/);
+    }
+  });
+
+  it('the two fabricated hashes appear nowhere under src/', () => {
+    // Assembled from fragments so this assertion cannot match its own source.
+    const fabricated = ['a4f' + '21c', '9d0' + 'e77'];
+    const files = filesUnder(resolve(process.cwd(), 'src'));
+
+    // A walk that found nothing would pass this test for the wrong reason.
+    expect(files.length).toBeGreaterThan(20);
+    expect(files).toContain(resolve(process.cwd(), 'src/client/views/ResultsView.tsx'));
+
+    const offenders: string[] = [];
+    for (const file of files) {
+      const text = readFileSync(file, 'utf8');
+      for (const needle of fabricated) {
+        if (text.includes(needle)) offenders.push(`${file} cites ${needle}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('checks in scripts/verify-citations.mjs and wires it as an npm script', () => {
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    const script = pkg.scripts?.['verify-citations'];
+    expect(script).toBeDefined();
+    expect(script).toContain('scripts/verify-citations.mjs');
+    // The module it reads is TypeScript; plain node cannot import it. Every
+    // sibling script in this repo already runs under tsx.
+    expect(script).toContain('tsx');
+  });
+
+  it('the verifier resolves each hash AND checks the whole-commit insertion count', () => {
+    const source = readFileSync(resolve(process.cwd(), 'scripts/verify-citations.mjs'), 'utf8');
+
+    // It reads the same module the view renders — not a copy of the list.
+    expect(source).toContain('coverageCitations');
+    expect(source).toContain('addedLines');
+    // `git cat-file -t <sha>` must print `commit`: proves the object exists.
+    expect(source).toContain('cat-file');
+    // ...and the diffstat binds that object to the change it claims to be.
+    expect(source).toMatch(/--numstat|--shortstat|--stat\b/);
+    // A verifier that reports and exits 0 is not a gate.
+    expect(source).toMatch(/process\.exit\(\s*1\s*\)|exitCode\s*=\s*1/);
+    // WHOLE-COMMIT convention, pinned: every file in the commit counts, tests
+    // included. A production-only rule would need to exclude test paths here,
+    // and then the module's numbers would mean something the script's name
+    // does not say.
+    expect(source).not.toMatch(/\.test\.|\.spec\./);
   });
 });
 
@@ -1096,6 +1335,15 @@ describe('ResultsView.tsx source — no hardcoded metric, tokens only', () => {
     for (const figure of ['0.140', '0.021', '1.02', '1.06', '4.2', '3.8', '4.6']) {
       expect(source).not.toContain(figure);
     }
+  });
+
+  // TICKET 060 — the view renders FIELDS. A hash or a diffstat typed into this
+  // file is evidence nothing verified, and nothing can verify it here: the
+  // checked-in verifier reads the citations module, not JSX.
+  it('cites no commit and no diffstat of its own — those live in the citations module', () => {
+    expect(source).not.toMatch(/commit\s+[0-9a-f]{6,40}/i);
+    expect(source).not.toMatch(/\+\s*\d+\s*lines/);
+    expect(source).toContain('coverageCitations');
   });
 
   it('styles from tokens only — no hex, rgb or oklch literal', () => {
