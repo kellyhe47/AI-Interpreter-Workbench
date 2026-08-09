@@ -1175,3 +1175,156 @@ describe('TICKET 062 — a Replay run carries the language pair and direction', 
     }
   });
 });
+
+/* =========================== TICKET 061 — the direction is an OPERATOR choice */
+
+/**
+ * TICKET 061 AC2 — THE DIRECTION MUST COME FROM AN OPERATOR-VISIBLE CONTROL,
+ * NOT A HARDCODED DEFAULT.
+ *
+ * Ticket 062 made Replay carry a direction, derived from the clip's own
+ * `sourceLanguage` through `languageSelectionForSource`. That function returns
+ * the FIRST pair whose source matches, and `pairs[0]` is EN↔ES — so every
+ * English clip resolves to Spanish and EN→YUE IS UNREACHABLE FROM REPLAY.
+ * Sweeps run through Replay, so the kept Cantonese track (PRD §7) cannot be
+ * produced at all, and the asymmetry between EN→YUE and YUE→EN — the finding
+ * this study exists to report — has no way of being measured.
+ *
+ * The DOM contract these tests add to RunConfigPanel:
+ *   [data-target-language]              the control, present once a Recording
+ *                                       is selected
+ *     one <button> per LEGAL target for that clip, accessible name = the
+ *     language name ('Spanish' / 'Cantonese' for an English clip). The clip's
+ *     OWN language is never offered: a run can never point at the language it
+ *     is already in, so a Spanish clip has exactly one target and nothing to
+ *     resolve. The chosen one carries aria-pressed='true'.
+ *
+ * The load-bearing assertions read the object handed to `runOnce` and to
+ * `startBatch`, never the control's own DOM: a value that changes on screen and
+ * never crosses the seam is the defect, not the fix.
+ */
+describe('TICKET 061 — an operator-visible control picks the target language', () => {
+  const targetGroup = (): HTMLElement => get('[data-target-language]');
+
+  const targetOptions = (): string[] =>
+    within(targetGroup())
+      .getAllByRole('button')
+      .map((button) => (button.textContent ?? '').trim());
+
+  const chooseTarget = (language: string): void => {
+    fireEvent.click(within(targetGroup()).getByRole('button', { name: language }));
+  };
+
+  /** The Run button clears its in-flight lock on every exit (ticket 044). */
+  const runAndSettle = async (fakes: { runOnce: { mock: { calls: unknown[] } } }, calls: number) => {
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(fakes.runOnce.mock.calls).toHaveLength(calls));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).not.toBeDisabled());
+  };
+
+  it('an ENGLISH clip offers both targets of the two supported pairs, and never English', async () => {
+    await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id); // sourceLanguage 'en'
+
+    expect(targetOptions()).toEqual(['Spanish', 'Cantonese']);
+    // A run into the language the clip is already in measures nothing.
+    expect(within(targetGroup()).queryByRole('button', { name: 'English' })).toBeNull();
+  });
+
+  it('choosing Cantonese sends EN↔YUE / en→yue / Cantonese across the runOnce seam', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    chooseTarget('Cantonese');
+    await runAndSettle(fakes, 1);
+
+    const { config } = fakes.runOnce.mock.calls[0]![0] as ReplayRunRequest;
+    expect(config.languagePair).toBe('EN↔YUE');
+    expect(config.direction).toBe('en→yue');
+    expect(config.targetLanguage).toBe('Cantonese');
+  });
+
+  it('the choice is visible on the control it was made with', async () => {
+    await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    chooseTarget('Cantonese');
+
+    const group = targetGroup();
+    expect(within(group).getByRole('button', { name: 'Cantonese' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(group).getByRole('button', { name: 'Spanish' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  it('IT IS THE CONTROL, NOT A CONSTANT: two choices produce two different runs', async () => {
+    // The one assertion a hardcoded default cannot satisfy. Either literal —
+    // 'en→es' today, 'en→yue' after a careless fix — fails one of these calls.
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+
+    chooseTarget('Cantonese');
+    await runAndSettle(fakes, 1);
+    chooseTarget('Spanish');
+    await runAndSettle(fakes, 2);
+
+    const first = (fakes.runOnce.mock.calls[0]![0] as ReplayRunRequest).config;
+    const second = (fakes.runOnce.mock.calls[1]![0] as ReplayRunRequest).config;
+    expect(first.direction).toBe('en→yue');
+    expect(second.direction).toBe('en→es');
+    expect(first.targetLanguage).toBe('Cantonese');
+    expect(second.targetLanguage).toBe('Spanish');
+    expect(first.languagePair).not.toBe(second.languagePair);
+  });
+
+  it('EVERY sweep configuration carries the CHOSEN direction — a sweep is 45 runs of it', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    chooseTarget('Cantonese');
+    fireEvent.click(screen.getByRole('button', { name: 'Batch sweep…' }));
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+
+    const { configurations } = fakes.batches[0]!.request;
+    expect(configurations.length).toBeGreaterThan(0);
+    for (const configuration of configurations) {
+      expect(configuration.config.languagePair).toBe('EN↔YUE');
+      expect(configuration.config.direction).toBe('en→yue');
+      expect(configuration.config.targetLanguage).toBe('Cantonese');
+    }
+  });
+
+  it('a SPANISH clip has exactly one legal target and still runs es→en', async () => {
+    // Spanish appears in one pair only, so there is nothing for an operator to
+    // resolve — and the control must not be able to point the clip at Spanish.
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(MIC_REC.id); // sourceLanguage 'es'
+
+    expect(targetOptions()).toEqual(['English']);
+    expect(within(targetGroup()).queryByRole('button', { name: 'Spanish' })).toBeNull();
+    expect(within(targetGroup()).queryByRole('button', { name: 'Cantonese' })).toBeNull();
+
+    await runAndSettle(fakes, 1);
+    const { config } = fakes.runOnce.mock.calls[0]![0] as ReplayRunRequest;
+    expect(config.direction).toBe('es→en');
+    expect(config.targetLanguage).toBe('English');
+    expect(config.languagePair).toBe('EN↔ES');
+  });
+
+  it('a choice made for one clip never leaks onto a clip of another language', async () => {
+    // Cantonese chosen for the English clip, then the Spanish clip selected:
+    // 'es→yue' is not a pair this study runs, and 'en→yue' would be a run
+    // pointed at the wrong source entirely.
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    chooseTarget('Cantonese');
+    await selectRecording(MIC_REC.id);
+
+    expect(targetOptions()).toEqual(['English']);
+    await runAndSettle(fakes, 1);
+    const { config } = fakes.runOnce.mock.calls[0]![0] as ReplayRunRequest;
+    expect(config.direction).toBe('es→en');
+    expect(config.targetLanguage).toBe('English');
+  });
+});

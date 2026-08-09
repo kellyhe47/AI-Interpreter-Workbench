@@ -5,9 +5,11 @@ import {
   LEDGER_STORAGE_KEY,
   RunLedger,
   isAggregatableRun,
+  isAggregatableUtterance,
   isRealRecord,
   isRealRun,
   runArmTag,
+  runSamples,
   type LiveSession,
   type Recording,
   type Run,
@@ -949,5 +951,184 @@ describe('ticket 028 — the annotation envelope on a Run', () => {
     const retained: Run = { ...makeRun({ id: 'run-rep-1' }), annotations: { repIndex: 1 } };
     expect(isAggregatableRun(retained)).toBe(true);
     expect(isAggregatableRun(makeRun({ id: 'run-bare' }))).toBe(true);
+  });
+});
+
+/* ============================ TICKET 061 — the gate learns about languages == */
+
+/**
+ * TICKET 061 — A CONTROLLED VARIABLE THAT IS NOT RECORDED IS NOT CONTROLLED.
+ *
+ * PRD §7's control register pins "language pair + direction — fixed per sweep".
+ * A Run that does not say which direction it ran cannot be reproduced from the
+ * ledger, cannot be grouped by the by-category view, and cannot be told apart
+ * from a run of the OTHER direction — which is what runs 7acb0cc9 (Spanish) and
+ * dbeb6d94 (German) are: two different experiments, byte-indistinguishable.
+ * Every latency, cost and WER figure derived from such a row is a claim about a
+ * language nobody can name.
+ *
+ * THE CHECK GOES INSIDE `isAggregatableRun` AND NOWHERE ELSE. It is the one
+ * place that decides aggregation (PRD §17 22d); a second gate in
+ * `groupByCategory`, `runSamples` or `exportResults` splits the rule across
+ * five files and each copy is free to disagree. These tests therefore assert
+ * the verdict AT THE GATE FUNCTION, so a rejection implemented anywhere else
+ * leaves them red.
+ */
+describe('TICKET 061 — a Run that does not record its languages cannot be aggregated', () => {
+  /** Strips both fields no matter what `makeRun`'s defaults later become. */
+  function withoutLanguages(run: Run, keep?: 'languagePair' | 'direction'): Run {
+    const copy: Run = { ...run };
+    if (keep !== 'languagePair') delete copy.languagePair;
+    if (keep !== 'direction') delete copy.direction;
+    return copy;
+  }
+
+  /** Gate-passing in every OTHER respect: Arm B, sweep, complete, real. */
+  function directedRun(overrides: Partial<Run> = {}): Run {
+    return runWithLatency(500, {
+      languagePair: 'EN↔ES',
+      direction: 'en→es',
+      ...overrides,
+    });
+  }
+
+  const REJECTED: { name: string; run: () => Run }[] = [
+    {
+      name: 'neither field — every Run written before this ticket',
+      run: () => withoutLanguages(directedRun()),
+    },
+    {
+      name: 'a direction but no pair',
+      run: () => withoutLanguages(directedRun(), 'direction'),
+    },
+    {
+      name: 'a pair but no direction — the pair alone does not say which way it ran',
+      run: () => withoutLanguages(directedRun(), 'languagePair'),
+    },
+    {
+      // The runner fills the transport config with `?? ''`, so '' is the shape
+      // a language-less run has always taken. An empty string is a VALUE in an
+      // append-only ledger and sails through any `!== undefined` check.
+      name: "empty strings — '' is not a language, it is what dbeb6d94 stored",
+      run: () => directedRun({ languagePair: '', direction: '' }),
+    },
+    {
+      name: "an empty direction beside a real pair",
+      run: () => directedRun({ direction: '' }),
+    },
+  ];
+
+  it('POSITIVE CONTROL: the same Run WITH both fields is aggregated', () => {
+    const ledger = new RunLedger();
+    const run = directedRun();
+    ledger.appendRun(run);
+
+    expect(isAggregatableRun(run)).toBe(true);
+    expect(isAggregatableUtterance(run)).toBe(true);
+    expect(ledger.runAggregates().perArm['B']).toMatchObject({ n: 1, p50Ms: 500, p95Ms: 500 });
+  });
+
+  for (const testCase of REJECTED) {
+    it(`${testCase.name} → excluded`, () => {
+      const ledger = new RunLedger();
+      const run = testCase.run();
+      ledger.appendRun(run);
+
+      // AT THE GATE. A rejection implemented in a derivation instead would
+      // leave this line green and the rule in two places.
+      expect(isAggregatableRun(run)).toBe(false);
+      // …and therefore one level down, through the parent, with no check of
+      // its own (ledger.ts: `isAggregatableUtterance` delegates).
+      expect(isAggregatableUtterance(run)).toBe(false);
+      expect(ledger.runAggregates().perArm).toEqual({});
+
+      // STORED AND LISTED LIKE ANY OTHER RUN (PRD §12). Excluding a row from
+      // the figures is not deleting it.
+      expect(ledger.getRuns().map((r) => r.id)).toEqual([run.id]);
+      expect(ledger.exportRuns().entities.runs.map((r) => r.id)).toEqual([run.id]);
+      // And nothing invented the missing value on the way through.
+      expect(ledger.getRuns()[0]!.direction ?? '').toBe(run.direction ?? '');
+    });
+  }
+
+  it('the gate is not a language POLICE: any recorded direction is admitted', () => {
+    // The gate asks whether the run RECORDED its direction, never which one it
+    // is. A gate that admitted only 'en→es' would quietly delete the Cantonese
+    // track — the direction whose asymmetry is the finding (PRD §7).
+    const ledger = new RunLedger();
+    const yue = directedRun({ languagePair: 'EN↔YUE', direction: 'en→yue' });
+    const reverse = directedRun({ languagePair: 'EN↔ES', direction: 'es→en' });
+    ledger.appendRun(yue);
+    ledger.appendRun(reverse);
+
+    expect(isAggregatableRun(yue)).toBe(true);
+    expect(isAggregatableRun(reverse)).toBe(true);
+    expect(ledger.runAggregates().perArm['B']).toMatchObject({ n: 2 });
+  });
+
+  it('languages are NOT part of the configuration the arm tag is derived from', () => {
+    // Arm membership is DERIVED from configuration and languages are not part
+    // of it: the same recipe is the same arm in either direction, which is what
+    // makes the two directions comparable at all.
+    const es = directedRun();
+    const yue = directedRun({ languagePair: 'EN↔YUE', direction: 'en→yue' });
+    expect(runArmTag(es)).toBe('B');
+    expect(runArmTag(yue)).toBe(runArmTag(es));
+    expect(runArmTag(withoutLanguages(es))).toBe('B');
+  });
+});
+
+/**
+ * TICKET 061 — THE THREE STORED RUNS ARE LEFT EXACTLY AS THEY ARE.
+ *
+ * No backfill and no inferred direction: all three of `data/runs/` carry
+ * `origin: "manual"`, so the gate has ALREADY rejected them on a rule that
+ * predates this ticket, and guessing a direction to write into an append-only
+ * ledger would fabricate the very fact the ticket says is missing. What has to
+ * keep working is READING them.
+ */
+describe('TICKET 061 — a fieldless Run stays readable, and stays excluded on the rule it already broke', () => {
+  /** The shape of the three records in `data/runs/`. */
+  function storedRun(): Run {
+    const run: Run = makeRun({ origin: 'manual' });
+    delete run.languagePair;
+    delete run.direction;
+    return run;
+  }
+
+  it('parses, lists and exports unchanged — nothing is dropped and nothing is invented', () => {
+    const ledger = new RunLedger();
+    const run = storedRun();
+    ledger.appendRun(run);
+
+    expect(ledger.getRuns()).toEqual([run]);
+    // Through JSON, which is how the ledger actually reaches these tests.
+    const roundTripped = JSON.parse(JSON.stringify(ledger.exportRuns())) as {
+      entities: { runs: Run[] };
+    };
+    const read = roundTripped.entities.runs[0]!;
+    expect(read).toEqual(run);
+    expect(Object.keys(read)).not.toContain('languagePair');
+    expect(Object.keys(read)).not.toContain('direction');
+  });
+
+  it('every reader still answers for it — no derivation throws on an absent direction', () => {
+    const run = storedRun();
+    expect(runArmTag(run)).toBe('B');
+    expect(isRealRun(run)).toBe(true);
+    // The measured atom still expands: one Run-level sample, as it always did.
+    expect(runSamples(run)).toHaveLength(1);
+    expect(runSamples(run)[0]!.latencyMs).toBe(500);
+  });
+
+  it('is excluded by the ORIGIN rule it already broke — no new mechanism is needed', () => {
+    const run = storedRun();
+    expect(run.origin).toBe('manual');
+    expect(isAggregatableRun(run)).toBe(false);
+    // The same Run as a sweep is still excluded, but on the new rule — which is
+    // what proves the origin clause is not doing this ticket's work for it.
+    const asSweep: Run = { ...run, origin: 'sweep' };
+    expect(asSweep.languagePair).toBeUndefined();
+    expect(isAggregatableRun(asSweep)).toBe(false);
   });
 });

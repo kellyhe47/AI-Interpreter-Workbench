@@ -4,7 +4,9 @@
  * The load-bearing property is APPEND-ONLY: one line per run, in append order,
  * and an earlier line is never rewritten.
  */
+import { readFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createStorage } from './index';
@@ -252,5 +254,96 @@ describe('state lives on disk, not in process memory', () => {
       Array.from(wavBytes(8, 32)),
     );
     expect((await other.readLedger()).map((r) => r.id)).toEqual(['r-shared']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 061 — the two `Run` interfaces are MIRRORED, and the mirror is the
+// only thing keeping them honest.
+//
+// `tsconfig.json` excludes `src/server` from the client program, so neither
+// side may import the other and the compiler can never compare them. The
+// server stores the client's Run VERBATIM (routes/runs.ts: "the Run is stored
+// verbatim"), so a field the server type does not declare still lands on disk
+// and still comes back out of `readLedger()` — which is exactly why nothing
+// runtime can catch the drift, and why this reads the declarations themselves.
+//
+// A field-for-field superset is the assertion, not a spot check for two names:
+// a spot check goes green the moment someone types the words anywhere in the
+// file, and this ticket's whole complaint is that the vocabulary of a Run
+// exists in two places that are allowed to disagree.
+// ---------------------------------------------------------------------------
+
+/** The body of `export interface <name> {` … `}`, brace-matched. */
+function interfaceBody(source: string, name: string): string {
+  const header = `export interface ${name} {`;
+  const start = source.indexOf(header);
+  if (start < 0) throw new Error(`no declaration of ${name}`);
+  let depth = 0;
+  for (let i = start + header.length - 1; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start + header.length, i);
+    }
+  }
+  throw new Error(`unterminated declaration of ${name}`);
+}
+
+/** Property names declared at the top level of an interface body. */
+function declaredFields(body: string): string[] {
+  const names: string[] = [];
+  let depth = 0;
+  for (const line of body.split('\n')) {
+    const match = depth === 0 ? /^\s{2}([A-Za-z_$][\w$]*)\??\s*:/.exec(line) : null;
+    if (match) names.push(match[1]!);
+    for (const ch of line) {
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+    }
+  }
+  return names;
+}
+
+describe('TICKET 061 — the server Run mirrors the client Run field-for-field', () => {
+  const clientSource = readFileSync(
+    resolve(process.cwd(), 'src/client/state/ledger.ts'),
+    'utf8',
+  );
+  const serverSource = readFileSync(
+    resolve(process.cwd(), 'src/server/storage/types.ts'),
+    'utf8',
+  );
+  const clientBody = interfaceBody(clientSource, 'Run');
+  const serverBody = interfaceBody(serverSource, 'Run');
+  const clientFields = declaredFields(clientBody);
+  const serverFields = declaredFields(serverBody);
+
+  it('GUARD: both declarations were really found and parsed', () => {
+    // Without this the two assertions below are satisfiable by an extractor
+    // that returned nothing at all from both files.
+    for (const known of ['id', 'recordingId', 'armTag', 'origin', 'status', 'createdAt']) {
+      expect(clientFields).toContain(known);
+      expect(serverFields).toContain(known);
+    }
+    expect(clientFields.length).toBeGreaterThan(10);
+    // The `RunUtterance` twin above it must not have been picked up instead.
+    expect(clientFields).not.toContain('utteranceId');
+    expect(serverFields).not.toContain('utteranceId');
+  });
+
+  it('declares languagePair and direction, OPTIONAL so the 3 stored Runs still parse', () => {
+    // Optional is load-bearing: `data/runs/` holds three pre-061 Runs with
+    // neither field, and a required declaration would make every one of them
+    // a type error the moment anything read the ledger.
+    expect(serverBody).toMatch(/^\s*languagePair\?:\s*string;/m);
+    expect(serverBody).toMatch(/^\s*direction\?:\s*string;/m);
+    expect(serverFields).toContain('languagePair');
+    expect(serverFields).toContain('direction');
+  });
+
+  it('declares every field the client Run declares — no field may exist on one side only', () => {
+    expect(clientFields.filter((f) => !serverFields.includes(f))).toEqual([]);
   });
 });

@@ -983,6 +983,36 @@ describe('what may be written for an abandoned execution (ticket 048, R3-2)', ()
     expect(rep1.every((r) => r.errors.includes(RUN_ABANDONED))).toBe(true);
   });
 
+  // TICKET 061 — the abandoned row is the ONLY record that a rep was attempted
+  // at all, and it rides the arm's provenance denominator forever. Written
+  // without languages it is a row in an append-only ledger that cannot say
+  // which direction the sweep was running — the same hole run dbeb6d94 left,
+  // in the table whose entire job is to report what was attempted.
+  //
+  // This is the REAL path, not the constructor: startBatch -> the runOnce
+  // executor's budget abort -> abandonedRunStub -> deps.runs.create. The
+  // languages can only reach the POSTed row from CONFIG_B.
+  it('TICKET 061: an abandoned execution POSTs a row carrying the sweep’s pair and direction', async () => {
+    const h = realHarness({ stallFor: (req) => (req.repIndex === 1 ? { getAudioForever: true } : {}) });
+    const handle = handleOf({ execute: h.execute, reps: 1, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled } = await drain(handle, RUN_BUDGET_MS * 20);
+
+    expect(settled).toBe(true);
+    const abandoned = h.posted.filter((r) => r.errors.includes(RUN_ABANDONED));
+    expect(abandoned.length).toBeGreaterThan(0);
+    for (const row of abandoned) {
+      expect(row.languagePair).toBe(CONFIG_B.languagePair);
+      expect(row.direction).toBe(CONFIG_B.direction);
+    }
+    // And the real Runs of the same sweep agree — one rule for both sites.
+    const real = h.posted.filter((r) => !r.errors.includes(RUN_ABANDONED));
+    expect(real.length).toBeGreaterThan(0);
+    for (const row of real) {
+      expect(row.languagePair).toBe(CONFIG_B.languagePair);
+      expect(row.direction).toBe(CONFIG_B.direction);
+    }
+  });
+
   it('GUARD: an execution that already POSTed gets no stub beside its own Run', async () => {
     // `wrote = true` is set at CALL time in the wrapper, before any await, so an
     // abort landing while the POST is in flight finds it already set. That is

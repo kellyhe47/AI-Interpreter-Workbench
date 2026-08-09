@@ -17,9 +17,11 @@ import {
   groupByCategory,
   groupByRecording,
   sttUnchangedBetween,
+  type CategoryGroupRow,
   type ExclusionReason,
   type MetricRow,
   type RecordingGroupRow,
+  type UtteranceCategory,
 } from './derive';
 import {
   ADHOC_RECORDING_ID,
@@ -583,5 +585,122 @@ describe('no hardcoded figures — every number comes from the records', () => {
     const minutes = (5 * RECORDING_DURATION_MS) / 60_000;
     expect(arm.costPerMinuteUsd).toBeCloseTo(arm.costUsd! / minutes, 10);
     expect(arm.costPerMinuteUsd).toBeCloseTo(0.02, 10);
+  });
+});
+
+/* ============================== TICKET 061 — direction is part of the key == */
+
+/**
+ * TICKET 061 — EN→YUE AND YUE→EN ARE SEPARATE CLAIMS (PRD §7), AND THE
+ * ASYMMETRY BETWEEN THEM IS THE FINDING.
+ *
+ * `groupByCategory` keys on `${category}|${arm}`, so two samples that differ
+ * ONLY in the direction they ran land in the same row and are averaged into a
+ * single number. That number is a claim about no language in particular: it
+ * says "Arm B does short replies in 1.5 s" over a population that was half
+ * Spanish and half Cantonese, and it makes the one comparison the corpus was
+ * built to support — the two ends of a pair against each other —
+ * unrepresentable in the table PRD §8 calls "where the heterogeneity lives".
+ *
+ * The row identity these tests require is what ResultsView's React key and its
+ * `data-` attributes have to be built from; a split that the row cannot report
+ * is a split the rendered table cannot show (see ResultsView.category.test.tsx).
+ */
+describe('TICKET 061 — groupByCategory splits on direction, never pools two of them', () => {
+  const CATEGORY: UtteranceCategory = 'numbers-dates';
+
+  /** A gate-passing Arm-B run of one direction, with a distinguishable latency. */
+  function directedRun(direction: string, latencyMs: number, id: string) {
+    return runWithLatency(latencyMs, {
+      id,
+      recordingId: 'rec-dir',
+      languagePair: direction.includes('yue') ? 'EN↔YUE' : 'EN↔ES',
+      direction,
+      annotations: {
+        utteranceId: 'u1',
+        category: CATEGORY,
+        repIndex: 1,
+        corpusVersion: CORPUS_VERSION,
+      },
+    });
+  }
+
+  function ledgerOf(...runs: ReturnType<typeof directedRun>[]): RunLedger {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: 'rec-dir', label: 'direction clip' }));
+    for (const run of runs) ledger.appendRun(run);
+    return ledger;
+  }
+
+  /** The row shape the split requires: identity has to include the direction. */
+  type DirectedRow = CategoryGroupRow & { direction?: string };
+
+  it('TWO rows where one appeared before: same category, same arm, different direction', () => {
+    const ledger = ledgerOf(
+      directedRun('en→es', 1_000, 'run-dir-es'),
+      directedRun('en→yue', 2_000, 'run-dir-yue'),
+    );
+    const rows = groupByCategory(ledger) as DirectedRow[];
+
+    // Today: ONE row, n = 2, a single percentile over two languages.
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.n)).toEqual([1, 1]);
+    expect(rows.every((r) => r.category === CATEGORY)).toBe(true);
+    expect(rows.every((r) => r.arm === 'B')).toBe(true);
+
+    // The asymmetry is the finding, so each direction keeps its own figure.
+    const es = rows.find((r) => r.direction === 'en→es');
+    const yue = rows.find((r) => r.direction === 'en→yue');
+    expect(es).toBeDefined();
+    expect(yue).toBeDefined();
+    expect(es!.p50Ms).toBe(1_000);
+    expect(yue!.p50Ms).toBe(2_000);
+  });
+
+  it('row identity is unique on (category, arm, direction) — the DOM key can be built from it', () => {
+    const ledger = ledgerOf(
+      directedRun('en→es', 1_000, 'run-dir-es'),
+      directedRun('en→yue', 2_000, 'run-dir-yue'),
+    );
+    const rows = groupByCategory(ledger) as DirectedRow[];
+
+    // Stated first, so the set comparisons below can never be satisfied by a
+    // single row trivially agreeing with itself.
+    expect(rows).toHaveLength(2);
+
+    const oldKeys = rows.map((r) => `${r.category}|${r.arm}`);
+    const newKeys = rows.map((r) => `${r.category}|${r.arm}|${r.direction}`);
+    // The point of the ticket, stated as a collision: today's key cannot tell
+    // the two rows apart, so React would key both children identically.
+    expect(new Set(oldKeys).size).toBe(1);
+    expect(new Set(newKeys).size).toBe(2);
+  });
+
+  it('GUARD: same direction still POOLS — the split is on direction, not on the Run', () => {
+    const ledger = ledgerOf(
+      directedRun('en→es', 1_000, 'run-dir-a'),
+      directedRun('en→es', 2_000, 'run-dir-b'),
+    );
+    const rows = groupByCategory(ledger) as DirectedRow[];
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.n).toBe(2);
+    // Nearest rank over [1000, 2000]: p50 = 1000, p95 = 2000.
+    expect(rows[0]!.p50Ms).toBe(1_000);
+    expect(rows[0]!.p95Ms).toBe(2_000);
+  });
+
+  it('GUARD: splitting creates and loses no samples — the rows still sum to the arm', () => {
+    const ledger = ledgerOf(
+      directedRun('en→es', 1_000, 'run-dir-es'),
+      directedRun('en→yue', 2_000, 'run-dir-yue'),
+    );
+    const rows = groupByCategory(ledger);
+    const agg = deriveExperimentAggregates(ledger).perArm['B']!;
+
+    // Named so the conservation check cannot pass on today's single pooled row.
+    expect(rows).toHaveLength(2);
+    expect(rows.reduce((sum, r) => sum + r.n, 0)).toBe(agg.n);
+    expect(rows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)).toBeCloseTo(agg.costUsd!, 10);
   });
 });

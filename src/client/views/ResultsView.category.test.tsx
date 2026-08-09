@@ -16,8 +16,8 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { armLabel } from '../../core/arms';
 import { RunLedger } from '../state/ledger';
 import { formatMs, formatUsd, groupByCategory, groupByRecording } from '../components/results/derive';
@@ -26,6 +26,9 @@ import {
   CORPUS_RECORDING_EXPECTATIONS,
   CORPUS_SAMPLES_PER_CATEGORY,
   CORPUS_SAMPLES_PER_RECORDING,
+  CORPUS_VERSION,
+  makeRecordingEntity,
+  runWithLatency,
   seedCorpusExclusionCases,
   seedCorpusSweep,
 } from '../components/results/testRecords';
@@ -124,6 +127,106 @@ describe('ResultsView — the by-category table fills for a manifest-backed ledg
       expect(text).not.toContain(formatMs(5_000));
       expect(text).not.toContain(formatUsd(0.5));
       expect(text).not.toContain(armLabel('ad-hoc'));
+    }
+  });
+});
+
+/* ================ TICKET 061 — direction reaches the rendered category row == */
+
+/**
+ * TICKET 061 — A SPLIT THE ROW CANNOT REPORT IS A SPLIT THE TABLE CANNOT SHOW.
+ *
+ * `derive.ts` keys category rows on `${category}|${arm}` and ResultsView keys
+ * the RENDERED children on the same pair. Splitting only the derivation leaves
+ * two rows sharing one React key — the pooling this ticket exists to remove
+ * survives in the rendered output, and React reconciles two different
+ * measurements onto one child.
+ *
+ * The DOM contract these tests add:
+ *   [data-category-row][data-direction="<direction>"]   the row's direction
+ * asserted the same way `data-n` is: as its own attribute, so the two
+ * directions are distinguishable without parsing a concatenated text blob.
+ */
+describe('ResultsView — TICKET 061: two directions render as two rows', () => {
+  const CATEGORY = 'numbers-dates';
+
+  function directionLedger(): RunLedger {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: 'rec-dir', label: 'direction clip' }));
+    const seed = (direction: string, pair: string, latencyMs: number, id: string): void => {
+      ledger.appendRun(
+        runWithLatency(latencyMs, {
+          id,
+          recordingId: 'rec-dir',
+          languagePair: pair,
+          direction,
+          annotations: {
+            utteranceId: 'u1',
+            category: CATEGORY,
+            repIndex: 1,
+            corpusVersion: CORPUS_VERSION,
+          },
+        }),
+      );
+    };
+    seed('en→es', 'EN↔ES', 1_000, 'run-dir-es');
+    seed('en→yue', 'EN↔YUE', 2_000, 'run-dir-yue');
+    return ledger;
+  }
+
+  const categoryRows = (): HTMLElement[] =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>(
+        `[data-category-row][data-category="${CATEGORY}"]`,
+      ),
+    );
+
+  it('renders one row per direction, each carrying its own direction and its own N', () => {
+    const ledger = directionLedger();
+    showCorpusSecondaryTab(ledger);
+
+    const rendered = categoryRows();
+    expect(rendered).toHaveLength(2);
+    expect(rendered.map((r) => r.getAttribute('data-direction'))).toEqual(['en→es', 'en→yue']);
+    expect(rendered.map((r) => r.getAttribute('data-n'))).toEqual(['1', '1']);
+  });
+
+  it('each rendered row shows its OWN p50 — the pooled figure appears nowhere', () => {
+    const ledger = directionLedger();
+    const rows = groupByCategory(ledger);
+    showCorpusSecondaryTab(ledger);
+
+    for (const row of categoryRows()) {
+      const direction = row.getAttribute('data-direction');
+      const derived = rows.find(
+        (r) => (r as { direction?: string }).direction === direction,
+      );
+      expect(derived).toBeDefined();
+      // Scoped to THIS row: a document-wide query would read the other one.
+      expect(within(row).getByText(formatMs(derived!.p50Ms))).toBeInTheDocument();
+    }
+    // The two directions differ by a full second, so a pooled row would render
+    // one of these and not the other.
+    expect(document.body.textContent).toContain(formatMs(1_000));
+    expect(document.body.textContent).toContain(formatMs(2_000));
+  });
+
+  it('the two rows have DISTINCT React keys — a split derivation is not enough', () => {
+    // React logs "Encountered two children with the same key" and then keeps
+    // only one of them across updates. Splitting derive.ts while leaving
+    // ResultsView keyed on `${category}|${arm}` is exactly that mutation.
+    const errors: unknown[][] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    try {
+      const ledger = directionLedger();
+      showCorpusSecondaryTab(ledger);
+      expect(categoryRows()).toHaveLength(2);
+      const text = errors.map((args) => args.map(String).join(' ')).join('\n');
+      expect(text).not.toMatch(/same key/i);
+    } finally {
+      spy.mockRestore();
     }
   });
 });

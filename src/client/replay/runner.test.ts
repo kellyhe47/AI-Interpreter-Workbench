@@ -38,6 +38,7 @@ import {
   RUN_COMPLETION_TIMEOUT_MS,
   SEGMENTATION_IDLE_MS,
   SEGMENTATION_SETTLE_MS,
+  abandonedRunStub,
   runOnce,
   type RunOnceConfig,
   type RunnerDeps,
@@ -1535,5 +1536,107 @@ describe('TICKET 062 — the Run records the language pair and direction it actu
     // And nothing was ever put on the wire under a nameless instruction —
     // cascade has no refusal of its own to fall back on.
     expect(h.startConfigs).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 061 — THE SECOND CONSTRUCTION SITE.
+//
+// `abandonedRunStub` builds a Run for a rep the sweep's budget gave up on
+// before `runOnce` could produce one. It is a Run like any other in the
+// append-only ledger — it lands in the arm's provenance DENOMINATOR (ticket
+// 048 R2-3) — and it is built from the SAME `RunOnceConfig` the real Run is.
+// Ticket 062 taught the real site to record its languages and left this one
+// silent, so a sweep that lost a rep writes a row nobody can attribute to a
+// direction, in the one table whose whole job is to say what was attempted.
+//
+// Same config, same rule: absence stays absence. `''` is a VALUE in a ledger
+// that has no PATCH, and it is precisely what run dbeb6d94 stored.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 061 — the abandoned-run stub records the languages of the run it stands in for', () => {
+  const stubArgs = {
+    id: 'stub-1',
+    recordingId: 'rec-1',
+    createdAt: 4_242,
+    reason: 'run abandoned',
+  };
+
+  const CASES: { label: string; config: RunOnceConfig }[] = [
+    { label: 'cascade en→es', config: CASCADE_CONFIG },
+    { label: 'realtime en→es', config: REALTIME_CONFIG },
+    {
+      label: 'realtime en→yue',
+      config: {
+        ...REALTIME_CONFIG,
+        languagePair: 'EN↔YUE',
+        direction: 'en→yue',
+        targetLanguage: 'Cantonese',
+      },
+    },
+    {
+      label: 'cascade es→en (the reverse direction)',
+      config: {
+        ...CASCADE_CONFIG,
+        languagePair: 'EN↔ES',
+        direction: 'es→en',
+        targetLanguage: 'English',
+      },
+    },
+  ];
+
+  it.each(CASES)(
+    '$label: the stub carries the pair and direction from its own config',
+    ({ config }) => {
+      const stub = abandonedRunStub({ ...stubArgs, config });
+      expect(stub.languagePair).toBe(config.languagePair);
+      expect(stub.direction).toBe(config.direction);
+      // The failure row is still a failure row — the languages are additive
+      // and must not turn an abandoned attempt into a measurement.
+      expect(stub.status).toBe('failed');
+      expect(stub.errors).toEqual([stubArgs.reason]);
+      // ...and the derived arm is untouched: languages are NOT part of the
+      // configuration arm membership is derived from.
+      expect(stub.armTag).toBe(deriveArmTag(config));
+    },
+  );
+
+  it('agrees with the real Run built from the SAME config — one rule, not two', async () => {
+    const h = makeHarness();
+    const done = start(h, CASCADE_CONFIG);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    const stub = abandonedRunStub({ ...stubArgs, config: CASCADE_CONFIG });
+    expect(stub.languagePair).toBe(run.languagePair);
+    expect(stub.direction).toBe(run.direction);
+    expect(run.languagePair).toBe(CASCADE_CONFIG.languagePair);
+  });
+
+  it('a config that named NO language leaves the stub with no key at all', () => {
+    const stub = abandonedRunStub({
+      ...stubArgs,
+      config: { architecture: 'cascade', providers: DEFAULT_CASCADE_TRIPLE },
+    });
+    expect(Object.keys(stub)).not.toContain('languagePair');
+    expect(Object.keys(stub)).not.toContain('direction');
+  });
+
+  it("an EMPTY-STRING config language is an absence, never a stored ''", () => {
+    // `runner.ts` fills the transport config with `?? ''`, so `''` is the shape
+    // a language-less run has always had in flight. Storing it would put a row
+    // in the ledger claiming a pair it never had.
+    const stub = abandonedRunStub({
+      ...stubArgs,
+      config: {
+        architecture: 'cascade',
+        providers: DEFAULT_CASCADE_TRIPLE,
+        languagePair: '',
+        direction: '',
+        targetLanguage: '',
+      },
+    });
+    expect(Object.keys(stub)).not.toContain('languagePair');
+    expect(Object.keys(stub)).not.toContain('direction');
   });
 });
