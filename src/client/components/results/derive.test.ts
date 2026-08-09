@@ -1037,3 +1037,73 @@ describe('TICKET 055a — a rep whose row never landed stays in the DENOMINATOR'
     expect(after.line).toContain('2 of 3 reps completed');
   });
 });
+
+/* ===== TICKET 055a — HOW THE FLOOR IS GATHERED ACROSS THE ARM'S ROWS ========
+ *
+ * The block above proves the floor exists. It cannot prove HOW it is collected,
+ * because every row in it declares the SAME value, so `max`, `min`, `first` and
+ * `last` are indistinguishable and so are `attempted` and `gatePassing`. Both
+ * substitutions are silent regressions of the headline defect:
+ *
+ *   min ACROSS ROWS — the ledger is APPEND-ONLY and spans sweeps, so one row
+ *   written before this field existed drags the whole arm's floor to zero and
+ *   the line falls straight back to `N of N`.
+ *
+ *   gatePassing INSTEAD OF attempted — the plan then survives only on rows that
+ *   COMPLETED, so an arm whose declaring rows all failed loses the denominator
+ *   in exactly the sweep that most needs it.
+ *
+ * Both tests below hold the floor's SOURCE to one row, so nothing else in the
+ * arm can supply the answer.
+ * ========================================================================== */
+
+/** A row from BEFORE this ticket: `repIndex` and a corpus version, no plan. */
+function preTicketRow(rep: number, ms: number, overrides: Partial<Run> = {}): Run {
+  const annotations: SweepPlanAnnotations = { repIndex: rep, corpusVersion: CORPUS_VERSION };
+  return runWithLatency(ms, {
+    id: `run-pre055a-${rep}`,
+    recordingId: PLAN_RECORDING_ID,
+    cost: 0.002,
+    annotations,
+    ...overrides,
+  });
+}
+
+describe('TICKET 055a — the floor is the HIGHEST declaration, over EVERY attempted row', () => {
+  it('a row that predates the field does not drag the arm’s floor to zero', () => {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: PLAN_RECORDING_ID }));
+    // Rep 1 was written before `intendedReps` existed; rep 2 by a sweep that
+    // declared 3. Rep 3 ran and its POST was never acknowledged. Taking the
+    // LOWEST declaration across the arm reads rep 1 as a declaration of nothing.
+    ledger.appendRun(preTicketRow(1, 800));
+    ledger.appendRun(planRow(2, 1_000, 3));
+
+    const arm = deriveExperimentAggregates(ledger).perArm['B']!;
+    expect(arm.n).toBe(2);
+    expect(arm.provenance.completedReps).toBe(2);
+    expect(arm.provenance.intendedReps).toBe(3);
+    expect(arm.provenance.line).toContain('2 of 3 reps completed');
+  });
+
+  it('the plan survives on a row that FAILED — the floor reads attempted, not gate-passing', () => {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: PLAN_RECORDING_ID }));
+    // The two rows behind the figures predate the field. The ONLY row carrying
+    // the sweep's plan is rep 3, which failed — so it is attempted and not
+    // gate-passing, and it is the only thing that knows 5 reps were intended.
+    ledger.appendRun(preTicketRow(1, 800));
+    ledger.appendRun(preTicketRow(2, 1_000));
+    ledger.appendRun(
+      planRow(3, 5_000, 5, { status: 'failed', errors: ['tts stage timed out'] }),
+    );
+
+    const arm = deriveExperimentAggregates(ledger).perArm['B']!;
+    // The failed row is no measurement, exactly as before: it moves n nowhere.
+    expect(arm.n).toBe(2);
+    expect(arm.provenance.completedReps).toBe(2);
+    // 5 — the declaration — not the 3 the surviving rep indices can prove.
+    expect(arm.provenance.intendedReps).toBe(5);
+    expect(arm.provenance.line).toContain('2 of 5 reps completed');
+  });
+});

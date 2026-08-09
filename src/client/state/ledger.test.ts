@@ -1581,3 +1581,48 @@ describe('TICKET 055a — a LiveSession the server never got is stored, listed, 
     expect(ledger.runAggregates().perArm['B']).toMatchObject({ n: 1, p50Ms: 500 });
   });
 });
+
+/* ===== TICKET 055a — THE MARK IS A WRITE, AND IT HAS TO OUTLIVE THE TAB =====
+ *
+ * `markLiveSessionUnsynced` / `markLiveSessionSynced` are the only mutations
+ * this ledger has, and every other write on it persists. In production the store
+ * IS `window.localStorage` (`browserDeps.ts:524`), and hydration settles the mark
+ * exactly once per load — so a mark held only in memory is re-derived on the next
+ * reload from a listing that may not be reachable, and the Live card silently
+ * aggregates a take the repo never received again. Asserted through a REAL
+ * reload (a second `RunLedger` over the same adapter), because that is the event
+ * the mark has to survive; counting `setItem` calls would pin the mechanism
+ * instead of the outcome.
+ * ========================================================================== */
+
+describe('TICKET 055a — the sync mark survives a reload, like every other write', () => {
+  it('an UNSYNCED mark is still there, and still excluded, after the ledger is rebuilt', () => {
+    const { adapter } = fakeStorage();
+    const first = new RunLedger(adapter);
+    // Measured and unmarked: the gate's other clause cannot be what answers.
+    first.appendLiveSession(makeLiveSession({ id: 'live-never-posted' }));
+    expect(isAggregatableLiveSession(first.getLiveSessions()[0]!)).toBe(true);
+
+    first.markLiveSessionUnsynced('live-never-posted');
+
+    const second = new RunLedger(adapter);
+    const restored = second.getLiveSessions();
+    expect(restored.map((s) => s.id)).toEqual(['live-never-posted']);
+    expect(syncStateOf(restored[0]!)).toBe('unsynced');
+    expect(isAggregatableLiveSession(restored[0]!)).toBe(false);
+  });
+
+  it('and a SETTLED mark is still gone after the same reload', () => {
+    const { adapter } = fakeStorage();
+    const first = new RunLedger(adapter);
+    first.appendLiveSession(unsyncedLiveSession({ id: 'live-acknowledged' }));
+
+    // The server named it, so the field is deleted rather than restated.
+    first.markLiveSessionSynced('live-acknowledged');
+
+    const second = new RunLedger(adapter);
+    const restored = second.getLiveSessions();
+    expect(syncStateOf(restored[0]!)).toBeUndefined();
+    expect(isAggregatableLiveSession(restored[0]!)).toBe(true);
+  });
+});

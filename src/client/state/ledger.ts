@@ -229,6 +229,24 @@ export interface RunAnnotations {
    * which.
    */
   corpusVersion?: string;
+  /**
+   * TICKET 055a — the retained rep count the sweep DECLARED (`BatchOptions.reps`,
+   * the same number `BatchConfigSummary.intendedReps` reports), stamped on every
+   * row by `createRunOnceExecutor` right beside `repIndex`.
+   *
+   * IT EXISTS BECAUSE A LOST REP LEAVES NOTHING TO DERIVE FROM. `intendedReps`
+   * was distinct `repIndex` over the arm's sweep rows, so a rep whose POST went
+   * unacknowledged (ticket 048 R4-2) is absent from the DENOMINATOR too and the
+   * line reads a clean "2 of 2" — the exact failure AGENTS.md names. No
+   * derivation over the surviving rows can recover the 3; the sweep's own PLAN
+   * is the only evidence left, and it survives only if the rows CARRY it.
+   *
+   * COPIED, NOT LOOKED UP LATER — the same decision `corpusVersion` embodies.
+   * And a FLOOR, never a ceiling: `buildProvenance` takes the larger of this and
+   * the reps the rows prove, so a stale declaration can never delete a rep that
+   * demonstrably ran.
+   */
+  intendedReps?: number;
 }
 
 /**
@@ -328,6 +346,23 @@ export interface LiveSessionUtterance {
  */
 export type LiveContextPolicy = 'default' | 'trimmed' | 'n/a';
 
+/**
+ * TICKET 055a — WHAT THE REPO KNOWS ABOUT THIS TAKE.
+ *
+ * There is exactly ONE state, and it is the NEGATIVE one. `'unsynced'` says
+ * "this record exists in the browser and the repo did not acknowledge it";
+ * ABSENT says nothing has contradicted the record, which is the state every
+ * session hydrated from the server's own listing is in and the state a
+ * successful POST leaves behind.
+ *
+ * A `'synced'` value is deliberately NOT modelled. The server is the source of
+ * these records, so a session it handed back cannot also carry a client-side
+ * claim about itself — `hydrateLiveSessions.test.ts:57` pins the hydrated store
+ * field-for-field against the listing, and any stamp the client added would be
+ * a field the artifact does not have.
+ */
+export type LiveSessionSyncState = 'unsynced';
+
 /** PRD §7. `quality.wer` is ALWAYS null in Live — there is no reference text. */
 export interface LiveSession {
   id: string;
@@ -372,6 +407,16 @@ export interface LiveSession {
     heapEnd: number | null;
   };
   quality: { wer: null; subjectiveNotes?: string };
+  /**
+   * TICKET 055a — THE STATE RIDES THE RECORD, so the ONE gate can read it
+   * wherever the record came from and the deep copy `getLiveSessions()` returns
+   * carries it. A side table would be invisible to the getter, to
+   * `exportRuns()` and to `localStorage`.
+   *
+   * Absent on every session written before this ticket, on every session the
+   * server listing hands back, and on a take whose POST was acknowledged.
+   */
+  syncState?: LiveSessionSyncState;
 }
 
 /** One arm's aggregate over gate-passing Runs. `n` is the ACTUAL count. */
@@ -581,6 +626,18 @@ export function isRealLiveSession(session: LiveSession): boolean {
  */
 export function isAggregatableLiveSession(session: LiveSession): boolean {
   if (!isRealLiveSession(session)) return false;
+  // TICKET 055a — A TAKE THE REPO NEVER RECEIVED IS NOT EVIDENCE. The local
+  // append at Stop is unconditional and stays that way (ticket 023: the
+  // operator's take is not contingent on a reachable server); what changes is
+  // that the same store is no longer AGGREGATED FROM when the server never got
+  // the record. The audit measured 14 sessions on screen over 8 in `data/`, and
+  // PRD §8 wants one ledger under every view: a figure a reviewer cannot
+  // reproduce from a clone is not a figure.
+  //
+  // THE CLAUSE LIVES HERE, IN THE ONE GATE, and reads a FIELD — never a
+  // bracket lookup, a cast or a `!`, all three of which this repo has been
+  // bitten by. `deriveLiveModel` adds no filter of its own.
+  if (session.syncState === 'unsynced') return false;
   return session.utterances.length > 0;
 }
 
@@ -883,6 +940,41 @@ export class RunLedger {
 
   getLiveSessions(): LiveSession[] {
     return deepCopy(this.liveSessions);
+  }
+
+  /**
+   * TICKET 055a — record that the repo did NOT acknowledge this take.
+   *
+   * The only mutation any store on this ledger has, and it is deliberately not
+   * an edit to a measurement: nothing the session MEASURED can be reached from
+   * here, only what is known about where the record ended up. The take is never
+   * removed — it is the evidence of the divergence — and it stays listed and
+   * exported exactly as before; `isAggregatableLiveSession` is what keeps it out
+   * of a figure.
+   *
+   * Unknown ids are a no-op: hydration and a settling POST both run against a
+   * store that may have moved on.
+   */
+  markLiveSessionUnsynced(id: string): void {
+    const session = this.liveSessions.find((s) => s.id === id);
+    if (!session || session.syncState === 'unsynced') return;
+    session.syncState = 'unsynced';
+    this.persist();
+  }
+
+  /**
+   * TICKET 055a — the server named this session, so the mark is SETTLED.
+   *
+   * The field is DELETED rather than set to a 'synced' value: an acknowledged
+   * session must be byte-identical to the one the listing handed over (see
+   * `LiveSessionSyncState`), and a stamp the server never wrote would be a
+   * claim the artifact does not carry.
+   */
+  markLiveSessionSynced(id: string): void {
+    const session = this.liveSessions.find((s) => s.id === id);
+    if (!session || session.syncState === undefined) return;
+    delete session.syncState;
+    this.persist();
   }
 
   /**

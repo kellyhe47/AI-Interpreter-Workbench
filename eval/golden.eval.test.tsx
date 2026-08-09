@@ -359,6 +359,17 @@ const EXECUTORS: Record<string, Executor> = {
   /**
    * A rep whose ledger POST went unacknowledged must stay in the DENOMINATOR.
    * The sweep intended 3; only 2 rows landed.
+   *
+   * TICKET 055a — THE FIXTURE NOW ENCODES ALL OF `given`, WHICH IT DID NOT.
+   * The case states `intended_reps: 3` and the ledger it built said so NOWHERE:
+   * two rows carrying `repIndex` 1 and 2 and nothing else. The lost rep leaves
+   * NOTHING behind, so no derivation over the surviving rows can recover the 3 —
+   * the case as previously written was unsatisfiable by any implementation that
+   * did not simply invent a number. The sweep's own PLAN is the only evidence
+   * that survives a lost rep, and it survives only if the rows CARRY it
+   * (`annotations.intendedReps`, stamped by `createRunOnceExecutor` beside
+   * `repIndex`, exactly as the real sweep now writes them). The ASSERTIONS below
+   * are untouched.
    */
   '04': (c) => {
     const intended = num(c.given, 'sweep.intended_reps');
@@ -370,7 +381,11 @@ const EXECUTORS: Record<string, Executor> = {
         makeRunEntity({
           id: `run-sweep-${rep}`,
           recordingId: 'rec-sweep',
-          annotations: { repIndex: rep, corpusVersion: 'corpus-en-es-v2' },
+          annotations: {
+            repIndex: rep,
+            corpusVersion: 'corpus-en-es-v2',
+            intendedReps: intended,
+          },
         }),
       );
     }

@@ -246,6 +246,12 @@ export interface RunAnnotations {
   repIndex?: number;
   /** Corpus version behind the sample. */
   corpusVersion?: string;
+  /**
+   * TICKET 055a — the retained rep count the sweep DECLARED, copied onto the
+   * row at write time. The FLOOR of `Provenance.intendedReps`, so a rep whose
+   * row never landed cannot vanish from the denominator too.
+   */
+  intendedReps?: number;
   // TICKET 034 removed `wer`. Nothing ever wrote it, and a Run-level WER could
   // not have been correct anyway: a Run spans ~4 utterances of deliberately
   // different categories (PRD §9), so there is no single reference for it to
@@ -531,6 +537,21 @@ export interface LiveModel {
    * second dishonesty, so the card DISCLOSES this count.
    */
   sessionsWithoutContextPolicy: number;
+  /**
+   * TICKET 055a — takes this browser holds that the repo never acknowledged
+   * (`LiveSession.syncState === 'unsynced'`). Golden eval 01's
+   * `must_surface: unsynced-count`: excluding them from the figures and saying
+   * nothing would replace one dishonesty with another.
+   *
+   * ABSENT WHEN THERE ARE NONE, never `0`. Zero and absent are the same claim
+   * here — "nothing diverged" — and a card that renders a constant sentence
+   * teaches a reader nothing. It also keeps `deriveLive.empty.test.ts`'s
+   * whole-model `toEqual` pins meaning what they say.
+   *
+   * IT IS A DISCLOSURE, NOT A GATE. The exclusion itself is decided by
+   * `isAggregatableLiveSession` reading the record — this only reports it.
+   */
+  unsyncedSessions?: number;
 }
 
 /* ------------------------------------------------------- shared v2 helpers -- */
@@ -725,7 +746,28 @@ function buildProvenance(
   const completedReps = completedRepIndices.size > 0 ? completedRepIndices.size : gatePassing.length;
 
   const attemptedRepIndices = distinct(attempted.map((r) => r.annotations?.repIndex));
-  const intendedReps = attemptedRepIndices.size > 0 ? attemptedRepIndices.size : completedReps;
+  const provenReps = attemptedRepIndices.size > 0 ? attemptedRepIndices.size : completedReps;
+
+  // TICKET 055a — THE REPS THE ROWS CANNOT PROVE.
+  //
+  // A rep whose ledger POST went unacknowledged (ticket 048 R4-2) leaves NO row
+  // at all, so it is missing from the numerator AND from a denominator derived
+  // over rows: three reps run, two rows land, and the line reads a clean
+  // "2 of 2" — the failure AGENTS.md names verbatim. Nothing computed from the
+  // surviving rows can recover the third; the sweep's own PLAN is the only
+  // evidence left, and it rides the rows that DID land
+  // (`annotations.intendedReps`, stamped by `createRunOnceExecutor`).
+  //
+  // A FLOOR, NEVER A CEILING. The declaration can only RAISE the denominator:
+  // letting a stale plan lower one would hand it the power to delete a rep that
+  // demonstrably ran — the same "N of N" dishonesty from the other direction.
+  // A sweep that declared nothing (every pre-055a row) reports exactly what it
+  // reported before.
+  const declaredReps = attempted.reduce(
+    (most, run) => Math.max(most, run.annotations?.intendedReps ?? 0),
+    0,
+  );
+  const intendedReps = Math.max(provenReps, declaredReps);
 
   // TICKET 033 — EVERY distinct version behind the figure, sorted so the order
   // does not depend on ledger append order. Only GATE-PASSING Runs contribute:
@@ -1324,8 +1366,15 @@ export function deriveLiveModel(ledger: RunLedger): LiveModel {
   const order: string[] = [];
   const groups = new Map<string, LiveGroup>();
   let sessionsWithoutContextPolicy = 0;
+  let unsyncedSessions = 0;
 
   for (const session of ledger.getLiveSessions()) {
+    // TICKET 055a — COUNTED BEFORE THE GATE, and counted from the record's own
+    // state rather than from "everything the gate refused". A fixture session
+    // and an empty one are refused too, for reasons that have nothing to do
+    // with the repo, and folding them into this number would make the sentence
+    // false in exactly the situations it is supposed to explain.
+    if (session.syncState === 'unsynced') unsyncedSessions += 1;
     if (!isMeasuredLiveSession(ledger, session)) continue;
     const contextPolicy = session.contextPolicy;
     if (contextPolicy === undefined) {
@@ -1396,5 +1445,11 @@ export function deriveLiveModel(ledger: RunLedger): LiveModel {
     };
   });
 
-  return { columns, empty: columns.length === 0, sessionsWithoutContextPolicy };
+  return {
+    columns,
+    empty: columns.length === 0,
+    sessionsWithoutContextPolicy,
+    // The key is OMITTED at zero, not written as 0 — see `unsyncedSessions`.
+    ...(unsyncedSessions > 0 ? { unsyncedSessions } : {}),
+  };
 }

@@ -77,6 +77,11 @@ export interface RunAnnotations {
   repIndex?: number;
   /** Ticket 033 — the corpus version of the Recording this Run replayed. */
   corpusVersion?: string;
+  /**
+   * TICKET 055a — the retained rep count the sweep DECLARED, copied onto every
+   * row so a rep whose row never landed still counts in the denominator.
+   */
+  intendedReps?: number;
 }
 
 /**

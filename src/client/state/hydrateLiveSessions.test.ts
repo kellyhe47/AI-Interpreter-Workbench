@@ -322,3 +322,76 @@ describe('TICKET 055a — hydration settles the mark, and dedupe alone cannot', 
     expect(ledger.getLiveSessions().map((s) => [s.id, syncStateOf(s)])).toEqual(afterFirst);
   });
 });
+
+/* ===== TICKET 055a — AN EMPTY LISTING IS STILL AN ACKNOWLEDGEMENT ============
+ *
+ * `hydrateLedger.ts:160-166` insists the KEY'S PRESENCE is what is read and
+ * never the emptiness of the array, and the block above never exercises the
+ * distinction: every source it builds lists at least one session. Branching on
+ * `liveSessions.length > 0` instead passes all four of those tests while
+ * demoting nothing on the one machine this ticket is about — a wired host whose
+ * listing is legitimately EMPTY (a fresh `data/`, or takes POSTed to a different
+ * host). The Live card would then aggregate takes the repo never received, which
+ * is the headline defect in another shape.
+ *
+ * The CONTRAST is the other half and it is not symmetric: a source with NO
+ * `liveSessions` key is a pre-041 host wiring no live-session backend, which
+ * makes no statement about anything and may move no mark in either direction.
+ * ========================================================================== */
+
+describe('TICKET 055a — an EMPTY listing demotes; an ABSENT one says nothing', () => {
+  it('a wired server that legitimately holds nothing demotes every stored take', async () => {
+    const ledger = new RunLedger();
+    // Measured and UNMARKED — the local append at Stop leaves it exactly so, and
+    // its utterance means the gate's other clause cannot be what answers below.
+    ledger.appendLiveSession(
+      makeLiveSessionEntity({
+        id: 'live-fresh-repo',
+        utterances: [
+          { id: 'lu-1', timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.01 },
+        ],
+      }),
+    );
+
+    // The KEY IS PRESENT and the array is EMPTY: the host wires the backend and
+    // the backend holds nothing. That is a statement, and it names no session.
+    const { source, calls } = staticHydrationSource(SERVER_RECORDINGS, SERVER_RUNS, []);
+    await hydrateLedger(ledger, source);
+
+    expect(calls.liveSessions).toBe(1);
+    const stored = ledger.getLiveSessions();
+    // Still STORED and LISTED — the demotion is a mark, never a delete.
+    expect(stored.map((s) => s.id)).toEqual(['live-fresh-repo']);
+    expect(syncStateOf(stored[0]!)).toBe('unsynced');
+    expect(isAggregatableLiveSession(stored[0]!)).toBe(false);
+  });
+
+  it('CONTRAST: with the key ABSENT, an unmarked take is left unmarked', async () => {
+    const ledger = new RunLedger();
+    const local = makeLiveSessionEntity({
+      id: 'live-pre-041',
+      utterances: [{ id: 'lu-1', timings: { speech_end: 0, audio_queued: 900 }, costUsd: 0.01 }],
+    });
+    ledger.appendLiveSession(local);
+
+    // The pre-041 source shape: recordings + runs and no third listing at all.
+    await hydrateLedger(ledger, staticHydrationSource(SERVER_RECORDINGS, SERVER_RUNS).source);
+
+    const stored = ledger.getLiveSessions();
+    expect(stored).toEqual([local]);
+    expect(syncStateOf(stored[0]!)).toBeUndefined();
+    expect(isAggregatableLiveSession(stored[0]!)).toBe(true);
+  });
+
+  it('CONTRAST: with the key ABSENT, a take already marked stays marked', async () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(localOnlyTake('live-still-unsynced'));
+
+    await hydrateLedger(ledger, staticHydrationSource(SERVER_RECORDINGS, SERVER_RUNS).source);
+
+    const stored = ledger.getLiveSessions();
+    // No listing was asked for, so nothing may un-mark it either.
+    expect(syncStateOf(stored[0]!)).toBe('unsynced');
+    expect(isAggregatableLiveSession(stored[0]!)).toBe(false);
+  });
+});

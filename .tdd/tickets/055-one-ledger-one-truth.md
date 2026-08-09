@@ -1,13 +1,13 @@
 ---
 id: 055
 title: One ledger, one truth — the server is the only aggregate source, and a clock inversion is a failure
-status: pending
+status: done
 source: spec-audit + qa
 depends_on: []
 touches: [src/client/views/useSessionController.ts, src/client/state/ledger.ts, src/client/state/hydrateLedger.ts, src/client/components/results/derive.ts, src/client/replay/runner.ts, src/client/views/ResultsView.tsx, src/client/browserDeps.ts]
-iterations: 0
+iterations: 2
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Why — two defects that both make a displayed number untrustworthy
@@ -339,3 +339,97 @@ Both marks are on the SAME clock. `885175 − 899148 = −13973` is first-wins v
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09) — worked as 055b then 055a
+
+Suite 2279 passing / 0 failing. **Golden evals 01, 02 and 04 all green.** `npm run eval` is now
+12 pass / 1 fail — only case 10 (ticket 060) remains.
+
+### 055b — the `-13973 ms` (commit `8565e5c`)
+
+Two distinct causes, both fixed; fixing either alone leaves the other:
+
+- **The envelope** now copies the LAST utterance record's pair instead of assembling
+  `recording.speechEndMs` with `firstAudioAt`, so it can no longer manufacture an interval by mixing
+  utterances. Both marks were always on the SAME clock — the audit's "two clocks" diagnosis was
+  wrong, and a same-clock assertion would have passed on the defect.
+- **Per-utterance drift**: a mark preceding its own manifest anchor is refused and stored `null`
+  ("not measured"), never clamped — a `Math.max` would invent a 0 ms measurement nothing observed.
+
+On `7acb0cc9`'s real timeline the deltas become `+3424 / +1231 / null / null`. An unconditional
+"all deltas ≥ 0" was never satisfiable there: no audio instant exists at or after the fourth anchor
+(17433 < 19797).
+
+`appendRun` is the write-time backstop (`failed`, `clock-inversion`, naming which utterances
+inverted); `runAggregates` drops a non-positive sample from numerator AND denominator together.
+`isClockInversion` is `< 0` and `isMeasuredLatencyMs` is `> 0`, deliberately different: a zero is a
+measurement that may not enter a percentile, but it is not an impossible ordering.
+
+**Three existing fixtures encoded the defect** and were repaired (data only, no assertion weakened):
+the 031 corpus fixture answered at 130/230/330/430 against anchors 200/400/600/800; `replayArmA`'s
+anchors sat 20 ms after the model's own answers; and `runTimeout`'s `SlowStartTransport` armed the
+script BEFORE a 25 s stall, so the answer landed 25 s before the run's own `t0`.
+
+### 055a — the ledger divergence and the denominator (commit pending)
+
+The mark rides the record and **the listing is the acknowledgement that settles it**. That design was
+forced by three locked pins simultaneously: hydrated sessions are compared field-for-field, so a
+*synced* session carries no `syncState` at all; a bare `appendLiveSession` stays aggregatable; yet
+bare-appended locals must be excluded once a listing has been hydrated.
+
+Hydration branches on the **key's presence**, never the array's emptiness — a wired server holding
+nothing legitimately demotes every take, while a pre-041 source with no key makes no statement and
+moves no mark in either direction. Hydration can never un-mark: only the server naming an id clears
+one. The local append stays FIRST and UNCONDITIONAL (ticket 023).
+
+The denominator is a **floor**: `max(distinct repIndex over the arm's attempted rows, highest
+declared annotations.intendedReps)`. A lost rep leaves no row, so no derivation over survivors
+recovers it — the plan has to ride the rows that did land. A stale plan can only raise, never shrink.
+
+**PRD tension resolved, not violated:** *"Provenance reports actual N, never intended N"* governs the
+NUMERATOR. `completedReps` and `n` stay derived from rows only; `intendedReps` was always the
+denominator and was always named "intended". Before this it silently collapsed onto the numerator —
+the failure AGENTS.md names verbatim.
+
+### The golden-eval-04 executor edit — legitimate, and why
+
+Case 04's `given` declares `intended_reps: 3`, but its fixture encoded that **nowhere**: two rows
+carrying `repIndex` and nothing else. A rep whose POST is unacknowledged leaves no row, so no
+derivation over the two survivors could recover the 3 — **the case was unsatisfiable by any
+implementation that did not invent a number.** The fixture now carries `annotations.intendedReps`,
+the same shape the real sweep writes. The golden JSON and every assertion are untouched.
+
+The product proof is `runTimeout.test.ts:1269` — a real `startBatch` losing a rep — which renders
+`2 of 3` and goes red when the production stamp is removed. Its own prior comment instructed exactly
+this update: *"When 050 lands this assertion must be UPDATED to '2 of 3', never deleted."*
+
+**Recorded honestly:** golden eval 04 stays green with the production stamp removed, because it
+declares `"surface": "pure"` and builds rows with `makeRunEntity`, exercising `buildProvenance`
+alone. That is in-spec, but the eval is NOT the gate that proves the sweep writes the plan. Same
+lesson as ticket 056's case 12.
+
+### Adversarial review
+
+055b: 16 mutations, GREEN, 5 survivors closed with 19 assertions. 055a: 19 mutations, GREEN, 6
+survivors closed with 12 assertions. Every survivor was unpinned intent, not wrong code.
+
+Worth naming among them: the runner's `clock-inversion` reason could be deleted entirely so a record
+was refused **silently with `errors: []`** — against this ticket's own thesis (*"a write-time guard
+is a BACKSTOP, not the fix; relabelling the run would hide the drift"*) that is the failure mode,
+not a detail. And the empty-vs-absent listing distinction was unpinned, which is this ticket's
+headline scenario in another shape.
+
+The production wiring is genuinely closed: `App.liveHydration.test.tsx` builds the bag with
+`buildBrowserDeps()` and drives the REAL `createLiveSessionsClient`, faking only `globalThis.fetch`,
+and asserts `POST /api/live-sessions` was issued — a URL that exists nowhere in `sessionTestKit`. It
+goes red when the rejection is swallowed again.
+
+### Premises this ticket overturned, confirmed still overturned
+
+- **P1-5 is FALSE** — `deriveLiveModel` never reads `session.latency.p50`; the on-screen Live figures
+  are honest (realtime p50 399 ms, cascade 1487 ms / p95 2858 ms over 16 samples, which partially
+  meets the rubric's "under 3s, target under 2s" on real data).
+- **The exp1/exp2 asymmetry is structurally impossible** — same call, same `empty` flag. Golden eval
+  03 passes; no production code was changed for it.
+- **The negative run never dragged an aggregate** — `7acb0cc9` is `origin: 'manual'` and the gate
+  already rejected it. This ticket was about a wrong number being *displayed*.

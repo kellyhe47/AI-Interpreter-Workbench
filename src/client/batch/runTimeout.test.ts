@@ -1126,6 +1126,9 @@ describe('a stalled handshake gives its transport back too (ticket 048, R3-3)', 
 // it, and no row exists. Three reps ran, two rows, "2 of 2 reps completed".
 // No stub covers it: the attempt was never abandoned, so `onAbandoned` never
 // fires. The batch must at least stop calling it completed.
+// (TICKET 055a closed the denominator half: the rows now carry the sweep's
+// declared rep count, so the line reads "2 of 3". Nothing about the summary or
+// the missing row moved.)
 // ===========================================================================
 
 describe('a cell whose attempt already POSTed is never retried (ticket 048, R4-1)', () => {
@@ -1254,14 +1257,16 @@ describe('a run whose POST went unacknowledged is not a completed rep (ticket 04
     const arm = deriveExperimentAggregates(ledgerOf(h.posted)).perArm['B']!;
     expect(arm.n).toBe(2);
 
-    // KNOWN GAP — TICKET 050, DELIBERATELY PINNED SO IT CANNOT DRIFT SILENTLY.
-    // The rendered line still reads "2 of 2" rather than "2 of 3": `intendedReps`
-    // is distinct `repIndex` over sweep ROWS, and rep 2 has none. Only an
-    // idempotent server-side POST keyed by run id can restore that denominator
-    // honestly — writing a stub here would invent a row that may yet land, and
-    // retrying would risk the duplicate R4-1 exists to kill. When 050 lands this
-    // assertion must be UPDATED to "2 of 3", never deleted.
-    expect(arm.provenance.line).toContain('2 of 2 reps completed');
+    // THE GAP IS CLOSED — TICKET 055a, and this assertion is UPDATED exactly as
+    // the pin above it required ("When 050 lands this assertion must be UPDATED
+    // to '2 of 3', never deleted"). It read "2 of 2" because `intendedReps` was
+    // distinct `repIndex` over sweep ROWS and rep 2 has none. No idempotent
+    // server-side POST was needed after all: the sweep's DECLARED rep count now
+    // rides every row it writes (`annotations.intendedReps`), so the denominator
+    // comes from the plan and only the numerator depends on a row landing.
+    // Nothing here invents a row — rep 2 is still absent from the ledger and
+    // still reported in `summary.failures` — and `n` is still 2.
+    expect(arm.provenance.line).toContain('2 of 3 reps completed');
   });
 
   it('CONTROL: a rep whose POST is acknowledged is still counted (guard)', async () => {
@@ -1314,5 +1319,96 @@ describe('a REJECTING handshake still loses the run its stage (ticket 048, R4-3)
     expect(settled).toBe(true);
     expect(summary!.failures).toEqual([]);
     expect(summary!.completedRuns).toBe(1);
+  });
+});
+
+// ===========================================================================
+// TICKET 055a — THE ABANDONMENT STUB CARRIES THE PLAN TOO.
+//
+// `createRunOnceExecutor` stamps `annotations.intendedReps` at TWO sites that
+// reach a store: the POST wrapper (runner.ts:703) and the abandonment stub
+// (runner.ts:672). Only the first is pinned anywhere, and the second is the one
+// that matters most: a rep the budget abandoned leaves NO other row, so the stub
+// is the sweep's only surviving evidence — of the rep AND of the plan behind it.
+// Written without the declaration it lands in an APPEND-ONLY ledger that can
+// never be retro-fixed, and the provenance line falls back to the "N of N" this
+// ticket exists to delete.
+//
+// The REAL path both tests below take: startBatch -> the runOnce executor's
+// budget abort -> abandonedRunStub -> deps.runs.create.
+// ===========================================================================
+
+describe('TICKET 055a — a rep the budget abandons still declares the sweep’s plan', () => {
+  const DECLARED_REPS = 3;
+
+  it('the POSTed stub carries intendedReps beside the repIndex it stands in for', async () => {
+    // Rep 1 is abandoned before `runOnce` produced a Run at all; reps 2 and 3
+    // run normally, so the same rule is visible at BOTH stamp sites.
+    const h = realHarness({
+      stallFor: (req) => (req.repIndex === 1 ? { getAudioForever: true } : {}),
+    });
+    const handle = handleOf({ execute: h.execute, reps: DECLARED_REPS, runTimeoutMs: RUN_BUDGET_MS });
+    const { settled } = await drain(handle, RUN_BUDGET_MS * 40);
+
+    expect(settled).toBe(true);
+    const posted = h.posted as AnnotatedRun[];
+    const abandoned = posted.filter((r) => r.errors.includes(RUN_ABANDONED));
+    // Two abandoned executions for rep 1 — the attempt and its retry.
+    expect(abandoned).toHaveLength(2);
+    for (const row of abandoned) {
+      expect(row.annotations?.repIndex).toBe(1);
+      expect(row.annotations?.intendedReps).toBe(DECLARED_REPS);
+    }
+    // ...and the real rows of the same sweep agree: one rule for both sites.
+    const real = posted.filter((r) => !r.errors.includes(RUN_ABANDONED));
+    expect(real.length).toBeGreaterThan(0);
+    for (const row of real) expect(row.annotations?.intendedReps).toBe(DECLARED_REPS);
+  });
+
+  it('and the denominator survives on that stub alone, through to the rendered line', async () => {
+    // AN APPEND-ONLY LEDGER SPANS SWEEPS. An earlier 1-rep sweep of the same arm
+    // completed and is on disk; the new 3-rep sweep loses every one of its reps —
+    // rep 1 abandoned by the budget (a stub, and nothing else), reps 2 and 3 to
+    // POSTs the store never acknowledged (no row at all). The ONLY row in the
+    // whole ledger that knows 3 reps were intended is the abandonment stub.
+    const earlier = realHarness({});
+    const earlierHandle = handleOf({ execute: earlier.execute, reps: 1, runTimeoutMs: RUN_BUDGET_MS });
+    expect((await drain(earlierHandle, RUN_BUDGET_MS * 8)).settled).toBe(true);
+
+    const lossy = realHarness({
+      stallFor: (req) => {
+        if (req.repIndex === 0) return {};
+        return req.repIndex === 1 ? { getAudioForever: true } : { createForever: true };
+      },
+    });
+    const lossyHandle = handleOf({
+      execute: lossy.execute,
+      reps: DECLARED_REPS,
+      // Above the POST budget, so reps 2 and 3 give up on the acknowledgement
+      // and RETURN, rather than being abandoned and getting a stub of their own.
+      runTimeoutMs: RUN_POST_TIMEOUT_MS * 4,
+    });
+    expect((await drain(lossyHandle, RUN_POST_TIMEOUT_MS * 40, 1_000)).settled).toBe(true);
+
+    // The premise, asserted rather than assumed: the new sweep landed stubs and
+    // nothing else, and reps 2 and 3 landed nothing at all.
+    const lossySweep = (lossy.posted as AnnotatedRun[]).filter((r) => r.origin === 'sweep');
+    expect(lossySweep.every((r) => r.errors.includes(RUN_ABANDONED))).toBe(true);
+    expect([...new Set(lossySweep.map((r) => r.annotations?.repIndex))]).toEqual([1]);
+    // ...and the earlier sweep declared ONE rep, so it cannot be the source of 3.
+    const earlierSweep = (earlier.posted as AnnotatedRun[]).filter((r) => r.origin === 'sweep');
+    expect(earlierSweep.length).toBeGreaterThan(0);
+    for (const row of earlierSweep) expect(row.annotations?.intendedReps).toBe(1);
+
+    // The two sweeps share one append-only ledger; the ids are per-harness, so
+    // the older sweep's rows are re-keyed rather than colliding.
+    const older = earlier.posted.map((r, i) => ({ ...r, id: `older-${i}-${r.id}` }));
+    const arm = deriveExperimentAggregates(ledgerOf([...older, ...lossy.posted])).perArm['B']!;
+
+    // One rep is proven complete — by the older sweep — and three were intended.
+    expect(arm.n).toBe(1);
+    expect(arm.provenance.completedReps).toBe(1);
+    expect(arm.provenance.intendedReps).toBe(DECLARED_REPS);
+    expect(arm.provenance.line).toContain('1 of 3 reps completed');
   });
 });

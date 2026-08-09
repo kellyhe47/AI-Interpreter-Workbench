@@ -597,6 +597,33 @@ function LiveExclusionNote(props: { count: number }): ReactElement | null {
   );
 }
 
+/**
+ * TICKET 055a — THE TAKES THE REPO NEVER RECEIVED, SAID OUT LOUD.
+ *
+ * The local append at Stop is unconditional (ticket 023), so a failed POST
+ * leaves a session in this browser and nowhere else. Keeping it out of the
+ * figures is only half the answer: golden eval 01's `must_surface:
+ * unsynced-count` — a session the server never got is a FINDING, not a silence,
+ * and it is what tells the operator the numbers on this card are not the whole
+ * of what was measured.
+ *
+ * Rendered ONLY when there is something to report, exactly like the exclusion
+ * note beside it: `deriveLiveModel` omits the count at zero, so "nothing
+ * diverged" is silence rather than a standing "0 sessions unsynced" that a
+ * reader would learn to ignore.
+ */
+function LiveUnsyncedNote(props: { count: number | undefined }): ReactElement | null {
+  const count = props.count ?? 0;
+  if (count === 0) return null;
+  const noun = count === 1 ? 'session' : 'sessions';
+  return (
+    <p data-live-unsynced={String(count)} data-mono="" style={monoStyle}>
+      {`${count} ${noun} unsynced: the POST was never acknowledged, so the repo does not ` +
+        'have this take. Stored and listed here, and excluded from every figure above'}
+    </p>
+  );
+}
+
 function LiveCard(props: { model: LiveModel }): ReactElement {
   const { model } = props;
   // TICKET 064 — matched on the PAIR. Matching on `arm` alone would hand the
@@ -618,6 +645,9 @@ function LiveCard(props: { model: LiveModel }): ReactElement {
         <>
           <EmptyCardNote card="live">{LIVE_EMPTY}</EmptyCardNote>
           <LiveExclusionNote count={model.sessionsWithoutContextPolicy} />
+          {/* An empty card over unsynced takes is the sharpest case of all:
+              every measurement this browser holds is one the repo never got. */}
+          <LiveUnsyncedNote count={model.unsyncedSessions} />
         </>
       ) : (
         <>
@@ -634,6 +664,7 @@ function LiveCard(props: { model: LiveModel }): ReactElement {
               'no reference text, so no WER'}
           </p>
           <LiveExclusionNote count={model.sessionsWithoutContextPolicy} />
+          <LiveUnsyncedNote count={model.unsyncedSessions} />
 
           <div style={{ marginTop: 'var(--space-3)' }}>
             <div data-grid-header="" style={gridStyle(METRIC_COLUMNS, true)}>

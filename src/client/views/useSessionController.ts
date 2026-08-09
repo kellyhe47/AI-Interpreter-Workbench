@@ -756,14 +756,29 @@ export function useSessionController(deps: SessionDeps): SessionController {
     };
     // LOCAL FIRST, UNCONDITIONALLY. The operator's take is not made contingent
     // on a reachable server (ticket 023's order exactly).
-    depsRef.current.ledger.appendLiveSession(session);
+    const ledger = depsRef.current.ledger;
+    ledger.appendLiveSession(session);
     // TICKET 041 — then the SAME record to the server, so the stability
     // artifact reaches data/, the exported bundle and a second machine. A
-    // rejection is swallowed: it costs the server's copy and nothing else, and
-    // the view stays usable. A session that produced NOTHING is posted too —
-    // storing is not aggregating, and deleting the record of a take that failed
-    // to produce anything would delete the finding.
-    void depsRef.current.liveSessions?.create(session).catch(() => {});
+    // session that produced NOTHING is posted too — storing is not aggregating,
+    // and deleting the record of a take that failed to produce anything would
+    // delete the finding.
+    //
+    // TICKET 055a — AND THE REJECTION IS NO LONGER SWALLOWED. It never fails the
+    // Stop and never removes the take: the ORDER above is untouched, the record
+    // stays stored, listed and exported, and the view stays usable with an
+    // unreachable server. What the rejection buys is the one fact the ledger had
+    // no way to know — that the repo does not have this take — so
+    // `isAggregatableLiveSession` can keep it out of a figure a reviewer could
+    // not reproduce from a clone. It is a claim about the STORE, not about the
+    // measurement.
+    //
+    // The ledger is captured rather than re-read off `depsRef`: the answer
+    // arrives an unbounded time later, and it belongs to the ledger this take
+    // was appended to.
+    void depsRef.current.liveSessions?.create(session).catch(() => {
+      ledger.markLiveSessionUnsynced(session.id);
+    });
   };
 
   const stopSession = (): void => {

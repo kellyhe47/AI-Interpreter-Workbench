@@ -190,6 +190,10 @@ describe('ticket 033 — the sweep envelope carries BOTH annotations', () => {
         configId: 'B',
         config: CASCADE_CONFIG,
         repIndex: 3,
+        // TICKET 055a — the sweep's declared rep count rides the request beside
+        // the executed one. Required, so no sweep path can forget the
+        // denominator; the assertions below are unchanged.
+        intendedReps: 5,
         attempt: 1,
         warmup: false,
         origin: 'sweep',
@@ -197,9 +201,14 @@ describe('ticket 033 — the sweep envelope carries BOTH annotations', () => {
       }),
     );
 
+    // TICKET 055a — a THIRD annotation now rides the same envelope (the sweep's
+    // declared rep count), and the assertion is widened rather than loosened:
+    // the corpusVersion runOnce wrote still has to survive the wrapper, which is
+    // what this test is for.
+    const expected = { repIndex: 3, corpusVersion: CORPUS_VERSION, intendedReps: 5 };
     expect(h.posted).toHaveLength(1);
-    expect(h.posted[0]!.annotations).toEqual({ repIndex: 3, corpusVersion: CORPUS_VERSION });
+    expect(h.posted[0]!.annotations).toEqual(expected);
     expect(h.posted[0]!.origin).toBe('sweep');
-    expect(result.run.annotations).toEqual({ repIndex: 3, corpusVersion: CORPUS_VERSION });
+    expect(result.run.annotations).toEqual(expected);
   });
 });

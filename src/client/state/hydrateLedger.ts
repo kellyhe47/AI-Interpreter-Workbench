@@ -141,6 +141,37 @@ export async function hydrateLedger(
     ledger.appendLiveSession(session);
   }
 
+  // TICKET 055a — THE LISTING IS THE SERVER'S ACKNOWLEDGEMENT, and it is the
+  // only thing that can settle which takes the repo actually holds.
+  //
+  // WHY IT CANNOT RIDE THE DEDUPE ABOVE: the merge is ADD-ONLY and never
+  // replaces, so a browser whose copy of a session is stale (the POST failed at
+  // Stop, and the server got the take another way — a retry, a second tab, the
+  // export) skips it on id forever. That is precisely the machine with the
+  // problem, so re-hydration overwriting the local record cannot be the
+  // mechanism; the mark has to be settled explicitly.
+  //
+  // IT CUTS BOTH WAYS, and neither direction is a filter on the store: a
+  // session the listing NAMES is one the repo has, and a session it does not
+  // name is one the repo does not have. Both are statements this listing is
+  // entitled to make, because `list()` is unfiltered — it is the whole server
+  // view of the Live half.
+  //
+  // AND A HOST WITH NO LISTING LEARNS NOTHING. `source.liveSessions` absent is
+  // a host wiring no live-session backend (every pre-041 bag), which carries no
+  // statement about anything: inventing an acknowledgement out of a listing that
+  // was never asked for would be the worse of the two errors, and demoting a
+  // take on the same non-evidence would be the other. The key's presence is what
+  // is read here, never the emptiness of the array — a server that legitimately
+  // holds nothing still says so.
+  if (source.liveSessions !== undefined) {
+    const acknowledged = new Set(liveSessions.map((s) => s.id));
+    for (const stored of ledger.getLiveSessions()) {
+      if (acknowledged.has(stored.id)) ledger.markLiveSessionSynced(stored.id);
+      else ledger.markLiveSessionUnsynced(stored.id);
+    }
+  }
+
   // TICKET 034 — the same append-and-dedupe rule, on a DIFFERENT key. A score
   // has no id, and re-scoring the same (runId, utteranceId) is a LEGITIMATE
   // second record, so identity cannot be the key: hydrating twice must add

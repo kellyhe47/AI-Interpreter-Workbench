@@ -129,6 +129,16 @@ export interface BatchExecutorRequest {
   config: RunOnceConfig;
   /** 1-based repetition index; 0 for the warmup, which counts as no rep. */
   repIndex: number;
+  /**
+   * TICKET 055a — the retained rep count this sweep SET OUT to keep
+   * (`BatchOptions.reps`, the same number `BatchConfigSummary.intendedReps`
+   * reports). It travels ON THE REQUEST, beside `repIndex` and for the same
+   * reason `origin` does: the executor stamps it onto the row BEFORE the POST,
+   * so the plan reaches the ledger with the run rather than being patched on
+   * afterwards — and so a rep whose row never lands is still named by the rows
+   * that did (see `annotations.intendedReps`).
+   */
+  intendedReps: number;
   /** 1 = first try, 2 = the single retry. Never more. */
   attempt: number;
   /** True for the discarded warmup run of a configuration. */
@@ -373,6 +383,9 @@ export function startBatch(options: BatchOptions): BatchHandle {
         configId: cell.configuration.id,
         config: cell.configuration.config,
         repIndex: cell.repIndex,
+        // TICKET 055a — the sweep's own plan, handed over with the cell so the
+        // row carries the denominator a lost rep would otherwise erase.
+        intendedReps: reps,
         attempt: attemptNo,
         warmup: cell.warmup,
         // Never 'sweep' for the warmup: that is what keeps the discarded run
@@ -433,10 +446,14 @@ export function startBatch(options: BatchOptions): BatchHandle {
       // would risk the very duplicate R4-1 exists to kill. Surfacing it in
       // `failures` invents nothing and loses nothing.
       //
-      // KNOWN RESIDUAL — TICKET 050. The rendered provenance still reads "2 of 2"
-      // rather than "2 of 3" for a lost rep, because `intendedReps` is distinct
-      // `repIndex` over sweep ROWS and this rep has none. Only an idempotent
-      // server-side POST keyed by run id can restore that denominator honestly.
+      // RESIDUAL CLOSED BY TICKET 055a. The rendered provenance used to read
+      // "2 of 2" rather than "2 of 3" for a lost rep, because `intendedReps` was
+      // distinct `repIndex` over sweep ROWS and this rep has none. No idempotent
+      // POST was needed after all: the surviving rows now CARRY the sweep's
+      // declared rep count (`annotations.intendedReps`), so the denominator is
+      // read from the plan and only the numerator depends on rows landing. This
+      // branch is unchanged — the run's fate is still surfaced in `failures`
+      // rather than papered over with an invented row.
       const postUnacknowledged = result.run.errors.some((e) => e.startsWith(RUN_POST_TIMED_OUT));
       if (result.cancelled || postUnacknowledged || result.run.status !== 'complete') {
         return {
@@ -652,7 +669,7 @@ export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
           reason: RUN_ABANDONED,
         }),
         origin: request.origin,
-        annotations: { repIndex: request.repIndex },
+        annotations: { repIndex: request.repIndex, intendedReps: request.intendedReps },
       };
       // Fire and forget, and never allowed to reject: the attempt it belongs to
       // has already been written off, so a store that refuses the stub must not
@@ -676,7 +693,15 @@ export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
         stamped = {
           ...run,
           origin: request.origin,
-          annotations: { ...run.annotations, repIndex: request.repIndex },
+          annotations: {
+            ...run.annotations,
+            repIndex: request.repIndex,
+            // TICKET 055a — the PLAN, copied onto the row exactly where the
+            // executed rep index already is. It is the only thing that survives
+            // a rep whose POST is never acknowledged, so it has to be on the
+            // rows that DID land.
+            intendedReps: request.intendedReps,
+          },
         };
         const acknowledged = await deps.runs.create(stamped);
         // ...and CLEARED only on a real acknowledgement. A POST that was
@@ -710,7 +735,11 @@ export function createRunOnceExecutor(deps: RunnerDeps): BatchExecutor {
         stamped ?? {
           ...result.run,
           origin: request.origin,
-          annotations: { ...result.run.annotations, repIndex: request.repIndex },
+          annotations: {
+            ...result.run.annotations,
+            repIndex: request.repIndex,
+            intendedReps: request.intendedReps,
+          },
         },
     };
   };

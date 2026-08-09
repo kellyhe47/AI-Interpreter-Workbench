@@ -60,6 +60,15 @@ const ARM_B_CONFIG: RunOnceConfig = {
 const V1 = 'corpus-en-es-v1';
 const V2 = 'corpus-en-es-v2';
 
+/**
+ * TICKET 055a — the rep count this sweep DECLARES, and deliberately NOT the
+ * number of takes it runs. `recordings.length` would be indistinguishable from
+ * a denominator derived over the rows that landed, which is precisely the
+ * derivation this field exists to replace; 5 declared against 3 landed rows can
+ * only have come from the request.
+ */
+const DECLARED_REPS = 5;
+
 const DURATION_MS = 100;
 const SPEECH_END_MS = 60;
 const LATENCY_MS = 80;
@@ -153,6 +162,8 @@ beforeAll(async () => {
       configId: 'B',
       config: ARM_B_CONFIG,
       repIndex,
+      // TICKET 055a — the sweep's declared rep count, required on the request.
+      intendedReps: DECLARED_REPS,
       attempt: 1,
       warmup: false,
       origin: 'sweep',
@@ -215,5 +226,51 @@ describe('ticket 033 — the rendered provenance line names EVERY version behind
     // scripted one. What matters is that it is a real figure over all three.
     expect(arm.p50Ms).toBeGreaterThanOrEqual(LATENCY_MS);
     expect(arm.p50Ms).toBeLessThan(LATENCY_MS + 50);
+  });
+});
+
+/* ===== TICKET 055a — THE SWEEP'S PLAN TAKES THE SAME ROUND TRIP =============
+ *
+ * `annotations.intendedReps` was added to the request above, into the one suite
+ * whose whole purpose is proving an annotation survives runner → POST →
+ * `ledger.jsonl` → hydrate → provenance. It rides the same envelope as
+ * `corpusVersion` and is stored by the same verbatim write (`routes/runs.ts:73`
+ * hands the body to `storage.appendRun`, which stringifies the whole Run), so
+ * the trip is free to assert — and unasserted it is exactly the shape of the
+ * defect ticket 033 was written for: the field exists at both ends and nothing
+ * proves it is carried between them.
+ *
+ * THE VALUE IS DELIBERATELY NOT THE ROW COUNT. Three rows land and the sweep
+ * declared 5, so nothing derived over the surviving rows can produce this
+ * number — the floor is the plan or it is nothing.
+ * ========================================================================== */
+
+describe('TICKET 055a — the declared rep count survives runner → POST → ledger.jsonl', () => {
+  it('every persisted line carries the plan, beside the repIndex it executed', async () => {
+    const persisted = (await storage.readLedger()) as unknown as Run[];
+
+    expect(persisted.map((r) => r.annotations?.intendedReps)).toEqual([
+      DECLARED_REPS,
+      DECLARED_REPS,
+      DECLARED_REPS,
+    ]);
+    // Beside, never instead of — the numerator still comes from the rows.
+    expect(persisted.map((r) => r.annotations?.repIndex)).toEqual([1, 2, 3]);
+  });
+
+  it('the hydrated ledger carries it into the client store', () => {
+    expect(ledger.getRuns().map((r) => r.annotations?.intendedReps)).toEqual([
+      DECLARED_REPS,
+      DECLARED_REPS,
+      DECLARED_REPS,
+    ]);
+  });
+
+  it('and the rendered line reports the declared denominator, never `3 of 3`', () => {
+    const arm = deriveExperimentAggregates(ledger).perArm['B']!;
+
+    expect(arm.provenance.completedReps).toBe(3);
+    expect(arm.provenance.intendedReps).toBe(DECLARED_REPS);
+    expect(arm.provenance.line).toContain(`3 of ${DECLARED_REPS} reps completed`);
   });
 });
