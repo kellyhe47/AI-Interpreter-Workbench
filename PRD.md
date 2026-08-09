@@ -1016,6 +1016,35 @@ generator's own header states *"a tone burst + silence tail… NOT speech."*
 Remaining on item 11: **YUE takes 1–3** (solo, improvised, no reference text) and **ES takes 1–3**
 (blocked on the coworker — the only externally-blocked item in the project).
 
+### 15D. What the stored data actually shows — verified 2026-08-09
+
+Corrections to claims made about this repo's state, each verified against the files rather than
+argued. They matter because two of them mark a graded must-have as passing when it is not.
+
+- **Rubric #5 (language pair selection) is NOT passing.** Run `dbeb6d94` — the only complete Realtime
+  run — translated English into **German** on an English↔Spanish project, and stores
+  `languagePair: None`. The *selector* works, which is why a spec audit and a manual QA pass both
+  marked #5 ✅. The selection does not reach the session. **Ticket 062.**
+- **Every stored utterance has `id: undefined`.** WER keys on `(runId, utteranceId)`; the by-category
+  view keys on the utterance. Both will collapse silently on first real use. **Ticket 063.**
+- **The negative-latency run is not aggregate-eligible.** It is `origin: 'manual'` and the gate
+  rejects it. The `-13973 ms` is a **display** defect and a **run-envelope mark-aggregation** bug
+  (last-wins `speech_end` paired with first-wins `audio_queued`), plus genuine per-utterance drift on
+  two of four utterances. It is not a cross-clock bug and it does not drag any p50. **Ticket 055.**
+- **The experiment cards are correct.** Both render their empty states, and the reported
+  Exp1-empty/Exp2-full asymmetry is structurally impossible — one call, one gate, and Exp 2 is
+  strictly harder to populate than Exp 1.
+- **The Live card's latency figures are honest.** `deriveLiveModel` recomputes from utterance
+  timings; recomputing from `data/live-sessions.jsonl` alone reproduces the displayed `0.40 s` /
+  `1.50 s` exactly. Cascade's real numbers — **p50 1487 ms, p95 2858 ms over 16 samples** — partially
+  meet the rubric's *"under 3s, target under 2s"*. Cascade is not unmeasured.
+- **`REALTIME · TRIMMED` is contaminated, not empty.** Its samples are silently pooled into the
+  `default` column, so that column is really "realtime, all policies". A wrong number, not a missing
+  one. **Ticket 064.**
+- **Repo scale, corrected:** 27,579 source LOC against 42,495 test LOC (**1.54:1**), 1,631 `it()`
+  blocks across 125 test files. **Six** production files exceed 1,000 lines, not four —
+  `state/ledger.ts` (1,038) is the one usually missed.
+
 ---
 
 ## 16. Deliverables
