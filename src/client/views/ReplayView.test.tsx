@@ -22,7 +22,7 @@
 import '@testing-library/jest-dom/vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_CASCADE_TRIPLE,
@@ -2188,5 +2188,445 @@ describe('TICKET 066 ROUND 2 — an unresolvable restored id is CLEARED from the
       document.querySelectorAll('[data-recording-row][data-selected="true"]'),
     ).toHaveLength(0);
     expect(current).toBeNull();
+  });
+});
+
+/* ===== TICKET 067 — the sweep clock TICKS, and a tick is not a measurement === */
+
+/**
+ * TICKET 067 — THE SWEEP CLOCK DOES NOT TICK.
+ *
+ * `BatchProgress` already renders `[data-batch-clock]`. What it does not do is
+ * MOVE: `elapsedMs` and `estimatedRemainingMs` are fields on the progress event,
+ * and `runner.ts` emits only at run boundaries. Replay is paced at 1× (golden
+ * eval 08 pins that), so a one-recording sweep is 12 executions over 6-8 minutes
+ * and the clock advances about 12 times. Between those it shows a stale
+ * snapshot, which is indistinguishable from a hung sweep — the operator
+ * refreshed, and because the batch runner is client-side the refresh killed the
+ * sweep. The frozen clock cost a real sweep.
+ *
+ * ============ THE SEAM THESE TESTS DEFINE ===================================
+ *
+ *   /** TICKET 067 — where the sweep clock's ticks come from. *\/
+ *   export interface SweepClock {
+ *     /** Wall clock in ms — the SAME units as `BatchProgress.elapsedMs`. *\/
+ *     now: () => number;
+ *     /**
+ *      * Calls `onTick` while a sweep is in flight (production: about 1 Hz).
+ *      * Returns the teardown, which MUST be called when the sweep ends, is
+ *      * cancelled, or the panel unmounts.
+ *      *\/
+ *     subscribe: (onTick: () => void) => () => void;
+ *   }
+ *
+ *   // on ReplayDeps, OPTIONAL exactly as `selectionStore` and `rng` are —
+ *   // App is the host that fills it in; a bag without one simply does not tick.
+ *   sweepClock?: SweepClock;
+ *
+ * WHY THERE. `ReplayView` owns `SweepState` and therefore owns the three moments
+ * the subscription's lifetime is defined by (start, cancel, done), and it is
+ * already the single boundary every outside-world reach in this view goes
+ * through — `now`, `newId`, `selectionStore`, `rng`. The panel receives the
+ * clock down the same path it already receives `progress` / `configurations` /
+ * `reps`; whether the interpolation is computed in `ReplayView` or in
+ * `BatchProgress` is the implementer's call, and nothing below asserts which.
+ *
+ * WHY `now` LIVES ON THE SEAM. The anchor and the tick must read ONE clock or
+ * the interpolation drifts against itself; bundling them makes a fake that
+ * disagrees with itself impossible to build. (The probe below also drives
+ * `deps.now` off the same counter, so an implementation that anchors on
+ * `deps.now()` instead is not punished for it — the seam identity is not what
+ * this ticket is about.)
+ *
+ * WHY NOT `vi.useFakeTimers`. jsdom plus fake timers would let a direct reach
+ * for `setInterval` pass every behavioural assertion here while production
+ * leaks a timer past the panel's unmount. So the tick arrives ONLY through the
+ * injected seam, AC6 is asserted against the seam's own teardown record, and a
+ * source scan forbids the ambient names outright.
+ *
+ * ============ ADDED TO THE DOM CONTRACT =====================================
+ * [data-batch-clock] — `elapsed M:SS · est. remaining M:SS | — | finishing`
+ *   `finishing`  once the local countdown reaches zero while the sweep runs;
+ *                never `0:00`, never a negative clock
+ *   `—`          unchanged: `estimatedRemainingMs === null` is an ABSENCE and
+ *                no countdown is invented before there is a measurement
+ * ===========================================================================
+ *
+ * THE RULE UNDER ALL OF IT: the runner's figure is the MEASUREMENT and a tick
+ * between measurements is interpolation. AC3 is the sharp end — after an event
+ * carrying `elapsedMs: X` the panel reads X, even when X is LOWER than what the
+ * ticking accumulated. A wrong number is worse than a missing one.
+ */
+
+/** The honest reading once the countdown runs out with the sweep still going. */
+const SWEEP_FINISHING = 'finishing';
+/** Unchanged from ticket 013 — an estimate the runner has not produced. */
+const SWEEP_NO_ESTIMATE = '—';
+
+/**
+ * The injected clock, plus the levers a test drives it through.
+ *
+ * `live()` / `subscribes()` / `teardowns()` are the seam's own bookkeeping —
+ * they are what AC6 is asserted against, so "no interval leaked" is a FACT the
+ * probe recorded and not "no error was thrown".
+ */
+function makeSweepClockProbe(startMs: number = T0) {
+  const listeners = new Set<() => void>();
+  let current = startMs;
+  let subscribes = 0;
+  let teardowns = 0;
+
+  const seam = {
+    now: (): number => current,
+    subscribe: (onTick: () => void): (() => void) => {
+      subscribes += 1;
+      listeners.add(onTick);
+      return () => {
+        teardowns += 1;
+        listeners.delete(onTick);
+      };
+    },
+  };
+
+  return {
+    seam,
+    now: (): number => current,
+    /** Advance the wall clock and deliver ONE tick to every live listener. */
+    tick(ms: number): void {
+      current += ms;
+      act(() => {
+        for (const listener of [...listeners]) listener();
+      });
+    },
+    /** Subscriptions still live. After teardown the only honest reading is 0. */
+    live: (): number => listeners.size,
+    subscribes: (): number => subscribes,
+    teardowns: (): number => teardowns,
+  };
+}
+
+/** Scoped to the render's own container — RTL APPENDS, and a stale panel lies. */
+const clockIn = (container: HTMLElement): string =>
+  (container.querySelector('[data-batch-clock]')?.textContent ?? '').trim();
+
+const positionIn = (container: HTMLElement): string =>
+  (container.querySelector('[data-batch-position]')?.textContent ?? '').trim();
+
+const barIn = (container: HTMLElement): HTMLElement => {
+  const found = container.querySelector<HTMLElement>('[data-batch-bar]');
+  if (!found) throw new Error('missing element: [data-batch-bar]');
+  return found;
+};
+
+/** The WHOLE cell, verbatim — an extra fabricated figure cannot hide in it. */
+function expectClock(container: HTMLElement, elapsed: string, remaining: string): void {
+  expect(clockIn(container)).toBe(`elapsed ${elapsed} · est. remaining ${remaining}`);
+}
+
+/** A confirmed, running sweep over a bag whose clock the test owns. */
+async function openTickingSweep(clock: ReturnType<typeof makeSweepClockProbe>) {
+  const fakes = makeFakes(DEFAULT_LIBRARY);
+  // NARROW LOCAL CAST — `sweepClock` is the seam this ticket adds, so the bag
+  // does not carry it yet and `tsc` must stay clean while these tests are red.
+  const deps = {
+    ...fakes.deps,
+    now: () => clock.now(),
+    sweepClock: clock.seam,
+  } as ReplayDeps;
+
+  const view = render(<ReplayView deps={deps} />);
+  await waitFor(() => expect(rows()).toHaveLength(2));
+  await selectRecording(CORPUS_REC.id);
+  fireEvent.click(screen.getByRole('button', { name: 'Batch sweep…' }));
+  await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+  fireEvent.click(get('[data-sweep-confirm-start]'));
+  await waitFor(() => expect(fakes.batches).toHaveLength(1));
+  await waitFor(() => expect(q('[data-batch-progress]')).not.toBeNull());
+
+  return { fakes, view, container: view.container, batch: fakes.batches[0]! };
+}
+
+describe('TICKET 067 — a progress event RE-ANCHORS the clock (AC3)', () => {
+  it('an event whose elapsed is LOWER than the accumulated total still wins outright', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 60_000, estimatedRemainingMs: 300_000 });
+    await waitFor(() => expectClock(container, '1:00', '5:00'));
+
+    // Two minutes with no event: the panel has interpolated its way to 3:00.
+    clock.tick(60_000);
+    clock.tick(60_000);
+    expectClock(container, '3:00', '3:00');
+
+    // THE ASSERTION THIS TICKET TURNS ON. The runner then MEASURES 1:30 — less
+    // than the 3:00 the ticking accumulated. The measurement wins, whole. A
+    // `Math.max(local, event)`, a monotonic guard, or any "the clock only ever
+    // moves forward" tick is dead right here.
+    batch.emit({ elapsedMs: 90_000, estimatedRemainingMs: 30_000 });
+    await waitFor(() => expectClock(container, '1:30', '0:30'));
+
+    // ...and the interpolation resumes FROM the measurement, never from the
+    // local total it just replaced.
+    clock.tick(10_000);
+    expectClock(container, '1:40', '0:20');
+  });
+
+  it('an event whose elapsed is HIGHER than the accumulated total wins too', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 60_000, estimatedRemainingMs: 300_000 });
+    await waitFor(() => expectClock(container, '1:00', '5:00'));
+
+    clock.tick(10_000);
+    expectClock(container, '1:10', '4:50');
+
+    // Provider latency the local tick never saw: 10:00 measured, not 1:10.
+    batch.emit({ elapsedMs: 600_000, estimatedRemainingMs: 60_000 });
+    await waitFor(() => expectClock(container, '10:00', '1:00'));
+
+    clock.tick(20_000);
+    expectClock(container, '10:20', '0:40');
+  });
+});
+
+describe('TICKET 067 — the clock moves between progress events (AC1, AC2)', () => {
+  it('elapsed advances with NO event arriving, driven through the injected seam', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 1_446_000, estimatedRemainingMs: 2_490_000 });
+    await waitFor(() => expectClock(container, '24:06', '41:30'));
+
+    // The movement below comes through the SEAM — nothing else can drive it,
+    // because no real timer runs and no second event is emitted.
+    expect(clock.subscribes()).toBeGreaterThan(0);
+    expect(clock.live()).toBeGreaterThan(0);
+
+    clock.tick(60_000);
+    expectClock(container, '25:06', '40:30');
+    clock.tick(60_000);
+    expectClock(container, '26:06', '39:30');
+    clock.tick(1_000);
+    expectClock(container, '26:07', '39:29');
+  });
+
+  it('remaining counts DOWN from the last estimate the runner actually produced', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    // A MEASURED zero elapsed is fine — it is a measurement. Compare AC4, where
+    // a countdown that reaches zero is an inference and must say so.
+    batch.emit({ elapsedMs: 0, estimatedRemainingMs: 300_000 });
+    await waitFor(() => expectClock(container, '0:00', '5:00'));
+
+    clock.tick(30_000);
+    expectClock(container, '0:30', '4:30');
+    clock.tick(30_000);
+    expectClock(container, '1:00', '4:00');
+    clock.tick(1_000);
+    expectClock(container, '1:01', '3:59');
+  });
+});
+
+describe('TICKET 067 — the countdown never goes negative or invents precision (AC4)', () => {
+  it('reaching zero with the sweep still running reads `finishing`, not 0:00', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 0, estimatedRemainingMs: 90_000 });
+    await waitFor(() => expectClock(container, '0:00', '1:30'));
+
+    // One second left is still a real countdown.
+    clock.tick(89_000);
+    expectClock(container, '1:29', '0:01');
+
+    // The estimate is spent. The panel stops claiming a figure it no longer has.
+    clock.tick(1_000);
+    expectClock(container, '1:30', SWEEP_FINISHING);
+
+    // Ten minutes past the estimate — no `-10:00`, no minus sign anywhere, and
+    // no `0:00` standing in for "I do not know".
+    clock.tick(600_000);
+    expectClock(container, '11:30', SWEEP_FINISHING);
+    expect(clockIn(container)).not.toMatch(/-\s*\d/);
+    expect(clockIn(container)).not.toMatch(/est\. remaining 0:00/);
+  });
+
+  it('a fresh measurement after `finishing` puts a real countdown back', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 0, estimatedRemainingMs: 10_000 });
+    await waitFor(() => expectClock(container, '0:00', '0:10'));
+    clock.tick(20_000);
+    expectClock(container, '0:20', SWEEP_FINISHING);
+
+    // `finishing` is a statement about the LAST estimate, not a terminal state.
+    batch.emit({ elapsedMs: 20_000, estimatedRemainingMs: 120_000 });
+    await waitFor(() => expectClock(container, '0:20', '2:00'));
+    clock.tick(30_000);
+    expectClock(container, '0:50', '1:30');
+  });
+});
+
+describe('TICKET 067 — no countdown is invented before there is one (AC5)', () => {
+  it('`estimatedRemainingMs === null` stays `—` while elapsed keeps ticking', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 1_446_000, estimatedRemainingMs: null });
+    await waitFor(() => expectClock(container, '24:06', SWEEP_NO_ESTIMATE));
+
+    // Elapsed is anchored on a MEASUREMENT, so it moves...
+    clock.tick(60_000);
+    expectClock(container, '25:06', SWEEP_NO_ESTIMATE);
+    clock.tick(60_000);
+    expectClock(container, '26:06', SWEEP_NO_ESTIMATE);
+
+    // ...and the estimate, which was never measured, stays an absence. Not a
+    // zero, not `finishing`, not a figure derived from the elapsed side.
+    expect(clockIn(container)).not.toMatch(/est\. remaining\s*-?\d/);
+    expect(clockIn(container)).not.toContain(SWEEP_FINISHING);
+  });
+});
+
+describe('TICKET 067 — the ticking stops, asserted through the seam (AC6)', () => {
+  it('the sweep ENDING tears the subscription down', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 60_000, estimatedRemainingMs: 300_000 });
+    await waitFor(() => expectClock(container, '1:00', '5:00'));
+    clock.tick(60_000);
+    expectClock(container, '2:00', '4:00');
+    // Non-vacuity: something was subscribed, so a teardown count means something.
+    expect(clock.subscribes()).toBeGreaterThan(0);
+
+    batch.settle({ status: 'complete', completedRuns: 12 });
+    await waitFor(() => expect(container.querySelector('[data-batch-progress]')).toBeNull());
+
+    // THE SEAM'S OWN RECORD, not "no error was thrown".
+    await waitFor(() => expect(clock.live()).toBe(0));
+    expect(clock.teardowns()).toBe(clock.subscribes());
+  });
+
+  it('CANCEL stops the ticking', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 60_000, estimatedRemainingMs: 300_000 });
+    await waitFor(() => expectClock(container, '1:00', '5:00'));
+    clock.tick(30_000);
+    expectClock(container, '1:30', '4:30');
+    expect(clock.subscribes()).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('button', { name: CANCEL_BATCH }));
+    expect(batch.cancel).toHaveBeenCalledTimes(1);
+    batch.settle({ status: 'cancelled', completedRuns: 2 });
+
+    await waitFor(() => expect(container.querySelector('[data-batch-progress]')).toBeNull());
+    await waitFor(() => expect(clock.live()).toBe(0));
+    expect(clock.teardowns()).toBe(clock.subscribes());
+  });
+
+  it('UNMOUNT stops the ticking — no interval outlives the panel', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, view, batch } = await openTickingSweep(clock);
+
+    batch.emit({ elapsedMs: 60_000, estimatedRemainingMs: 300_000 });
+    await waitFor(() => expectClock(container, '1:00', '5:00'));
+    clock.tick(45_000);
+    expectClock(container, '1:45', '4:15');
+    const subscribed = clock.subscribes();
+    expect(subscribed).toBeGreaterThan(0);
+
+    view.unmount();
+
+    // A leaked interval is precisely a subscription with no teardown. jsdom
+    // would never complain about one; the seam counted it.
+    expect(clock.live()).toBe(0);
+    expect(clock.teardowns()).toBe(subscribed);
+
+    // And a tick delivered after the unmount reaches nothing at all.
+    clock.tick(60_000);
+    expect(clock.live()).toBe(0);
+    expect(clock.teardowns()).toBe(subscribed);
+  });
+});
+
+describe('TICKET 067 — a tick moves the clock and NOTHING else (AC7)', () => {
+  it('position and progress bar are per-run facts and are never interpolated', async () => {
+    const clock = makeSweepClockProbe();
+    const { container, batch } = await openTickingSweep(clock);
+
+    const configuration = batch.request.configurations[0] as BatchConfiguration;
+    batch.emit({
+      runIndex: 17,
+      totalRuns: 45,
+      repIndex: 3,
+      configId: configuration.id,
+      elapsedMs: 1_446_000,
+      estimatedRemainingMs: 2_490_000,
+    });
+    await waitFor(() => expectClock(container, '24:06', '41:30'));
+
+    const position = positionIn(container);
+    expect(position).toContain('run 17 of 45');
+    const valueNow = barIn(container).getAttribute('aria-valuenow');
+    const valueMax = barIn(container).getAttribute('aria-valuemax');
+    const fill = (barIn(container).firstElementChild as HTMLElement).style.width;
+    expect(valueNow).toBe('17');
+    expect(valueMax).toBe('45');
+
+    clock.tick(300_000);
+
+    // The tick GENUINELY happened — without this the four assertions below
+    // would pass against a panel that never moved at all.
+    expectClock(container, '29:06', '36:30');
+
+    expect(positionIn(container)).toBe(position);
+    expect(barIn(container).getAttribute('aria-valuenow')).toBe(valueNow);
+    expect(barIn(container).getAttribute('aria-valuemax')).toBe(valueMax);
+    expect((barIn(container).firstElementChild as HTMLElement).style.width).toBe(fill);
+  });
+});
+
+/* ===== TICKET 067 — the tick is a SEAM, not a timer reached for directly ==== */
+
+/**
+ * The `localStorage` scan added for ticket 066 exists for exactly this reason:
+ * jsdom supplies the global, so the bypass passes the whole suite and ships.
+ * `setInterval` is the same trap one step worse — under `vi.useFakeTimers` a
+ * direct reach satisfies every behavioural assertion above while production
+ * leaks a timer past the panel's unmount.
+ */
+describe('TICKET 067 — no ambient timer, no ambient clock, in either file', () => {
+  const FILES = [
+    'src/client/components/replay/BatchProgress.tsx',
+    'src/client/views/ReplayView.tsx',
+  ] as const;
+
+  const FORBIDDEN: ReadonlyArray<readonly [string, RegExp]> = [
+    ['setInterval', /\bsetInterval\b/],
+    ['setTimeout', /\bsetTimeout\b/],
+    ['Date.now', /\bDate\s*\.\s*now\b/],
+    ['performance.now', /\bperformance\s*\.\s*now\b/],
+    ['requestAnimationFrame', /\brequestAnimationFrame\b/],
+  ];
+
+  /** Blanks comments while preserving line count (see deletions.test.ts). */
+  function strip(source: string): string {
+    return source
+      .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+      .replace(/(^|[^:])\/\/[^\n]*/g, (_m, lead: string) => lead);
+  }
+
+  it.each(FILES)('%s takes its clock through the bag', (file) => {
+    const code = strip(readFileSync(resolve(process.cwd(), file), 'utf8'));
+    for (const [name, pattern] of FORBIDDEN) {
+      expect(code, `${file} must not name ${name} — the clock is injected`).not.toMatch(pattern);
+    }
   });
 });
