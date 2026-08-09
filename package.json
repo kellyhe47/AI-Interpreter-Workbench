@@ -13,6 +13,7 @@
     "score-wer": "tsx scripts/score-wer.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "eval": "vitest run --config vitest.eval.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json"
   },
   "dependencies": {
