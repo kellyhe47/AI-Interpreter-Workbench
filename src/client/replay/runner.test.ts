@@ -1396,3 +1396,88 @@ describe('runOnce — per-utterance audio_queued from the media-track mark (tick
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 062 — the run must RECORD the pair it used, and must not run without one.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 062 — the Run records the language pair and direction it actually used', () => {
+  async function runHappy(h: Harness, config: RunOnceConfig = CASCADE_CONFIG) {
+    const done = start(h, config);
+    await vi.advanceTimersByTimeAsync(1000);
+    return done;
+  }
+
+  const cases: { label: string; config: RunOnceConfig }[] = [
+    {
+      label: 'cascade en→es',
+      config: CASCADE_CONFIG,
+    },
+    {
+      label: 'realtime en→es',
+      config: REALTIME_CONFIG,
+    },
+    {
+      label: 'realtime es→en (the reverse direction)',
+      config: {
+        ...REALTIME_CONFIG,
+        languagePair: 'EN↔ES',
+        direction: 'es→en',
+        targetLanguage: 'English',
+      },
+    },
+    {
+      label: 'realtime en→yue',
+      config: {
+        ...REALTIME_CONFIG,
+        languagePair: 'EN↔YUE',
+        direction: 'en→yue',
+        targetLanguage: 'Cantonese',
+      },
+    },
+  ];
+
+  it.each(cases)(
+    '$label: the stored Run carries the SAME pair and direction the transport was started with',
+    async ({ config }) => {
+      const h = makeHarness({ kind: config.architecture === 'realtime' ? 'realtime' : 'cascade' });
+      const { run } = await runHappy(h, config);
+
+      // Ticket 061 owns the field; 062 owns the claim that it is not a lie.
+      // Without this, 061 can be "satisfied" by writing a constant.
+      const stored = run as Run & { languagePair?: string; direction?: string };
+      expect(stored.languagePair).toBe(config.languagePair);
+      expect(stored.direction).toBe(config.direction);
+      // And it agrees with what the transport was actually told — the run
+      // dbeb6d94 recorded no pair at all while translating into German.
+      expect(h.startConfigs[0]!.languagePair).toBe(stored.languagePair);
+      expect(h.startConfigs[0]!.direction).toBe(stored.direction);
+      expect(h.posted[0]).toEqual(run);
+    },
+  );
+
+  it('a run with NO target language never reports as complete', async () => {
+    // Exactly what ReplayView hands `runOnce` today: architecture + providers
+    // and nothing else. The fixture transport answers happily, the Run is
+    // POSTed `complete`, and every figure derived from it is aggregated — which
+    // is how a German translation became an Arm A latency number.
+    const h = makeHarness();
+    const { run } = await runHappy(h, {
+      architecture: 'cascade',
+      providers: DEFAULT_CASCADE_TRIPLE,
+    });
+
+    expect(run.status).not.toBe('complete');
+    expect(run.errors.join(' ')).toMatch(/language/i);
+  });
+
+  it('a realtime run with no target language never reports as complete either', async () => {
+    const h = makeHarness({ kind: 'realtime' });
+    const { run } = await runHappy(h, {
+      architecture: 'realtime',
+      realtimeModel: REALTIME_MODEL,
+    });
+    expect(run.status).not.toBe('complete');
+    expect(run.errors.join(' ')).toMatch(/language/i);
+  });
+});

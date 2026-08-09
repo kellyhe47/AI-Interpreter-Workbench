@@ -227,3 +227,33 @@ describe('AnthropicMt adapter specifics', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+/**
+ * TICKET 062 — same defect, same adapter shape (Arm C's MT stage).
+ *
+ * `resolveTriple` builds this with `{ model }` only, so the system prompt says
+ * "into Spanish" for every pair and both directions.
+ */
+describe('TICKET 062 — translate() honours the session target language', () => {
+  function systemPromptOf(calls: { init?: RequestInit }[]): string {
+    const body = JSON.parse(String(calls[0]!.init?.body)) as { system: string };
+    return body.system;
+  }
+
+  it.each(['Spanish', 'English', 'Cantonese'])(
+    'a call for %s instructs %s, overriding the construction default',
+    async (targetLanguage) => {
+      const { calls, fetchImpl } = okSseFetch();
+      const mt = new AnthropicMt({ apiKey: 'k' }, { fetchImpl });
+      await collect(mt.translate('hello world', { targetLanguage } as never));
+      expect(systemPromptOf(calls)).toContain(targetLanguage);
+    },
+  );
+
+  it('a call for English does NOT still say Spanish', async () => {
+    const { calls, fetchImpl } = okSseFetch();
+    const mt = new AnthropicMt({ apiKey: 'k' }, { fetchImpl });
+    await collect(mt.translate('hola mundo', { targetLanguage: 'English' } as never));
+    expect(systemPromptOf(calls)).not.toContain('Spanish');
+  });
+});

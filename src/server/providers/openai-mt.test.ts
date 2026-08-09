@@ -164,3 +164,38 @@ describe('OpenAiMt adapter specifics', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+/**
+ * TICKET 062 — the target language is a per-CALL fact, not a construction one.
+ *
+ * `resolveTriple` builds this adapter with `{ model }` only, so `targetLang`
+ * is always its default and every cascade run — EN→ES, ES→EN, EN→YUE — puts
+ * "into Spanish" in the system prompt whatever the operator selected. The
+ * session knows the direction; the adapter has to be told.
+ */
+describe('TICKET 062 — translate() honours the session target language', () => {
+  function systemPromptOf(calls: { init?: RequestInit }[]): string {
+    const body = JSON.parse(String(calls[0]!.init?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    return body.messages.find((m) => m.role === 'system')!.content;
+  }
+
+  it.each(['Spanish', 'English', 'Cantonese'])(
+    'a call for %s instructs %s, overriding the construction default',
+    async (targetLanguage) => {
+      const { calls, fetchImpl } = okSseFetch();
+      // Constructed exactly as the registry constructs it: model only.
+      const mt = new OpenAiMt({ apiKey: 'k', model: 'gpt-4o-mini' }, { fetchImpl });
+      await collect(mt.translate('hello world', { targetLanguage } as never));
+      expect(systemPromptOf(calls)).toContain(targetLanguage);
+    },
+  );
+
+  it('a call for English does NOT still say Spanish', async () => {
+    const { calls, fetchImpl } = okSseFetch();
+    const mt = new OpenAiMt({ apiKey: 'k' }, { fetchImpl });
+    await collect(mt.translate('hola mundo', { targetLanguage: 'English' } as never));
+    expect(systemPromptOf(calls)).not.toContain('Spanish');
+  });
+});

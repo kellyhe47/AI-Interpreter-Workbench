@@ -315,3 +315,62 @@ describe('run identity on session.start (Ticket 003)', () => {
     expect(record.origin).toBeUndefined();
   });
 });
+
+/**
+ * TICKET 062 — the language pair has to survive the socket.
+ *
+ * `session.start` is everything the server learns about a session's languages.
+ * Today `resolveTriple` builds the MT adapter from `{ model }` alone, so
+ * `OpenAiMt`/`AnthropicMt` fall back to their construction default (Spanish)
+ * for every pair and both directions: an ES→EN cascade run asks the model to
+ * translate Spanish into Spanish, and an EN→YUE run produces Spanish. The
+ * frame's language fields reach the RECORD (they are copied onto it verbatim)
+ * and nowhere else — which is exactly how a wrong-language run still looks
+ * well-formed in storage.
+ */
+describe('TICKET 062 — the requested target language reaches the pipeline', () => {
+  interface Seen {
+    session?: Record<string, unknown>;
+    models?: Record<string, unknown>;
+  }
+
+  function capturingServer(seen: Seen): AttachCascadeWsOptions {
+    const fake: OrchestratorFactory = (_source, _providers, opts) =>
+      (async function* () {
+        seen.session = opts?.session as unknown as Record<string, unknown>;
+        seen.models = opts?.models as unknown as Record<string, unknown>;
+      })();
+    return { createOrchestrator: fake };
+  }
+
+  const cases = [
+    { languagePair: 'EN↔ES', direction: 'en→es', targetLanguage: 'Spanish' },
+    { languagePair: 'EN↔ES', direction: 'es→en', targetLanguage: 'English' },
+    { languagePair: 'EN↔YUE', direction: 'en→yue', targetLanguage: 'Cantonese' },
+  ] as const;
+
+  it.each(cases)('$direction reaches the orchestrator as $targetLanguage', async (c) => {
+    const seen: Seen = {};
+    const { port } = await startServer(capturingServer(seen));
+    const { ws } = await connect(port);
+    ws.send(
+      JSON.stringify({
+        type: 'session.start',
+        mode: 'cascade',
+        languagePair: c.languagePair,
+        direction: c.direction,
+        targetLanguage: c.targetLanguage,
+        providers: { stt: 'fixture', mt: 'fixture', tts: 'fixture' },
+      }),
+    );
+    await waitFor(() => seen.session !== undefined, 'orchestrator session info');
+
+    expect(seen.session).toMatchObject({
+      languagePair: c.languagePair,
+      direction: c.direction,
+      // THE MISSING LINK. Without it the MT stage has nothing to instruct with
+      // and every cascade run translates into the adapter's default.
+      targetLanguage: c.targetLanguage,
+    });
+  });
+});

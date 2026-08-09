@@ -120,6 +120,13 @@ describe('CascadeTransport start()', () => {
       mode: 'cascade',
       languagePair: 'EN↔ES',
       direction: 'en→es',
+      // TICKET 062 — and the RESOLVED target language. `languagePair` alone
+      // does not say which way the session runs, and `direction` is a code
+      // pair the MT stage cannot put into a prompt; the server has no other
+      // source for what the translation must come out as, so today every
+      // cascade run translates into the adapter's construction default
+      // (Spanish) whatever pair the operator chose.
+      targetLanguage: 'Spanish',
       providers: { stt: 'gpt-4o-transcribe', mt: 'gpt', tts: 'elevenlabs' },
     });
     expect(h.states.map((s) => s.state)).toContain('connected');
@@ -295,5 +302,54 @@ describe('CascadeTransport stop()', () => {
     expect(h.states.length).toBe(before.states);
     expect(h.audio.length).toBe(before.audio);
     expect(h.sockets.length).toBe(1); // no reconnect socket
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 062 — cascade was NOT assumed correct; it is not.
+//
+// The frame below is everything the server learns about the language of a
+// session. `resolveTriple` builds the MT adapter from `{ model }` alone, so
+// `OpenAiMt`/`AnthropicMt` fall back to their construction default — Spanish —
+// for EVERY pair and BOTH directions. An ES→EN cascade run translates Spanish
+// into Spanish; an EN→YUE run produces Spanish. The realtime defect is louder
+// (it produced German), but cascade is wrong in the same place.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 062 — session.start names the target language, per pair and direction', () => {
+  const cases = [
+    { languagePair: 'EN↔ES', direction: 'en→es', targetLanguage: 'Spanish' },
+    { languagePair: 'EN↔ES', direction: 'es→en', targetLanguage: 'English' },
+    { languagePair: 'EN↔YUE', direction: 'en→yue', targetLanguage: 'Cantonese' },
+    { languagePair: 'EN↔YUE', direction: 'yue→en', targetLanguage: 'English' },
+  ] as const;
+
+  it.each(cases)('$direction is carried onto the wire as $targetLanguage', async (c) => {
+    const h = makeHarness();
+    h.config.languagePair = c.languagePair;
+    h.config.direction = c.direction;
+    h.config.targetLanguage = c.targetLanguage;
+    const ws = await startConnected(h);
+
+    expect(ws.sentJson[0]).toMatchObject({
+      type: 'session.start',
+      languagePair: c.languagePair,
+      direction: c.direction,
+      targetLanguage: c.targetLanguage,
+    });
+  });
+
+  it('a direction swap changes the FRAME, not merely a label', async () => {
+    const forward = makeHarness();
+    forward.config.direction = 'en→es';
+    forward.config.targetLanguage = 'Spanish';
+    const forwardWs = await startConnected(forward);
+
+    const reverse = makeHarness();
+    reverse.config.direction = 'es→en';
+    reverse.config.targetLanguage = 'English';
+    const reverseWs = await startConnected(reverse);
+
+    expect(forwardWs.sent[0]).not.toBe(reverseWs.sent[0]);
   });
 });

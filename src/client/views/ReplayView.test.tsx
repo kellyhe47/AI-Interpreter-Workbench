@@ -1099,3 +1099,79 @@ describe('Replay sources — tokens only, no mock data, no tag control', () => {
     expect(all).toMatch(/\bMENUS\b/);
   });
 });
+
+/* =========================================== TICKET 062 — the language pair */
+
+/**
+ * TICKET 062 — Replay is where the German answer came from.
+ *
+ * `run()` builds `{ architecture, realtimeModel, providers }` and nothing else,
+ * so `runOnce` fills `languagePair`, `direction` and `targetLanguage` with the
+ * empty string and the realtime session is instructed to "translate into ".
+ * Run dbeb6d94 is that instruction's output: German, on an English↔Spanish
+ * project, stored with `languagePair: ''`.
+ *
+ * The Recording already knows its own `sourceLanguage`, so a run over it can
+ * never be language-less. These tests do not dictate a control — they assert
+ * that whatever the panel decides, it is CARRIED, non-empty, and points AWAY
+ * from the clip's own language.
+ */
+describe('TICKET 062 — a Replay run carries the language pair and direction', () => {
+  /** The two supported pairs, as the session machine defines them. */
+  const TARGETS_FROM_EN = ['Spanish', 'Cantonese'];
+  const DIRECTIONS_FROM_EN = ['en→es', 'en→yue'];
+
+  it('a run over an ENGLISH Recording is instructed into the other language, never blank', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id); // sourceLanguage 'en'
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => expect(fakes.runOnce).toHaveBeenCalledTimes(1));
+    const { config } = fakes.runOnce.mock.calls[0]![0] as ReplayRunRequest;
+    expect(config.languagePair ?? '').not.toBe('');
+    expect(DIRECTIONS_FROM_EN).toContain(config.direction);
+    expect(TARGETS_FROM_EN).toContain(config.targetLanguage);
+  });
+
+  it('a run over a SPANISH Recording runs es→en — the direction follows the clip', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(MIC_REC.id); // sourceLanguage 'es'
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => expect(fakes.runOnce).toHaveBeenCalledTimes(1));
+    const { config } = fakes.runOnce.mock.calls[0]![0] as ReplayRunRequest;
+    // Spanish appears in exactly one pair, so this is fully determined: a clip
+    // of Spanish speech cannot be a run whose target is Spanish.
+    expect(config.direction).toBe('es→en');
+    expect(config.targetLanguage).toBe('English');
+    expect(config.languagePair).toBe('EN↔ES');
+  });
+
+  it('a REALTIME run carries the language pair too — this is the arm that shipped German', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    fireEvent.click(screen.getByRole('button', { name: 'Realtime' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => expect(fakes.runOnce).toHaveBeenCalledTimes(1));
+    const { config } = fakes.runOnce.mock.calls[0]![0] as ReplayRunRequest;
+    expect(config.architecture).toBe('realtime');
+    expect(config.targetLanguage ?? '').not.toBe('');
+    expect(TARGETS_FROM_EN).toContain(config.targetLanguage);
+  });
+
+  it('EVERY sweep configuration carries it — a sweep is 45 runs of the same defect', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    fireEvent.click(screen.getByRole('button', { name: 'Batch sweep…' }));
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+
+    const { configurations } = fakes.batches[0]!.request;
+    expect(configurations.length).toBeGreaterThan(0);
+    for (const configuration of configurations) {
+      expect(configuration.config.languagePair ?? '').not.toBe('');
+      expect(DIRECTIONS_FROM_EN).toContain(configuration.config.direction);
+      expect(TARGETS_FROM_EN).toContain(configuration.config.targetLanguage);
+    }
+  });
+});

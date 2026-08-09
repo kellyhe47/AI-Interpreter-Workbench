@@ -1562,3 +1562,109 @@ describe('RealtimeTransport ticket 046 REGRESSION GUARDS', () => {
     expect(h.transport.takeOutputAudio()).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 062 — the selected language pair must reach the WIRE.
+//
+// Run dbeb6d94 (armTag A, status complete, the only complete Realtime run in
+// the repository) translated an English source into GERMAN on an English↔Spanish
+// project, and recorded `languagePair: ''`. The selector rendered and switched
+// correctly the whole time; what shipped was a session whose `targetLanguage`
+// was the empty string, so the instruction the model received read
+// "Translate everything the user says into ." — an instruction that names no
+// language at all, which the model resolved however it liked.
+//
+// Every assertion below therefore reads the SERIALIZED session.update that
+// leaves the data channel. A test that read `transport.config` — or a rendered
+// selector label — is exactly the test that let this ship.
+// ---------------------------------------------------------------------------
+
+/** Every session.update the transport has put on the wire, in order. */
+function sessionUpdates(ch: FakeDataChannel): { raw: string; instructions: string }[] {
+  return ch.sent
+    .map((raw) => ({ raw, msg: JSON.parse(raw) as { type?: string; session?: { instructions?: string } } }))
+    .filter((m) => m.msg.type === 'session.update')
+    .map((m) => ({ raw: m.raw, instructions: String(m.msg.session?.instructions ?? '') }));
+}
+
+const LANGUAGE_CASES = [
+  { pair: 'EN↔ES', direction: 'en→es', target: 'Spanish', other: 'English' },
+  { pair: 'EN↔ES', direction: 'es→en', target: 'English', other: 'Spanish' },
+  { pair: 'EN↔YUE', direction: 'en→yue', target: 'Cantonese', other: 'English' },
+  { pair: 'EN↔YUE', direction: 'yue→en', target: 'English', other: 'Cantonese' },
+] as const;
+
+describe('TICKET 062 — the requested target language reaches the data channel', () => {
+  it.each(LANGUAGE_CASES)(
+    'REGRESSION PIN $pair $direction: the session.update instructs $target and never $other',
+    async ({ pair, direction, target, other }) => {
+      const h = makeHarness();
+      h.config.languagePair = pair;
+      h.config.direction = direction;
+      h.config.targetLanguage = target;
+      const ch = await startConnected(h);
+
+      const updates = sessionUpdates(ch);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]!.instructions).toContain(target);
+      // The OTHER end of the pair must not appear: an instruction naming both
+      // languages is an instruction naming neither direction.
+      expect(updates[0]!.instructions).not.toContain(other);
+    },
+  );
+
+  it('a direction swap changes the PAYLOAD, not merely a label', async () => {
+    const forward = makeHarness();
+    forward.config.direction = 'en→es';
+    forward.config.targetLanguage = 'Spanish';
+    const forwardCh = await startConnected(forward);
+
+    const reverse = makeHarness();
+    reverse.config.direction = 'es→en';
+    reverse.config.targetLanguage = 'English';
+    const reverseCh = await startConnected(reverse);
+
+    const a = sessionUpdates(forwardCh)[0]!.raw;
+    const b = sessionUpdates(reverseCh)[0]!.raw;
+    expect(a).not.toBe(b);
+    expect(sessionUpdates(forwardCh)[0]!.instructions).toContain('Spanish');
+    expect(sessionUpdates(reverseCh)[0]!.instructions).toContain('English');
+  });
+
+  it('a session with NO target language is REFUSED — the nameless instruction never reaches the wire', async () => {
+    // THE dbeb6d94 MECHANISM, verbatim: Replay hands `runOnce` a config with no
+    // language fields at all, `runOnce` fills them with '', and the transport
+    // interpolates the empty string into its instructions. The model then chose
+    // German, the run stored `languagePair: ''`, and nothing anywhere failed.
+    //
+    // A run whose output language cannot be confirmed must not run at all
+    // (AC4). Post-hoc language detection is explicitly ruled out by the ticket:
+    // the instruction has to be correct at the source.
+    const h = makeHarness();
+    h.config.languagePair = '';
+    h.config.direction = '';
+    h.config.targetLanguage = '';
+
+    await h.transport.start(h.config);
+    const ch = h.pcs[0]?.channels[0];
+    ch?.emitOpen();
+
+    // Nothing that names no language is ever serialized onto the channel.
+    expect(ch === undefined ? [] : sessionUpdates(ch)).toHaveLength(0);
+    // ...and the refusal is LOUD: the session is reported down, so the runner
+    // marks the run failed instead of storing an aggregatable German answer.
+    expect(h.errors.length).toBeGreaterThanOrEqual(1);
+    expect(h.states.map((s) => s.state)).toContain('disconnected');
+    expect(h.states.map((s) => s.state)).not.toContain('connected');
+  });
+
+  it('a whitespace-only target language is refused on the same footing', async () => {
+    const h = makeHarness();
+    h.config.targetLanguage = '   ';
+    await h.transport.start(h.config);
+    const ch = h.pcs[0]?.channels[0];
+    ch?.emitOpen();
+    expect(ch === undefined ? [] : sessionUpdates(ch)).toHaveLength(0);
+    expect(h.states.map((s) => s.state)).not.toContain('connected');
+  });
+});

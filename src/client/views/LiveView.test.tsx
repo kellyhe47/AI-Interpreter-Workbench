@@ -11,8 +11,19 @@
  */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import App from '../App';
+import { CascadeTransport, type WsLike } from '../transport/cascade';
+import {
+  RealtimeTransport,
+  TOKEN_ENDPOINT,
+  type RtcDataChannelLike,
+  type RtcPeerConnectionLike,
+  type RtcSessionDescriptionLike,
+} from '../transport/realtime';
+import type { SessionState } from '../state/sessionMachine';
 import {
   DEFAULT_CASCADE_TRIPLE,
   MENUS,
@@ -34,6 +45,7 @@ import {
   inputMeter,
   liveDot,
   makeDenyingCapture,
+  makeDeps,
   makePendingCapture,
   micIndicator,
   realtimeUtteranceScript,
@@ -474,5 +486,218 @@ describe('language pair, direction and the Cantonese-on-Realtime warning', () =>
     renderApp({ initialState: { mode: 'cascade', langIdx: 1 } });
     expect(screen.getByText('cascade only')).toBeInTheDocument();
     expect(screen.queryByText(COPY.cantoTargetWarn)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 062 — the Live selector must reach the SESSION, not only the label.
+//
+// Every assertion in the suite above reads a button's accessible name. That is
+// precisely the blind spot: run dbeb6d94 translated English into GERMAN on an
+// English↔Spanish project while a spec audit and a manual QA pass both marked
+// rubric must-have #5 ✅, because the selector renders and switches correctly.
+//
+// So these tests drive the REAL RealtimeTransport and the REAL CascadeTransport
+// over faked browser primitives (jsdom has neither RTCPeerConnection nor
+// WebSocket-with-binaryType) and assert the bytes that leave them.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 062 — a language switch reaches the wire, not just the label', () => {
+  /** A peer connection with no media surface at all — the transport's floor. */
+  class WirePc implements RtcPeerConnectionLike {
+    channels: WireChannel[] = [];
+    closed = false;
+    createDataChannel(label: string): WireChannel {
+      const ch = new WireChannel(label);
+      this.channels.push(ch);
+      return ch;
+    }
+    async createOffer(): Promise<RtcSessionDescriptionLike> {
+      return { type: 'offer', sdp: 'v=0 live-offer' };
+    }
+    async setLocalDescription(): Promise<void> {}
+    async setRemoteDescription(): Promise<void> {}
+    close(): void {
+      this.closed = true;
+    }
+  }
+
+  class WireChannel implements RtcDataChannelLike {
+    sent: string[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((ev: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor(readonly label: string) {}
+    send(data: string): void {
+      this.sent.push(data);
+    }
+    close(): void {}
+  }
+
+  class WireWs implements WsLike {
+    binaryType = '';
+    sent: string[] = [];
+    onopen: (() => void) | null = null;
+    onmessage: ((ev: { data: string | ArrayBuffer }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: ((ev: unknown) => void) | null = null;
+    send(data: string | ArrayBufferLike | Uint8Array): void {
+      if (typeof data === 'string') this.sent.push(data);
+    }
+    close(): void {}
+  }
+
+  const fetchImpl = (async (url: RequestInfo | URL) => {
+    if (String(url).includes(TOKEN_ENDPOINT)) {
+      return { ok: true, status: 200, json: async () => ({ value: 'tok' }) } as unknown as Response;
+    }
+    return { ok: true, status: 200, text: async () => 'v=0 live-answer' } as unknown as Response;
+  }) as typeof fetch;
+
+  /** Flush the transport handshake's promise chain (token → offer → answer). */
+  async function settle(): Promise<void> {
+    await act(async () => {
+      for (let i = 0; i < 25; i += 1) await Promise.resolve();
+    });
+  }
+
+  interface Wire {
+    /** Every session.update instruction string put on a realtime data channel. */
+    realtimeInstructions: () => string[];
+    /** Every session.start frame put on a cascade socket, parsed. */
+    cascadeStarts: () => { languagePair?: string; direction?: string; targetLanguage?: string }[];
+    open: () => void;
+  }
+
+  /** Renders <App/> whose Live transports are the REAL ones over faked wires. */
+  async function mountWired(initialState?: Partial<SessionState>): Promise<Wire> {
+    cleanup();
+    const kit = makeDeps({ initialState });
+    const pcs: WirePc[] = [];
+    const sockets: WireWs[] = [];
+    kit.deps.transportFactory = (config) => {
+      if (config.architecture === 'realtime') {
+        return new RealtimeTransport(
+          { armId: 'live', model: config.realtimeModel },
+          {
+            fetchImpl,
+            rtcFactory: () => {
+              const pc = new WirePc();
+              pcs.push(pc);
+              return pc;
+            },
+            now: () => 0,
+          },
+        );
+      }
+      return new CascadeTransport(
+        { armId: 'live', baseUrl: 'ws://live.test' },
+        {
+          wsFactory: () => {
+            const ws = new WireWs();
+            sockets.push(ws);
+            return ws;
+          },
+          now: () => 0,
+        },
+      );
+    };
+    render(createElement(App, { deps: kit.deps }));
+    await clickStartMicrophone();
+    const open = (): void => {
+      for (const pc of pcs) for (const ch of pc.channels) ch.onopen?.();
+      for (const ws of sockets) ws.onopen?.();
+    };
+    await settle();
+    open();
+    return {
+      open,
+      realtimeInstructions: () =>
+        pcs
+          .flatMap((pc) => pc.channels)
+          .flatMap((ch) => ch.sent)
+          .map((raw) => JSON.parse(raw) as { type?: string; session?: { instructions?: string } })
+          .filter((m) => m.type === 'session.update')
+          .map((m) => String(m.session?.instructions ?? '')),
+      cascadeStarts: () =>
+        sockets
+          .flatMap((ws) => ws.sent)
+          .map((raw) => JSON.parse(raw) as { type?: string } & Record<string, unknown>)
+          .filter((m) => m.type === 'session.start') as ReturnType<Wire['cascadeStarts']>,
+    };
+  }
+
+  it('REALTIME: the session opens on the DEFAULT pair instructing Spanish', async () => {
+    const wire = await mountWired();
+    expect(wire.realtimeInstructions()).toHaveLength(1);
+    expect(wire.realtimeInstructions()[0]).toContain('Spanish');
+    expect(wire.realtimeInstructions()[0]).not.toContain('English');
+  });
+
+  it('REALTIME: switching the pair to EN↔YUE re-instructs the session in Cantonese', async () => {
+    const wire = await mountWired();
+    expect(wire.realtimeInstructions().at(-1)).toContain('Spanish');
+
+    // A boundary (nothing in flight) — the pair applies immediately, and the
+    // button label already proves it did. The label is not the session.
+    fireEvent.click(screen.getByRole('button', { name: /English → Spanish/ }));
+    expect(screen.getByRole('button', { name: /English → Cantonese/ })).toBeInTheDocument();
+    await settle();
+    wire.open();
+    await settle();
+
+    const instructions = wire.realtimeInstructions();
+    expect(instructions.length).toBeGreaterThanOrEqual(2);
+    expect(instructions.at(-1)).toContain('Cantonese');
+    expect(instructions.at(-1)).not.toContain('Spanish');
+  });
+
+  it('REALTIME: swapping the direction re-instructs the session in English', async () => {
+    const wire = await mountWired();
+    expect(wire.realtimeInstructions().at(-1)).toContain('Spanish');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Swap direction' }));
+    expect(screen.getByRole('button', { name: /Spanish → English/ })).toBeInTheDocument();
+    await settle();
+    wire.open();
+    await settle();
+
+    const instructions = wire.realtimeInstructions();
+    expect(instructions.length).toBeGreaterThanOrEqual(2);
+    // EN→ES and ES→EN MUST produce different payloads (AC5). A label-only swap
+    // leaves the model translating into Spanish while the UI claims English.
+    expect(instructions.at(-1)).toContain('English');
+    expect(instructions.at(-1)).not.toContain('Spanish');
+  });
+
+  it('CASCADE: switching the pair re-opens session.start with the NEW pair and direction', async () => {
+    const wire = await mountWired({ mode: 'cascade' });
+    expect(wire.cascadeStarts().at(-1)).toMatchObject({
+      languagePair: 'EN↔ES',
+      direction: 'en→es',
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /English → Spanish/ }));
+    await settle();
+    wire.open();
+    await settle();
+
+    expect(wire.cascadeStarts().at(-1)).toMatchObject({
+      languagePair: 'EN↔YUE',
+      direction: 'en→yue',
+    });
+  });
+
+  it('CASCADE: swapping the direction re-opens session.start reversed', async () => {
+    const wire = await mountWired({ mode: 'cascade' });
+    fireEvent.click(screen.getByRole('button', { name: 'Swap direction' }));
+    await settle();
+    wire.open();
+    await settle();
+
+    expect(wire.cascadeStarts().at(-1)).toMatchObject({
+      languagePair: 'EN↔ES',
+      direction: 'es→en',
+    });
   });
 });

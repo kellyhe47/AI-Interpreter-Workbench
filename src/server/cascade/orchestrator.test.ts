@@ -278,3 +278,66 @@ describe('buildPipeline', () => {
     ).toThrow(/nope/);
   });
 });
+
+/**
+ * TICKET 062 — the MT stage is never told what to translate INTO.
+ *
+ * `runCascade` calls `providers.mt.translate(finalText, { signal })`. The
+ * session's `languagePair`/`direction` are copied onto the emitted record and
+ * used nowhere else, so `OpenAiMt`/`AnthropicMt` fall back to their
+ * construction default — Spanish — for every pair and both directions. The
+ * record therefore says `direction: 'es→en'` above a Spanish translation of
+ * Spanish, and nothing in the pipeline disagrees.
+ *
+ * The realtime defect (run dbeb6d94, German on an English↔Spanish project) is
+ * louder because there is no default to hide behind. Cascade has one, which is
+ * why it looked correct: the project's default pair happens to be EN→ES.
+ */
+describe('TICKET 062 — the session target language reaches the MT provider', () => {
+  /** An MT provider that records the options every call was given. */
+  function recordingMt(): { provider: MtProvider; opts: (ProviderCallOpts | undefined)[] } {
+    const opts: (ProviderCallOpts | undefined)[] = [];
+    const provider: MtProvider = {
+      name: 'recording-mt',
+      streaming: true,
+      async *translate(_text: string, callOpts?: ProviderCallOpts) {
+        opts.push(callOpts);
+        yield 'translated';
+      },
+    };
+    return { provider, opts };
+  }
+
+  const cases = [
+    { direction: 'en→es', targetLanguage: 'Spanish' },
+    { direction: 'es→en', targetLanguage: 'English' },
+    { direction: 'en→yue', targetLanguage: 'Cantonese' },
+    { direction: 'yue→en', targetLanguage: 'English' },
+  ] as const;
+
+  it.each(cases)('$direction: translate() is called for $targetLanguage', async (c) => {
+    const mt = recordingMt();
+    await collect(
+      runCascade(chunks(1), fixtureProviders({ mt: mt.provider }), {
+        session: {
+          languagePair: 'EN↔ES',
+          direction: c.direction,
+          targetLanguage: c.targetLanguage,
+        } as never,
+      }),
+    );
+
+    expect(mt.opts).toHaveLength(1);
+    const seen = mt.opts[0] as Record<string, unknown> | undefined;
+    expect(seen?.['targetLanguage']).toBe(c.targetLanguage);
+  });
+
+  it('a session with NO target language does not silently translate into a default', async () => {
+    const mt = recordingMt();
+    await collect(runCascade(chunks(1), fixtureProviders({ mt: mt.provider })));
+    const seen = mt.opts[0] as Record<string, unknown> | undefined;
+    // Absent is fine; a WRONG confident value is not. What must never happen is
+    // the pipeline inventing 'Spanish' for a session that named no language.
+    expect(seen?.['targetLanguage']).toBeUndefined();
+  });
+});

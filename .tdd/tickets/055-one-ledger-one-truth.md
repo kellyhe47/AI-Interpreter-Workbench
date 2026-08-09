@@ -4,7 +4,7 @@ title: One ledger, one truth — the server is the only aggregate source, and a 
 status: pending
 source: spec-audit + qa
 depends_on: []
-touches: [src/client/views/useSessionController.ts, src/client/state/ledger.ts, src/client/state/hydrateLedger.ts, src/client/components/results/derive.ts, src/client/replay/runner.ts]
+touches: [src/client/views/useSessionController.ts, src/client/state/ledger.ts, src/client/state/hydrateLedger.ts, src/client/components/results/derive.ts, src/client/replay/runner.ts, src/client/views/ResultsView.tsx, src/client/browserDeps.ts]
 iterations: 0
 test_files: []
 branch: ""
@@ -51,25 +51,60 @@ The LATER two are inverted — `speech_end` drifts later than `audio_queued` as 
 Nearest-rank p50 over those four is −1435 ms, exactly the figure rendered. **The UI is faithfully
 reporting a real measurement defect; the display is not the bug.**
 
-PRD §8: *"Only intervals within one clock are summed."* Client `speech_end` against server
-`audio_queued` is two clocks.
+~~PRD §8: *"Only intervals within one clock are summed."* Client `speech_end` against server
+`audio_queued` is two clocks.~~
+> **SUPERSEDED by `## CORRECTION`.** Both marks are on the SAME clock — the runner owns both
+> (`runner.ts:776`/`:783` per utterance, `:1109`/`:1115` at the envelope). The headline `-13973 ms`
+> is a first-wins/last-wins ENVELOPE bug, not a two-clock problem.
 
 ## Acceptance criteria
 
-- [ ] **The server ledger is the only aggregate source.** `localStorage` is hydrated FROM, never
-      aggregated INTO a figure. A session that exists only locally is EXCLUDED from every aggregate.
-- [ ] **A locally-unsynced session is SURFACED, not silently dropped** — the operator is told it
-      exists and was not counted. Silence here recreates the same class of problem from the other side.
-- [ ] Retry the failed POST, or make the failure visible. A swallowed rejection that also loses the
-      record from the aggregate is the worst of both.
-- [ ] **Find and fix the `speech_end` drift** — why does it move later, per utterance, within a run?
-      This is the disease.
-- [ ] A write-time guard rejects `audio_queued < speech_end` as `status: 'failed'`,
-      reason `clock-inversion`, naming WHICH utterances inverted. **This is the backstop, not the
-      fix** — landing it alone would relabel the run and hide the drift.
-- [ ] Aggregates reject non-positive latency samples loudly rather than averaging them
-- [ ] Same-clock assertion: an interval may only be computed between two marks from one clock
-- [ ] `isAggregatableRun` stays the ONE place deciding aggregation — no second gate
+> **Read `## CORRECTION` (bottom of this file) FIRST.** It supersedes the "two clocks" framing above
+> and these criteria have been rewritten to agree with it.
+
+**Ledger divergence (defect a)**
+
+- [ ] A `LiveSession` present in the client ledger but absent from the server listing is EXCLUDED
+      from every aggregate. Falsifiable: build a ledger holding the 8 server sessions plus 2
+      local-only ones; `deriveLiveModel(ledger)` reports `sessions: 8` and the local-only ids
+      contribute no utterance to `p50Ms`/`p95Ms`.
+- [ ] The exclusion is carried by state ON the record (e.g. a sync flag set when the POST resolves /
+      rejects), not by a second aggregation gate and not by a filter local to `deriveLiveModel`.
+- [ ] `liveSessions.create(...)` no longer swallows its rejection: the rejection marks the session
+      unsynced. Falsifiable: inject a `liveSessions.create` that rejects; the ledger's copy of that
+      session ends in the unsynced state and the local append still happened FIRST.
+- [ ] Results renders a non-zero unsynced count when such a session exists, and renders no such
+      notice when all sessions are synced. (Two assertions, both DOM.)
+
+**The `-13973 ms` (defect b, part 1 — the envelope)**
+
+- [ ] The Run envelope's `speech_end` and `audio_queued` are taken from the SAME utterance.
+      `runner.ts:1109` sets `speech_end = t0 + recording.speechEndMs` (the LAST utterance's speech
+      end) while `:1115` sets `audio_queued = firstAudioAt` (the FIRST utterance's audio).
+      Falsifiable: a 4-utterance run whose per-utterance deltas are all POSITIVE must not produce a
+      negative run-level `audio_queued − speech_end`.
+
+**Per-utterance drift (defect b, part 2 — separate, do not conflate)**
+
+- [ ] For a run whose `speech_end` comes from manifest ground truth, per-utterance
+      `audio_queued − speech_end` is non-negative for every utterance. Falsifiable against the
+      recorded deltas `+3424 / +1231 / −1435 / −2364`: utterances 2 and 3 must not remain negative
+      after the fix.
+- [ ] A write-time guard marks a run with any inverted utterance `status: 'failed'`, reason
+      `clock-inversion`, and the stored error names WHICH utterance indices inverted.
+      **Backstop, not the fix** — landing it alone relabels the run and hides the drift.
+- [ ] Aggregates never average a non-positive latency sample: such a sample is dropped from the
+      numerator AND the denominator, and the drop is reported (n falls), not silent.
+
+~~Same-clock assertion: an interval may only be computed between two marks from one clock~~
+> removed: CONTRADICTED by the CORRECTION. Both marks in the headline bug are on the SAME clock;
+> a same-clock assertion would not have caught it, and adding one invites a fix that leaves the
+> first-wins/last-wins envelope bug in place.
+
+~~`isAggregatableRun` stays the ONE place deciding aggregation — no second gate~~
+> already satisfied: `isAggregatableRun` (`ledger.ts:572`) is the sole gate and `7acb0cc9`
+> (`origin: 'manual'`) already contributes zero samples. Retained as a standing rule below, not as
+> work.
 
 ## Also in scope — the experiment-card gate
 
@@ -79,9 +114,24 @@ over the 3 manual runs on disk, so the audit's report of Exp 2 showing `p50 1.15
 **did not reproduce**. Verification of whether any path can render figures without qualifying sweep
 runs is in flight.
 
-- [ ] Regardless: pin the gate — a card renders figures **iff** ≥1
-      `origin:'sweep' && status:'complete' && providers≠fixture` sample backs it. One gate, no
-      per-card logic. Golden eval `03` encodes the observed-correct behaviour.
+- [ ] REGRESSION PIN ONLY: a card renders figures **iff** ≥1
+      `origin:'sweep' && status:'complete' && providers≠fixture` sample backs it. Add the assertion;
+      change no production code. Golden eval `03` encodes the observed-correct behaviour.
+> already satisfied: `ResultsView.tsx:1091-1092` builds `exp1` and `exp2` from the same
+> `deriveComparison` call under the same `empty` flag, and `deriveComparison` returns `null` unless
+> both arms have an aggregate. Exp1-empty ⟹ Exp2-empty. Do not go hunting for a leak.
+
+## Out of scope
+
+- Changing `isAggregatableRun`, or adding any second aggregation gate anywhere.
+- Any fix to the Live card's p50/p95 figures — P1-5 is FALSE (see CORRECTION); `deriveLiveModel`
+  already recomputes from utterance timings and the on-screen `0.40 s` / `1.50 s` are honest.
+- Backfilling or repairing the 3 existing manual runs on disk, including `7acb0cc9`.
+- Populating `session.latency.p50` / `driftMinute1ToEnd` (dead/never-measured fields) — that is
+  ticket 058's territory.
+- Making the local-first ordering conditional. The local append stays FIRST and UNCONDITIONAL
+  (ticket 023); only its use as an AGGREGATE SOURCE changes.
+- Removing Runs from `localStorage`, or any change to `appendRun` — Runs cannot diverge.
 
 ## Golden evals
 `eval/golden/01-server-ledger-is-the-only-aggregate-source.json`,
@@ -111,7 +161,7 @@ utterances remain physically impossible.
 
 ### The negative run is NOT aggregate-eligible — the audit's claim is false
 
-`7acb0cc9` is `origin: 'manual'`, and `isAggregatableRun` (`ledger.ts:574`) requires
+`7acb0cc9` is `origin: 'manual'`, and `isAggregatableRun` (`ledger.ts:572`) requires
 `origin === 'sweep'`. It contributes **zero** samples to any aggregate. The audit's follow-on —
 *"a single negative sample silently drags a p50 below the 1.5 s benchmark"* — **is false today**, and
 it contradicts the audit's own P0-3 evidence that all 3 runs are manual.
@@ -143,3 +193,149 @@ The audit claimed the Live card's p50s come from `localStorage` while the persis
 This does not weaken the ledger-divergence defect above, whose mechanism is pinned independently —
 but it removes the supporting narrative, and **the honest cascade figures (p50 1487 ms, p95 2858 ms
 over 16 samples) partially meet the rubric's "under 3s, target under 2s" on real data.**
+
+---
+
+## CONTEXT FOR A FRESH AGENT
+
+### 1. Verified citations (checked against the working tree, 2026-08-08)
+
+| claim | file:line | status |
+|---|---|---|
+| local append is unconditional | `src/client/views/useSessionController.ts:738` (`// LOCAL FIRST, UNCONDITIONALLY.`), `:740` (`ledger.appendLiveSession(session)`) | verified |
+| POST rejection swallowed | `src/client/views/useSessionController.ts:747` | verified |
+| the `liveSessions` seam type | `src/client/views/useSessionController.ts:166` | verified |
+| the one aggregation gate | `src/client/state/ledger.ts:572` | CORRECTED from `:574` |
+| `appendRun` has exactly one caller | `src/client/state/hydrateLedger.ts:131` | verified (the only call site outside `ledger.ts:780`) |
+| hydrate is add-only, never replaces | `src/client/state/hydrateLedger.ts:116-132` (runs), `:134-142` (live sessions) | verified |
+| aggregates read the client's own array | `src/client/state/ledger.ts:722` (`private runs`), `:809` `runAggregates()`, `:813` `for (const run of this.runs)` | verified |
+| `deriveLiveModel` entry point | `src/client/components/results/derive.ts:1195` | verified |
+| Live p50 recomputed from utterances, never read off `session.latency.p50` | `src/client/components/results/derive.ts:1223-1228` | verified |
+| exp1/exp2 same call, same `empty` flag | `src/client/views/ResultsView.tsx:1091-1092` | CORRECTED from `:1091` (it is two lines) |
+| run envelope `speech_end` (LAST utterance) | `src/client/replay/runner.ts:1109` | verified — NEW citation |
+| run envelope `audio_queued` (FIRST audio) | `src/client/replay/runner.ts:1115`, `firstAudioAt` declared `:834`, stamped `:894` | verified — NEW citation |
+| per-utterance marks (correct, per-index) | `src/client/replay/runner.ts:776`, `:780-783` | verified — NEW citation |
+| server holds 8 live sessions | `data/live-sessions.jsonl` is 8 lines | verified |
+
+### 2. The code
+
+`src/client/views/useSessionController.ts:736-747`
+```ts
+    };
+    // LOCAL FIRST, UNCONDITIONALLY. The operator's take is not made contingent
+    // on a reachable server (ticket 023's order exactly).
+    depsRef.current.ledger.appendLiveSession(session);
+    // TICKET 041 — then the SAME record to the server, so the stability
+    // artifact reaches data/, the exported bundle and a second machine. A
+    // rejection is swallowed: it costs the server's copy and nothing else, and
+    // the view stays usable. A session that produced NOTHING is posted too —
+    // storing is not aggregating, and deleting the record of a take that failed
+    // to produce anything would delete the finding.
+    void depsRef.current.liveSessions?.create(session).catch(() => {});
+```
+
+`src/client/state/ledger.ts:572-577` — the ONE gate
+```ts
+export function isAggregatableRun(run: Run): boolean {
+  if (runArmTag(run) === 'ad-hoc') return false;
+  if (run.origin !== 'sweep') return false;
+  if (run.status !== 'complete') return false;
+  return isRealRun(run);
+}
+```
+
+`src/client/replay/runner.ts:1108-1115` — THE ENVELOPE BUG (headline `-13973`)
+```ts
+  const outputAudio = concatPcm(audioChunks);
+  timings.speech_end = t0 + recording.speechEndMs;          // LAST utterance's speech end
+  // TICKET 040 — a decoded PCM sample wins, then a transport-sent mark (the
+  // WebRTC media-track case, where nothing is ever decoded), then null. Before
+  // this the mark was overwritten with a null firstAudioAt, so every Replay
+  // Arm A run counted toward n and cost while contributing no latency sample.
+  const markedAudioQueued = typeof timings.audio_queued === 'number' ? timings.audio_queued : null;
+  timings.audio_queued = firstAudioAt ?? markedAudioQueued;  // FIRST utterance's audio
+```
+Both marks are on the SAME clock. `885175 − 899148 = −13973` is first-wins vs last-wins.
+
+`src/client/replay/runner.ts:772-783` — the per-utterance path, correctly per-index
+```ts
+    // Marks pass through verbatim by event name, exactly as at run level...
+    const timings: Record<string, number | null> = { ...(buckets.timings.get(utt) ?? {}) };
+    // ...except the two the runner owns. The anchor is the MANIFEST's, never
+    // the Recording's and never VAD's.
+    timings.speech_end = t0 + entry.trueSpeechEndMs;
+    const audioAt = buckets.audioAt.get(utt);
+    const markedAt = typeof timings.audio_queued === 'number' ? timings.audio_queued : null;
+    const audioQueued = audioAt ?? markedAt;
+    timings.audio_queued = audioQueued;
+```
+
+`src/client/state/hydrateLedger.ts:127-132` — add-only merge (the residual-stale-blob risk)
+```ts
+  const knownRuns = new Set(ledger.getRuns().map((r) => r.id));
+  for (const run of runs) {
+    if (knownRuns.has(run.id)) continue;
+    knownRuns.add(run.id);
+    ledger.appendRun(run);
+  }
+```
+
+`src/client/views/ResultsView.tsx:1091-1092`
+```tsx
+  const exp1 = empty ? null : deriveComparison(props.ledger, 'A', 'B');
+  const exp2 = empty ? null : deriveComparison(props.ledger, 'B', 'C');
+```
+
+### 3. Existing tests — where this ticket's assertions MUST land
+
+**Standing policy: no new test file in a module that already has one.**
+
+| area | EXISTING file — put the new assertions HERE |
+|---|---|
+| append-then-POST order, rejected POST, unsynced state | `src/client/views/LiveView.persistence.test.tsx` (docblock already declares this seam normative) |
+| ledger sync-state / gate / `isAggregatableRun` | `src/client/state/ledger.test.ts` (see `:618-621`, `:939-951`) |
+| hydration merge / dedupe | `src/client/state/hydrateLedger.test.ts`, live half in `src/client/state/hydrateLiveSessions.test.ts` |
+| `deriveLiveModel` excluding unsynced sessions | `src/client/components/results/deriveLive.empty.test.ts` (do NOT add a 4th `deriveLive.*` file) |
+| run-envelope + per-utterance mark aggregation | `src/client/replay/runner.test.ts` (module also has `runner.corpusVersion`, `runner.outputAudio`, `runner.unboundedWaits` — reuse `runner.test.ts`) |
+| Results DOM: unsynced notice, exp1/exp2 empty pin | `src/client/views/ResultsView.test.tsx` |
+| App-level live hydration wiring | `src/client/views/App.liveHydration.test.tsx` (`:122` already asserts the `liveSessions.create` seam exists) |
+
+**Create no new test file for this ticket.**
+
+### 4. Seams (jsdom has no AudioContext / MediaStream / RTCPeerConnection — everything is injected)
+
+- `src/client/views/useSessionController.ts:166` — `liveSessions?: Pick<LiveSessionsClient, 'create'>`. THE seam for defect (a). Inject a rejecting `create` to drive the unsynced path.
+- `src/client/state/ledger.ts` — `RunLedger`; `appendLiveSession` `:792`, `getLiveSessions` `:797`, `runAggregates` `:809`. The ledger is constructed by the test and handed in; no global.
+- `src/client/views/sessionTestKit.ts` — `makeDeps()` / `TestDeps`, `advance`, `cascadeUtteranceScript`, `clickStartMicrophone`. Every LiveView test builds through this.
+- `src/client/browserDeps.ts:94` `BrowserDeps extends SessionDeps`; the real client is wired at `:470` and passed at `:525-526` (`hydrate: { recordings, runs, liveSessions, werScores }`). **Production wiring lives here — a fix that only satisfies `makeDeps` has zero production callers.**
+- `src/client/fixtureDeps.ts:105` `isFixtureMode`, `:428` `buildFixtureDeps` — `?fixture=1` hands back a FRESH in-memory ledger with no runs.
+- `src/client/state/hydrationFixtures.ts`, `src/client/components/results/testRecords.ts` — record builders for derive/Results tests.
+- `src/server/storage/test-support.ts`, `src/server/providers/test-support.ts` — server-side builders.
+
+### 5. Golden evals this ticket must satisfy
+
+- `eval/golden/01-server-ledger-is-the-only-aggregate-source.json` — 8 server sessions / 31 utterances; `session-local-1` and `session-local-2` MUST be excluded and an `unsynced-count` MUST be surfaced.
+- `eval/golden/02-clock-inversion-is-per-utterance-and-progressive.json` — deltas `[3424, 1231, -1435, -2364]`; expects `status: 'failed'`, `error_code: 'clock-inversion'`, `latency_samples_contributed: 0`, `inverted_utterances_named: 2`, and must NOT contain `-1.44 s` or `-13973`.
+- `eval/golden/03-experiment-card-requires-real-sweep-samples.json` — DOM; both cards empty over 3 manual runs; must not contain `reps completed` / `p50`. **Pin only.**
+- `eval/golden/04-provenance-reports-actual-n.json` — the denominator keeps the rep whose POST went unacknowledged (`2 of 3`, never `2 of 2`). Directly relevant: the unsynced-session work must not shrink a denominator.
+
+### 6. Traps that have actually bitten this project
+
+- **A fix that satisfies the test seam while production has zero callers.** If the sync flag is only set by `sessionTestKit`'s `makeDeps`, `browserDeps.ts:470-526` still ships the old behaviour. Assert the production wiring too.
+- **The last-wins-vs-first-wins envelope aggregation** (`runner.ts:1109` vs `:1115`) — the LIVE trap here. Fixing per-utterance drift alone leaves the headline `-13973`; fixing the envelope alone leaves two physically impossible utterances.
+- **The add-only hydrate merge** (`hydrateLedger.ts:127-132`) — a stale `localStorage` blob is never replaced, so a bad record survives every reload. A "fix" that relies on re-hydration overwriting the local copy does not work.
+- **A guard bypassed by bracket access, a cast, or a `!`.** `timings` is `Record<string, number | null>`; a sync flag read as `session['syncState']` or through `as LiveSession` defeats the type.
+- **A wiring seam delivered incidentally by an unrelated re-render.** Assert the exclusion at `deriveLiveModel` level (pure), not only via a rendered number.
+- **An arithmetic guard that omits the dominant term.** Dropping negative samples from the numerator but not the denominator halves the p50 instead of removing the sample.
+- **A test that compares a render against itself.** RTL APPENDS on re-render and the Results accessors are `document.querySelector`; `cleanup()` between renders, or query within an explicit container.
+
+### Standing project rules
+
+- `isAggregatableRun` is the ONE place that decides aggregation — never add a second gate.
+- Arm membership is DERIVED from configuration, never declared.
+- Unmeasured is `null` and renders `not measured` — never `$0.00`, never a zero.
+- Never report a fixture-sourced number; never aggregate a run whose `origin` is `manual` or whose `status` is `failed`.
+- The measured atom is the UTTERANCE, not the Run.
+- 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
+- Live persists no audio and creates no Run records.
+- Replay autoplays nothing; Live autoplays always.
