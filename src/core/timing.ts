@@ -166,6 +166,45 @@ export function anchoredLatencyMs(t: TimingMarks | undefined): number | null {
   return firstAudio - anchor;
 }
 
+/* ---------------------------------------------------------------------------
+ * TICKET 055b — A PHYSICALLY IMPOSSIBLE INTERVAL IS NOT A MEASUREMENT.
+ *
+ * Perceived latency is `audio_queued − speech_end`: the gap between the speech
+ * ending and its translation beginning to sound. Run 7acb0cc9 stored −1435 ms
+ * and −2364 ms for two of its four utterances and Results rendered their p50 as
+ * `-1.44 s`. An interpreter cannot answer before the speaker has finished, so
+ * such a figure is not a fast run — it is the ABSENCE of a measurement, and the
+ * two rules below are the one place that judgement is written down.
+ *
+ * They are deliberately DIFFERENT thresholds, because they answer different
+ * questions:
+ *
+ *  - `isClockInversion` (< 0) — "did these two marks come out in an impossible
+ *    ORDER?" That is a defect in how the marks were assigned, and it is refused
+ *    at both ends of the pipe: the runner never emits one, the ledger refuses
+ *    to store a record carrying one as `complete`.
+ *  - `isMeasuredLatencyMs` (> 0) — "is this a quantity we may average?" A ZERO
+ *    is not an inversion (nothing came out backwards) but it is not a latency
+ *    either: nothing answers in exactly no time. It is dropped from a
+ *    percentile's NUMERATOR AND DENOMINATOR alike, so `n` falls and the drop is
+ *    visible rather than halving the percentile in silence.
+ *
+ * Neither is an aggregation GATE — `isAggregatableRun` remains the only one.
+ * ------------------------------------------------------------------------ */
+
+/** The reason code a refused, impossible interval is stored under. */
+export const CLOCK_INVERSION = 'clock-inversion';
+
+/** True when an interval says the answer began before the speech that caused it. */
+export function isClockInversion(intervalMs: number | null | undefined): boolean {
+  return typeof intervalMs === 'number' && intervalMs < 0;
+}
+
+/** True when an interval may enter a percentile. Non-positive is not a latency. */
+export function isMeasuredLatencyMs(intervalMs: number | null | undefined): intervalMs is number {
+  return typeof intervalMs === 'number' && intervalMs > 0;
+}
+
 /**
  * Live's cascade spans — the four the client can actually observe, plus the
  * headline they lead to.

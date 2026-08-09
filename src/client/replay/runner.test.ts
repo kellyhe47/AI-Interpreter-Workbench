@@ -17,6 +17,8 @@ import type { CorpusUtterance } from '../../core/corpus';
 import { SAMPLE_RATE } from '../../core/protocol';
 import { writeWav } from '../../harness/wav';
 import {
+  isAggregatableRun,
+  isAggregatableUtterance,
   isRealRun,
   runArmTag,
   runSamples,
@@ -596,11 +598,23 @@ describe('runOnce — a fixture-driven run can never become evidence', () => {
  * The manifest is deliberately supplied OUT of array order: `CorpusUtterance.index`
  * carries the ordering (see core/corpus.ts), the array position does not.
  */
+/**
+ * TICKET 055b — THE ANCHORS MOVED, AND THE FIXTURE IS WHY.
+ *
+ * They were 200 / 400 / 600 / 800 against a script whose answers sound at
+ * 130 / 230 / 330 / 430, i.e. EVERY utterance of this fixture answered before
+ * its own speech had ended (−70 / −170 / −270 / −370 ms). That is the same
+ * physically impossible pairing run 7acb0cc9 stored, so the fixture could not
+ * be used to state the rule that forbids it. Lowering the anchors by 100 ms
+ * each puts every answer 30 ms AFTER its anchor and moves nothing else: the
+ * out-of-index order below, the distinctness of the four, and their disagreement
+ * with `CORPUS_RECORDING.speechEndMs` are all preserved.
+ */
 const MANIFEST: CorpusUtterance[] = [
-  { id: 'u-2', index: 2, category: 'numbers-dates', trueSpeechEndMs: 400, referenceText: 'two' },
-  { id: 'u-1', index: 1, category: 'short-reply', trueSpeechEndMs: 200, referenceText: 'one' },
-  { id: 'u-4', index: 4, category: 'disfluency', trueSpeechEndMs: 800 },
-  { id: 'u-3', index: 3, category: 'long-compound', trueSpeechEndMs: 600, referenceText: 'three' },
+  { id: 'u-2', index: 2, category: 'numbers-dates', trueSpeechEndMs: 200, referenceText: 'two' },
+  { id: 'u-1', index: 1, category: 'short-reply', trueSpeechEndMs: 100, referenceText: 'one' },
+  { id: 'u-4', index: 4, category: 'disfluency', trueSpeechEndMs: 400 },
+  { id: 'u-3', index: 3, category: 'long-compound', trueSpeechEndMs: 300, referenceText: 'three' },
 ];
 
 /** 60 USD/min over a 1000 ms clip => a Run cost of exactly 1, easy to split. */
@@ -718,10 +732,10 @@ describe('runOnce — a Run is a container of utterance records (ticket 031)', (
 
 describe('runOnce — per-utterance anchoring comes from the MANIFEST (ticket 031)', () => {
   const anchorCases = [
-    { index: 1, utteranceId: 'u-1', trueSpeechEndMs: 200 },
-    { index: 2, utteranceId: 'u-2', trueSpeechEndMs: 400 },
-    { index: 3, utteranceId: 'u-3', trueSpeechEndMs: 600 },
-    { index: 4, utteranceId: 'u-4', trueSpeechEndMs: 800 },
+    { index: 1, utteranceId: 'u-1', trueSpeechEndMs: 100 },
+    { index: 2, utteranceId: 'u-2', trueSpeechEndMs: 200 },
+    { index: 3, utteranceId: 'u-3', trueSpeechEndMs: 300 },
+    { index: 4, utteranceId: 'u-4', trueSpeechEndMs: 400 },
   ];
 
   it.each(anchorCases)(
@@ -742,7 +756,7 @@ describe('runOnce — per-utterance anchoring comes from the MANIFEST (ticket 03
     const h = corpusHarness();
     const { run, t0 } = await runCorpus(h);
     const anchors = utterancesOf(run).map((u) => u.timings.speech_end);
-    expect(anchors).toEqual([t0 + 200, t0 + 400, t0 + 600, t0 + 800]);
+    expect(anchors).toEqual([t0 + 100, t0 + 200, t0 + 300, t0 + 400]);
     expect(new Set(anchors).size).toBe(4);
   });
 
@@ -756,9 +770,14 @@ describe('runOnce — per-utterance anchoring comes from the MANIFEST (ticket 03
     const { run, t0 } = await runCorpus(h);
 
     const utterances = utterancesOf(run);
-    expect(utterances[0]!.timings.speech_end).toBe(t0 + 200);
-    expect(utterances[1]!.timings.speech_end).toBe(t0 + 400);
-    expect(run.timings.speech_end).toBe(t0 + CORPUS_RECORDING.speechEndMs!);
+    expect(utterances[0]!.timings.speech_end).toBe(t0 + 100);
+    expect(utterances[1]!.timings.speech_end).toBe(t0 + 200);
+    // TICKET 055b — run-wide too, and the run-wide anchor is now the LAST
+    // record's (the envelope speaks for one utterance). 9999 and 8888 are
+    // neither, which is what this test is about.
+    expect(run.timings.speech_end).toBe(t0 + 400);
+    expect(run.timings.speech_end).not.toBe(9999);
+    expect(run.timings.speech_end).not.toBe(8888);
   });
 });
 
@@ -825,9 +844,9 @@ describe('runOnce — per-utterance cost (ticket 031)', () => {
     const h = corpusHarness();
     const { run } = await runCorpus(h);
 
-    // Spans: 0->200, 200->400, 400->600, 600->1000 (the last absorbs the tail).
-    // At 60 USD/min that is 0.2 / 0.2 / 0.2 / 0.4 of a minute-second each.
-    const expected = [0.2, 0.2, 0.2, 0.4];
+    // Spans: 0->100, 100->200, 200->300, 300->1000 (the last absorbs the tail).
+    // At 60 USD/min that is 0.1 / 0.1 / 0.1 / 0.7 of a minute-second each.
+    const expected = [0.1, 0.1, 0.1, 0.7];
     const utterances = utterancesOf(run);
     utterances.forEach((u, i) => expect(u.cost).toBeCloseTo(expected[i]!, 10));
 
@@ -919,8 +938,11 @@ describe('runOnce — backward compatibility (ticket 031 REGRESSION GUARDS)', ()
   });
 
   it('REGRESSION: a 1-entry manifest produces exactly one record and one anchored sample', async () => {
+    // TICKET 055b — 100, not 300, for the same reason the four-entry manifest
+    // above moved: this utterance's answer sounds at 130, and an anchor of 300
+    // made the fixture claim the answer began 170 ms before the speech ended.
     const single: CorpusUtterance[] = [
-      { id: 'solo', index: 1, category: 'proper-nouns', trueSpeechEndMs: 300 },
+      { id: 'solo', index: 1, category: 'proper-nouns', trueSpeechEndMs: 100 },
     ];
     const h = corpusHarness({ count: 1, recording: { utterances: single } });
     const { run, t0 } = await runCorpus(h);
@@ -934,14 +956,14 @@ describe('runOnce — backward compatibility (ticket 031 REGRESSION GUARDS)', ()
       status: 'complete',
       errors: [],
     });
-    expect(utterances[0]!.timings.speech_end).toBe(t0 + 300);
+    expect(utterances[0]!.timings.speech_end).toBe(t0 + 100);
     expect(utterances[0]!.timings.audio_queued).toBe(t0 + 130);
     // The whole clip is one span, so the split is the Run cost.
     expect(utterances[0]!.cost).toBeCloseTo(run.cost!, 10);
     expect(run.status).toBe('complete');
   });
 
-  it('REGRESSION: Run-level timings/transcripts/cost keep TODAY\'s semantics (last mark wins, first audio, Recording anchor)', async () => {
+  it('REGRESSION: Run-level transcripts/cost and the flat marks keep TODAY\'s semantics (last mark wins)', async () => {
     const h = corpusHarness();
     const { run, t0 } = await runCorpus(h);
 
@@ -949,10 +971,23 @@ describe('runOnce — backward compatibility (ticket 031 REGRESSION GUARDS)', ()
     // the Run-level fields moves before ticket 032.
     expect(run.timings.stt_final).toBe(410);
     expect(run.timings.tts_first_byte).toBe(420);
-    expect(run.timings.speech_end).toBe(t0 + CORPUS_RECORDING.speechEndMs!);
-    expect(run.timings.audio_queued).toBe(t0 + 130);
     expect(run.transcripts).toEqual({ source: 'src 3', target: 'tgt 3' });
     expect(run.cost).toBeCloseTo(CORPUS_COST_PER_MIN * (1000 / 60_000), 10);
+
+    // TICKET 055b — THE ONE PAIR THAT NO LONGER KEEPS TODAY'S SEMANTICS, and
+    // deliberately so. It WAS `t0 + CORPUS_RECORDING.speechEndMs` (900, the
+    // Recording's anchor) against `t0 + 130` (the FIRST utterance's audio) —
+    // two different utterances, which is how run 7acb0cc9 reported −13973 ms.
+    // The envelope now COPIES the last record's two marks, so the pair is one
+    // utterance's and the run-level interval is that utterance's interval.
+    const last = utterancesOf(run)[3]!;
+    expect(run.timings.speech_end).toBe(t0 + 400);
+    expect(run.timings.audio_queued).toBe(t0 + 430);
+    expect({ speech_end: run.timings.speech_end, audio_queued: run.timings.audio_queued }).toEqual({
+      speech_end: last.timings.speech_end,
+      audio_queued: last.timings.audio_queued,
+    });
+    expect(run.timings.speech_end).not.toBe(t0 + CORPUS_RECORDING.speechEndMs!);
   });
 });
 
@@ -1910,5 +1945,177 @@ describe('TICKET 055b — no utterance may report audio BEFORE its own speech en
     // half of what made this invisible (PRD §12).
     expect(stored.utterances).toHaveLength(4);
     expect(stored.transcripts.target).toBe('tgt 3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 055b, ADVERSARIAL ROUND — WHAT THE REFUSAL LEAVES ON THE RECORD.
+//
+// The locked block above pins that no negative interval survives. It does NOT
+// pin WHAT REPLACES IT, and both halves of that are load-bearing:
+//
+//  - THE REASON. `runner.ts` refuses the pairing and pushes a `clock-inversion`
+//    error NAMING the instant it observed and by how much it preceded the
+//    anchor. Swap that reason for `no output audio` — or drop it entirely, so
+//    the record is refused with `errors: []` — and every assertion above still
+//    passes. A SILENT refusal is precisely this ticket's failure mode: the
+//    ticket's own rule is that a guard which relabels while deleting the
+//    evidence HIDES a systematic drift. The instant is the only place that
+//    evidence still exists, since the mark itself is now `null`.
+//
+//  - THE STATUS. `status` is keyed on the RESOLVED `audio_queued`, not on the
+//    instant that was observed. Key it on the observation instead and a refused
+//    utterance is stored `complete` with `audio_queued: null` — a record that
+//    passes `isAggregatableUtterance`, enters `n` and `measuredCostSamples` as
+//    a cost-only sample, and sails through `derive.ts`'s `status === 'complete'`
+//    filter. It would report money spent on an utterance it also reports as
+//    unmeasurable, in a row whose `n` counts it.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 055b — a refused utterance NAMES the instant it refused', () => {
+  it('carries a clock-inversion error giving the observed instant, the anchor and the gap', async () => {
+    const h = timelineHarness(DRIFT_AUDIO_AT_MS);
+    const { run, t0 } = await runTimeline(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(4);
+
+    // THE CLAIM, verbatim. Hand-derived from the two files on disk: utterance 3
+    // saw its output audio at t0 + 13125 while its manifest anchor is
+    // t0 + 14560, i.e. 1435 ms EARLIER; utterance 4 at t0 + 17433 against
+    // t0 + 19797, i.e. 2364 ms earlier.
+    expect(utterances[2]!.errors).toEqual([
+      `clock-inversion: output audio at ${t0 + 13125} precedes its own speech_end ` +
+        `${t0 + 14560} by 1435 ms`,
+    ]);
+    expect(utterances[3]!.errors).toEqual([
+      `clock-inversion: output audio at ${t0 + 17433} precedes its own speech_end ` +
+        `${t0 + 19797} by 2364 ms`,
+    ]);
+
+    // The instant named is a REAL instant of this run — the one the mark itself
+    // no longer holds — and not the anchor, a clamp or a zero.
+    expect(DRIFT_AUDIO_AT_MS.map((ms) => t0 + ms)).toContain(t0 + 13125);
+    expect(utterances[2]!.timings.audio_queued).toBeNull();
+
+    // Not vacuous: the two utterances that answered honestly are accused of
+    // nothing, so "every record carries this error" cannot pass the test.
+    expect(utterances[0]!.errors).toEqual([]);
+    expect(utterances[1]!.errors).toEqual([]);
+
+    // And the same record is what reaches the store, errors and all.
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]!.utterances![3]!.errors).toEqual(utterances[3]!.errors);
+  });
+
+  it('an utterance that produced NO audio at all reports the other reason, never this one', async () => {
+    // The two ways to arrive at "no number" are different facts. A refusal that
+    // reported them under one reason would lose the drift signal entirely.
+    const h = corpusHarness({ silentUtts: [2] });
+    const { run } = await runCorpus(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances[2]!.errors).toEqual(['no output audio']);
+    expect(utterances[2]!.timings.audio_queued).toBeNull();
+    expect(utterances[2]!.status).toBe('failed');
+  });
+});
+
+describe('TICKET 055b — a refused utterance is stored FAILED, never complete-with-a-null', () => {
+  it('status is keyed on the RESOLVED audio mark, not on the instant that was observed', async () => {
+    const h = timelineHarness(DRIFT_AUDIO_AT_MS);
+    const { run } = await runTimeline(h);
+
+    const utterances = utterancesOf(run);
+    // Hand-derived: utterances 1 and 2 answered after their own speech end,
+    // 3 and 4 before it, so 3 and 4 hold no measurement to be `complete` about.
+    expect(utterances.map((u) => u.status)).toEqual([
+      'complete',
+      'complete',
+      'failed',
+      'failed',
+    ]);
+    // Stated as the rule rather than the instance: an utterance with no
+    // `audio_queued` is never `complete`, whatever produced the absence.
+    for (const u of utterances) {
+      expect(u.status).toBe(u.timings.audio_queued === null ? 'failed' : 'complete');
+    }
+  });
+
+  it('and so contributes NO cost-only sample: the money it carries is not aggregatable', async () => {
+    const h = timelineHarness(DRIFT_AUDIO_AT_MS);
+    await runTimeline(h);
+
+    // The runner posts `origin: 'manual'`; re-homed as a sweep so the parent
+    // Run passes the gate and the RECORD's own verdict is what is under test.
+    const asSweep: Run = { ...h.posted[0]!, origin: 'sweep' };
+    expect(isAggregatableRun(asSweep)).toBe(true);
+
+    const samples = runSamples(asSweep);
+    expect(samples).toHaveLength(4);
+    const refused = samples.filter((s) => s.latencyMs === null);
+    expect(refused).toHaveLength(2);
+
+    for (const sample of refused) {
+      // It still carries its split of the clip's cost — the record is real and
+      // is not deleted (PRD §12)...
+      expect(sample.cost).not.toBeNull();
+      // ...and it still contributes none of it, because it is not a sample.
+      expect(isAggregatableUtterance(asSweep, sample.utterance)).toBe(false);
+    }
+    // Not vacuous: the two honest records DO pass the same gate.
+    const measured = samples.filter((s) => s.latencyMs !== null);
+    expect(measured).toHaveLength(2);
+    for (const sample of measured) {
+      expect(isAggregatableUtterance(asSweep, sample.utterance)).toBe(true);
+    }
+  });
+});
+
+describe('TICKET 055b — the envelope quotes the LAST RECORD, not the Recording', () => {
+  /**
+   * F6 — the block above cannot catch a last-wins `speech_end` at the envelope,
+   * because its fixture has `recording.speechEndMs === manifest[3]
+   * .trueSpeechEndMs` (19797) and the two candidate anchors coincide. Here they
+   * deliberately do not: the clip's annotated speech end is 20500 while the
+   * last utterance's is 19797, which is the shape `replayArmA.test.ts` already
+   * has on disk. Reading the anchor off the Recording is then visible without
+   * depending on any edited fixture.
+   */
+  const LATE_CLIP_SPEECH_END_MS = 20_500;
+
+  function skewedHarness(audioAtMs: readonly number[]) {
+    return makeHarness({
+      recording: { ...DRIFT_RECORDING, speechEndMs: LATE_CLIP_SPEECH_END_MS },
+      samples: ramp(FRAME_SAMPLES * 1047),
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'cascade',
+          script: timelineScript(audioAtMs),
+          costPerMinUsd: CORPUS_COST_PER_MIN,
+        }),
+    });
+  }
+
+  it('takes both marks from the last record even when the clip claims a LATER speech end', async () => {
+    const audioAt = DRIFT_SPEECH_END_MS.map((ms) => ms + 50);
+    const h = skewedHarness(audioAt);
+    const { run, t0 } = await runTimeline(h);
+
+    // THE PREMISE, asserted: the two candidate anchors really do differ here.
+    expect(h.recording.speechEndMs).toBe(LATE_CLIP_SPEECH_END_MS);
+    expect(DRIFT_SPEECH_END_MS[3]).not.toBe(LATE_CLIP_SPEECH_END_MS);
+
+    // THE CLAIM: the envelope is a copy of the LAST record's two marks.
+    const last = utterancesOf(run)[3]!;
+    expect(last.timings.speech_end).toBe(t0 + 19_797);
+    expect({
+      speech_end: run.timings.speech_end,
+      audio_queued: run.timings.audio_queued,
+    }).toEqual({ speech_end: t0 + 19_797, audio_queued: t0 + 19_847 });
+    // Named explicitly, because this is the mark last-wins would have used.
+    expect(run.timings.speech_end).not.toBe(t0 + LATE_CLIP_SPEECH_END_MS);
+    expect(pairedDelta(run.timings)).toBe(50);
   });
 });

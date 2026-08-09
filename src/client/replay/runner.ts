@@ -97,10 +97,25 @@
  * cancellation — so no run leaves a timer pending behind it.
  *
  * THE RUN-LEVEL `timings` / `transcripts` / `cost` KEEP TODAY'S SEMANTICS
- * VERBATIM (flat last-mark-wins, last final transcripts, first-audio-overall,
- * `speech_end = t0 + recording.speechEndMs`, whole-clip cost). 031 is purely
- * ADDITIVE: nothing downstream reads `utterances` until ticket 032, so no
- * existing aggregate may move underneath it in the meantime.
+ * VERBATIM (flat last-mark-wins, last final transcripts, whole-clip cost) —
+ * except the ONE pair ticket 055b corrected, below.
+ *
+ * ------------------- TICKET 055b: THE ENVELOPE SPEAKS FOR ONE UTTERANCE ----
+ * The run-level `speech_end` / `audio_queued` pair used to be assembled from
+ * two DIFFERENT utterances: `t0 + recording.speechEndMs` (the LAST utterance's
+ * speech end) against `firstAudioAt` (the FIRST utterance's audio). On run
+ * 7acb0cc9 that reported 885175 − 899148 = −13973 ms for a run in which no
+ * single utterance was off by anything like that. Both marks are the runner's
+ * own and both are on one clock — it is last-wins against first-wins, not a
+ * two-clock problem — so a manifest-backed run now COPIES the LAST record's two
+ * marks, and a run with no records (mic-shaped, mismatched, cancelled) keeps
+ * the whole-clip pair unchanged.
+ *
+ * AND NO RECORD MAY REPORT AUDIO BEFORE ITS OWN SPEECH END. Utterances 3 and 4
+ * of that run each answered before their own manifest anchor (−1435 / −2364 ms)
+ * — a separate defect from the envelope, and fixing either alone leaves the
+ * other in place. Such a mark is refused and stored as `null` ("not measured"),
+ * NEVER clamped to 0, with the instant it saw named in the record's `errors`.
  *
  * A MANIFEST-LESS RUN IS BYTE-FOR-BYTE UNCHANGED: it ends at its first
  * utterance boundary, arms neither timer, and carries no `utterances` key.
@@ -182,6 +197,7 @@ import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag, type ArmTag, type
 import type { CorpusUtterance } from '../../core/corpus';
 import { readWav, writeWav } from '../../harness/wav';
 import { SAMPLE_RATE } from '../../core/protocol';
+import { CLOCK_INVERSION } from '../../core/timing';
 import type { InterpreterTransport, TransportConfig } from '../transport/types';
 import type { Recording, Run, RunUtterance } from '../state/ledger';
 import { ApiError } from './recordingsClient';
@@ -809,13 +825,39 @@ function attributeUtterances(args: {
     const timings: Record<string, number | null> = { ...(buckets.timings.get(utt) ?? {}) };
     // ...except the two the runner owns. The anchor is the MANIFEST's, never
     // the Recording's and never VAD's.
-    timings.speech_end = t0 + entry.trueSpeechEndMs;
+    const speechEnd = t0 + entry.trueSpeechEndMs;
+    timings.speech_end = speechEnd;
     // TICKET 040 — a decoded PCM sample still wins; a transport-sent mark is
     // the fallback for the WebRTC media-track case, where the audio never
     // reaches the data channel and only the mark exists.
     const audioAt = buckets.audioAt.get(utt);
     const markedAt = typeof timings.audio_queued === 'number' ? timings.audio_queued : null;
-    const audioQueued = audioAt ?? markedAt;
+    const observedAudioAt = audioAt ?? markedAt;
+    // TICKET 055b — AN ANSWER CANNOT BEGIN SOUNDING BEFORE THE SPEECH THAT
+    // PRODUCED IT ENDED. Run 7acb0cc9 stored −1435 ms and −2364 ms for its
+    // third and fourth utterances, on two marks that are BOTH the runner's own
+    // and BOTH on one clock, and those figures reached Results as a p50 of
+    // −1.44 s. `audio_queued − speech_end` is a PERCEIVED LATENCY: a negative
+    // one is not a fast run, it is the absence of a measurement.
+    //
+    // THE REFUSAL IS A NULL, NEVER A CLAMP. `null` is this codebase's "not
+    // measured" and renders as such; clamping to the anchor would invent a 0 ms
+    // measurement nothing observed, and keeping the figure would let a
+    // physically impossible interval into a percentile. The instant that WAS
+    // observed is named in this utterance's own `errors`, so the drift stays
+    // legible rather than being quietly deleted — and the record itself
+    // survives, transcripts and all.
+    let audioQueued: number | null = observedAudioAt;
+    const utteranceErrors: string[] = [];
+    if (observedAudioAt === null) {
+      utteranceErrors.push('no output audio');
+    } else if (observedAudioAt < speechEnd) {
+      audioQueued = null;
+      utteranceErrors.push(
+        `${CLOCK_INVERSION}: output audio at ${observedAudioAt} precedes its own speech_end ` +
+          `${speechEnd} by ${speechEnd - observedAudioAt} ms`,
+      );
+    }
     timings.audio_queued = audioQueued;
 
     const previousEnd = i === 0 ? 0 : manifest[i - 1]!.trueSpeechEndMs;
@@ -834,12 +876,17 @@ function attributeUtterances(args: {
       // TICKET 052 — a transport that declares NO rate has not measured this
       // utterance's cost. `null` says so; `0` would report it as free.
       cost: costPerMinUsd > 0 ? costPerMinUsd * (spanMs / 60_000) : null,
-      // An utterance with no output audio has no end-to-end number to report,
-      // which is a fact about THAT utterance and not about the Run. Keyed on
-      // the RESOLVED value (040): a track-carried utterance DID produce audio
-      // and must not be marked failed while the run reports its latency.
+      // An utterance with no end-to-end number has none to report, which is a
+      // fact about THAT utterance and not about the Run. Keyed on the RESOLVED
+      // value (040): a track-carried utterance DID produce audio and must not
+      // be marked failed while the run reports its latency.
+      //
+      // TICKET 055b — the two ways to arrive at "no number" are NOT the same
+      // fact and do not share a reason: nothing sounded at all, or something
+      // sounded before the speech that produced it ended. The second names the
+      // instant it saw, which is the only place that evidence still exists.
       status: audioQueued === null ? 'failed' : 'complete',
-      errors: audioQueued === null ? ['no output audio'] : [],
+      errors: utteranceErrors,
     };
   });
 }
@@ -1175,6 +1222,38 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
           durationMs: recording.durationMs,
           costPerMinUsd: transport.costPerMinUsd,
         });
+
+  // TICKET 055b — THE ENVELOPE SPEAKS FOR ONE UTTERANCE, OR FOR NONE.
+  //
+  // The two lines above take `speech_end` from the RECORDING (where the LAST
+  // utterance's speech ends) and `audio_queued` from `firstAudioAt` (the FIRST
+  // utterance's answer). On run 7acb0cc9 that pairs utterance 4's speech end
+  // with utterance 1's audio and reports 885175 − 899148 = −13973 ms. Both
+  // marks are the runner's own and both are on ONE clock: this is last-wins
+  // against first-wins, and no same-clock assertion would ever have caught it.
+  //
+  // So a manifest-backed run's envelope is a COPY of one record's two marks —
+  // the LAST utterance's. That is the record whose speech end sits LAST in the
+  // clip, so the run-level anchor keeps its meaning while the answer paired
+  // with it becomes the answer to THAT speech. It is NOT assumed to equal
+  // `recording.speechEndMs`: the clip's annotated speech end is a separate
+  // figure and the two need not coincide (`replayArmA.test.ts` has 4000 against
+  // a last manifest anchor of 3900). The manifest's anchor is the one that
+  // wins, precisely because it is the one the record was measured against —
+  // reading the Recording's here would reintroduce last-wins. Copying rather
+  // than recomputing is what makes the envelope unable to disagree with the
+  // record it quotes: the per-utterance honesty rule in `attributeUtterances`
+  // has already refused an impossible pairing, so the envelope inherits either
+  // a real interval or `null` — it can no longer manufacture one of its own.
+  //
+  // A run with NO records (mic-shaped, a segmentation mismatch, a cancellation)
+  // keeps today's whole-clip envelope byte-for-byte: it has one utterance by
+  // construction, so there is nothing to mis-pair.
+  const envelope = utterances?.[utterances.length - 1];
+  if (envelope !== undefined) {
+    timings.speech_end = envelope.timings.speech_end ?? null;
+    timings.audio_queued = envelope.timings.audio_queued ?? null;
+  }
 
   // TICKET 045 — THE AUDIO IS UPLOADED BEFORE THE RUN IS POSTED, so the id has
   // to be minted first: the upload is addressed by it.

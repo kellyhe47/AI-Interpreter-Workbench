@@ -1327,3 +1327,174 @@ describe('TICKET 055b — a non-positive latency sample is dropped from the nume
     expect(ledger.getRuns()).toHaveLength(3);
   });
 });
+
+/**
+ * TICKET 055b, ADVERSARIAL ROUND — THE ENVELOPE-ONLY BRANCH, AND THE ZERO.
+ *
+ * `refuseClockInversion` has TWO ways to fire and the block above exercises
+ * only one of them. Change the guard to `if (invertedIds.length === 0) return
+ * run` — dropping the envelope test entirely — and nothing anywhere goes red.
+ *
+ * THE BRANCH IS REACHABLE, not theoretical. A mic-shaped run has no manifest,
+ * so `runner.ts` emits no records at all (`utterances === undefined`) and keeps
+ * the whole-clip envelope: `t0 + recording.speechEndMs` against the first
+ * output audio. A transport that answers before `t0 + recording.speechEndMs`
+ * then stores a run with a negative envelope and NO record to name — which is
+ * exactly the shape `runTimeout.test.ts`'s harness produced before it was
+ * repaired. A run arriving from `hydrateLedger`, an imported bundle or an older
+ * `localStorage` blob can carry the same shape.
+ *
+ * The message must therefore say what it can honestly say — that the ENVELOPE
+ * pairs output audio with a LATER speech end — rather than naming utterances
+ * that do not exist, and when BOTH fire the envelope is noted alongside the
+ * records rather than replacing them.
+ */
+describe('TICKET 055b — the run envelope is refused on its own, with no record to name', () => {
+  /** 7acb0cc9's envelope: u-4's speech end against u-1's audio, −13973 ms. */
+  const ENVELOPE_SPEECH_END = 1786148899148;
+  const ENVELOPE_AUDIO_QUEUED = 1786148885175;
+
+  it('a records-less run whose envelope inverts is stored FAILED and says which fact it saw', () => {
+    const ledger = new RunLedger();
+    const run = makeRun({
+      id: 'mic-inverted',
+      timings: { speech_end: ENVELOPE_SPEECH_END, audio_queued: ENVELOPE_AUDIO_QUEUED },
+    });
+    // THE PREMISE, asserted: there is no record here to carry the fault.
+    expect(run.utterances).toBeUndefined();
+    expect(run.status).toBe('complete');
+    expect(ENVELOPE_AUDIO_QUEUED - ENVELOPE_SPEECH_END).toBe(-13973);
+
+    ledger.appendRun(run);
+    const stored = ledger.getRuns()[0]!;
+
+    expect(stored.status).toBe('failed');
+    expect(stored.errors).toEqual([
+      'clock-inversion: the run envelope pairs output audio with a LATER speech end',
+    ]);
+    // Still on record, and contributing nothing — through `status`, as ever.
+    expect(ledger.getRuns()).toHaveLength(1);
+    expect(isAggregatableRun(stored)).toBe(false);
+    expect(Object.values(ledger.runAggregates().perArm).reduce((n, a) => n + a.n, 0)).toBe(0);
+  });
+
+  it('a records-less run whose envelope is POSITIVE is untouched — the branch is not vacuous', () => {
+    const ledger = new RunLedger();
+    const healthy = makeRun({
+      id: 'mic-healthy',
+      timings: { speech_end: ENVELOPE_SPEECH_END, audio_queued: ENVELOPE_SPEECH_END + 500 },
+    });
+    expect(healthy.utterances).toBeUndefined();
+
+    ledger.appendRun(healthy);
+    const stored = ledger.getRuns()[0]!;
+    expect(stored.status).toBe('complete');
+    expect(stored.errors).toEqual([]);
+    expect(ledger.runAggregates().perArm['B']).toMatchObject({ n: 1, p50Ms: 500 });
+  });
+
+  it('when the records AND the envelope both invert, the envelope is NOTED, not substituted', () => {
+    const ledger = new RunLedger();
+    const utterances: RunUtterance[] = [
+      {
+        utteranceId: 'u-1',
+        index: 1,
+        category: 'short-reply',
+        timings: { speech_end: 1786148881751, audio_queued: 1786148885175 },
+        transcripts: { source: 'src 0', target: 'tgt 0' },
+        cost: 0.01,
+        status: 'complete',
+        errors: [],
+      },
+      {
+        utteranceId: 'u-2',
+        index: 2,
+        category: 'proper-nouns',
+        timings: { speech_end: ENVELOPE_SPEECH_END, audio_queued: 1786148896784 },
+        transcripts: { source: 'src 1', target: 'tgt 1' },
+        cost: 0.01,
+        status: 'complete',
+        errors: [],
+      },
+    ];
+    ledger.appendRun(
+      makeRun({
+        id: 'both-inverted',
+        timings: { speech_end: ENVELOPE_SPEECH_END, audio_queued: ENVELOPE_AUDIO_QUEUED },
+        utterances,
+      }),
+    );
+
+    // One reason, naming the record that inverted AND recording that the
+    // envelope did too — the second fact is not a second error line, and it is
+    // not allowed to overwrite the first.
+    expect(ledger.getRuns()[0]!.errors).toEqual([
+      'clock-inversion: output audio precedes the speech end it is measured from — u-2 ' +
+        '(and so does the run envelope)',
+    ]);
+  });
+
+  it('when the records invert but the envelope does NOT, no envelope note is added', () => {
+    const ledger = new RunLedger();
+    const utterances: RunUtterance[] = [
+      {
+        utteranceId: 'u-1',
+        index: 1,
+        category: 'short-reply',
+        timings: { speech_end: 1786148893911, audio_queued: 1786148892476 },
+        transcripts: { source: 'src 0', target: 'tgt 0' },
+        cost: 0.01,
+        status: 'complete',
+        errors: [],
+      },
+    ];
+    ledger.appendRun(
+      makeRun({
+        id: 'records-only',
+        timings: { speech_end: ENVELOPE_SPEECH_END, audio_queued: ENVELOPE_SPEECH_END + 500 },
+        utterances,
+      }),
+    );
+
+    expect(ledger.getRuns()[0]!.errors).toEqual([
+      'clock-inversion: output audio precedes the speech end it is measured from — u-1',
+    ]);
+  });
+});
+
+/**
+ * TICKET 055b, ADVERSARIAL ROUND — A ZERO IS NOT AN INVERSION.
+ *
+ * `isClockInversion`'s `< 0` widened to `<= 0` leaves the whole suite green, so
+ * the write-time guard could be made to accuse a 0 ms run of a physically
+ * impossible ordering with nothing to stop it. The two halves of the 0 ms
+ * verdict are asserted TOGETHER here because only together are they the rule:
+ * the run is not accused, AND it still never reaches a percentile.
+ */
+describe('TICKET 055b — a 0 ms interval is refused as a sample but never as an inversion', () => {
+  it('the run stays COMPLETE with no clock-inversion error, and still enters no aggregate', () => {
+    const ledger = new RunLedger();
+    ledger.appendRun(runWithLatency(0, { id: 'zero-ms', cost: 0.01 }));
+    const stored = ledger.getRuns()[0]!;
+
+    // NOT an inversion: nothing came out backwards, so nothing is alleged.
+    expect(stored.status).toBe('complete');
+    expect(stored.errors).toEqual([]);
+    expect(isAggregatableRun(stored)).toBe(true);
+
+    // ...and NOT a measurement either: it leaves the numerator and the
+    // denominator together, so `n` is 0 and the percentile is null, never a 0.
+    const agg = ledger.runAggregates().perArm['B'];
+    expect(agg?.n ?? 0).toBe(0);
+    expect(agg?.p50Ms ?? null).toBeNull();
+    expect(agg?.p95Ms ?? null).toBeNull();
+  });
+
+  it('a −1 ms interval IS an inversion — the boundary is one millisecond wide', () => {
+    const ledger = new RunLedger();
+    ledger.appendRun(runWithLatency(-1, { id: 'minus-one' }));
+    const stored = ledger.getRuns()[0]!;
+    expect(stored.status).toBe('failed');
+    expect(stored.errors.join(' | ')).toContain('clock-inversion');
+  });
+});

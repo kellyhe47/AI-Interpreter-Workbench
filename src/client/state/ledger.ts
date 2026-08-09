@@ -161,7 +161,13 @@ import type { CorpusCategory, CorpusUtterance } from '../../core/corpus';
 import { latestWerScores, werScoreKey } from '../../core/wer';
 import type { WerScore } from '../../core/wer';
 import type { RunOrigin } from '../../core/protocol';
-import { anchoredLatencyMs, latencyAnchorOf } from '../../core/timing';
+import {
+  CLOCK_INVERSION,
+  anchoredLatencyMs,
+  isClockInversion,
+  isMeasuredLatencyMs,
+  latencyAnchorOf,
+} from '../../core/timing';
 import type { LatencyAnchor, Mode, UtteranceRecord } from '../../core/timing';
 
 /* -------------------------------------------------------------------------
@@ -661,6 +667,51 @@ function pairedLatencyMs(timings: Record<string, number | null> | undefined): nu
 }
 
 /**
+ * TICKET 055b — THE WRITE-TIME BACKSTOP, and only a backstop.
+ *
+ * Run 7acb0cc9 is on disk with every utterance `complete` while two of them
+ * report their output audio BEFORE the speech that produced it ended (−1435 and
+ * −2364 ms), and a run-level envelope of −13973 ms. The RUNNER no longer
+ * produces such a record — that is the fix, and it lives in `replay/runner.ts`
+ * — but the ledger also receives records it did not produce: the server's
+ * ledger through `hydrateLedger`, an imported bundle, a `localStorage` blob
+ * written by an older build. A record that already carries an impossible
+ * interval must not read as evidence just because it arrived from disk.
+ *
+ * SO THE VERDICT RIDES `status`, WHICH `isAggregatableRun` ALREADY REJECTS. No
+ * clause is added to the one place that decides aggregation, and the exclusion
+ * cannot drift away from it.
+ *
+ * THE RUN IS STILL STORED, records, transcripts and all (PRD §12): a refused
+ * run is real information, and relabelling it while deleting the evidence would
+ * hide the very drift the label exists to flag. The reason NAMES the utterances
+ * that inverted — a run-level verdict alone loses which ones, which is the
+ * signal that the drift is PROGRESSIVE rather than a one-off.
+ */
+function refuseClockInversion(run: Run): Run {
+  const invertedIds = (run.utterances ?? [])
+    .filter((u) => isClockInversion(pairedLatencyMs(u.timings)))
+    .map((u) => u.utteranceId);
+  const envelopeMs = pairedLatencyMs(run.timings);
+  const envelopeInverted = isClockInversion(envelopeMs);
+  if (invertedIds.length === 0 && !envelopeInverted) return run;
+
+  const named =
+    invertedIds.length > 0
+      ? `output audio precedes the speech end it is measured from — ${invertedIds.join(', ')}`
+      : // The envelope alone: naming no utterance is the honest report when no
+        // record carries the fault (a run with no records at all, for one).
+        'the run envelope pairs output audio with a LATER speech end';
+  const envelopeNote =
+    envelopeInverted && invertedIds.length > 0 ? ' (and so does the run envelope)' : '';
+  return {
+    ...run,
+    status: 'failed',
+    errors: [...run.errors, `${CLOCK_INVERSION}: ${named}${envelopeNote}`],
+  };
+}
+
+/**
  * Every measured atom of one Run, in manifest order. Never empty.
  *
  * A Run carrying records expands into exactly those records and the Run-level
@@ -814,7 +865,7 @@ export class RunLedger {
   }
 
   appendRun(run: Run): void {
-    this.runs.push(deepCopy(run));
+    this.runs.push(refuseClockInversion(deepCopy(run)));
     this.persist();
   }
 
@@ -849,6 +900,18 @@ export class RunLedger {
     for (const run of this.runs) {
       for (const sample of runSamples(run)) {
         if (!isAggregatableUtterance(run, sample.utterance)) continue;
+        // TICKET 055b — A NON-POSITIVE INTERVAL LEAVES THE NUMERATOR AND THE
+        // DENOMINATOR TOGETHER. Dropping it from the percentile pool alone
+        // would keep it in `n`, so the figure would read as an average over
+        // samples one of which was never a measurement; keeping it in the pool
+        // drags the percentile below the benchmark it is compared against.
+        // Leaving on this line is what makes the drop VISIBLE — `n` falls, and
+        // the run itself is still stored, listed and exported.
+        //
+        // `null` is untouched: "this utterance produced no output audio" is a
+        // sample with a cost and no latency, which is exactly what the pool
+        // below already handles.
+        if (sample.latencyMs !== null && !isMeasuredLatencyMs(sample.latencyMs)) continue;
         const arm = sample.arm;
         let agg = perArm[arm];
         if (!agg) {

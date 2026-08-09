@@ -45,12 +45,23 @@ import {
   type RunnerDeps,
 } from './runner';
 
-/** Four utterances, one per second of a 4 s clip — a PRD §9 corpus take. */
+/**
+ * Four utterances, roughly one per second of a 4 s clip — a PRD §9 corpus take.
+ *
+ * TICKET 055b — THE ANCHORS ARE 900/1900/2900/3900, NOT THE ROUND SECONDS.
+ * The fake model answers utterance u on the frame that CARRIES that second's
+ * last 20 ms, i.e. at 980 / 1980 / 2980 / 3980, so anchors on the round seconds
+ * made every utterance of this fixture answer 20 ms BEFORE its own speech had
+ * ended. The runner now refuses such a mark as "not measured" (it is physically
+ * impossible, and it is how run 7acb0cc9 stored a negative p50), which would
+ * have nulled every `audio_queued` this file asserts on. The anchors moved, not
+ * the assertions: each answer now lands 80 ms after the speech it answers.
+ */
 const MANIFEST: CorpusUtterance[] = [
-  { id: 'u1', index: 1, category: 'short-reply', trueSpeechEndMs: 1_000 },
-  { id: 'u2', index: 2, category: 'numbers-dates', trueSpeechEndMs: 2_000 },
-  { id: 'u3', index: 3, category: 'proper-nouns', trueSpeechEndMs: 3_000 },
-  { id: 'u4', index: 4, category: 'long-compound', trueSpeechEndMs: 4_000 },
+  { id: 'u1', index: 1, category: 'short-reply', trueSpeechEndMs: 900 },
+  { id: 'u2', index: 2, category: 'numbers-dates', trueSpeechEndMs: 1_900 },
+  { id: 'u3', index: 3, category: 'proper-nouns', trueSpeechEndMs: 2_900 },
+  { id: 'u4', index: 4, category: 'long-compound', trueSpeechEndMs: 3_900 },
 ];
 
 const DURATION_MS = 4_000;

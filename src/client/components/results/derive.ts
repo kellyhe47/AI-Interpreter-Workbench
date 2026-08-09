@@ -133,7 +133,7 @@ import {
   formatCostUsd,
   sumMeasuredCosts,
 } from '../../../core/pricing';
-import { anchoredLatencyMs } from '../../../core/timing';
+import { anchoredLatencyMs, isMeasuredLatencyMs } from '../../../core/timing';
 import type { WerScore } from '../../../core/wer';
 import {
   isAggregatableLiveSession,
@@ -881,9 +881,11 @@ export function groupByRecording(ledger: RunLedger): RecordingGroupRow[] {
     const measured = measuredRuns
       .flatMap(runSamples)
       .filter((sample) => sample.status === 'complete');
-    const samples = measured
-      .map((sample) => sample.latencyMs)
-      .filter((ms): ms is number => ms !== null);
+    // TICKET 055b — and a NON-POSITIVE interval is dropped for the third
+    // reason: it is not a measurement either. `isMeasuredLatencyMs` is the same
+    // predicate `RunLedger.runAggregates` applies, so this row and the
+    // experiment card cannot disagree about what counts as a latency (PRD §8).
+    const samples = measured.map((sample) => sample.latencyMs).filter(isMeasuredLatencyMs);
 
     const origins: RunOrigin[] = [];
     for (const run of group) {
@@ -976,9 +978,9 @@ export function groupByCategory(ledger: RunLedger): CategoryGroupRow[] {
   return order.map((key) => {
     const group = groups.get(key)!;
     const first = group[0]!;
-    const samples = group
-      .map((entry) => entry.sample.latencyMs)
-      .filter((ms): ms is number => ms !== null);
+    // TICKET 055b — same predicate as the ledger's aggregate: a non-positive
+    // interval never enters a percentile, by whichever path the figure is read.
+    const samples = group.map((entry) => entry.sample.latencyMs).filter(isMeasuredLatencyMs);
     return {
       category: first.category,
       arm: first.sample.arm,

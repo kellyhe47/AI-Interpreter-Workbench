@@ -781,3 +781,126 @@ describe('formatDirection — a direction nobody recorded reads as not recorded'
     for (const row of rows) expect(row.directionCell).toBe(formatDirection(row.direction));
   });
 });
+
+/* ===================== TICKET 055b — the two tables use the SAME predicate == */
+
+/**
+ * TICKET 055b, ADVERSARIAL ROUND — `derive.ts`'s HALF OF THE RULE.
+ *
+ * `groupByRecording` and `groupByCategory` each filter their percentile pool
+ * with `isMeasuredLatencyMs`, and the comments beside both lines claim that
+ * this row and the experiment card "cannot disagree about what counts as a
+ * latency (PRD §8)". Revert either filter to `ms !== null` and the whole suite
+ * and every golden eval stay green — the claim is asserted by comment only.
+ *
+ * The NEGATIVE case never reaches these lines: `refuseClockInversion` stores
+ * such a run `failed`, so `derive.ts:880`'s `status === 'complete'` filter drops
+ * it before the pool is built. THE REACHABLE CASE IS A 0 ms SAMPLE. It is not
+ * an inversion, so the run stays `complete` and arrives here intact — and it is
+ * not a latency either, so the two tables must drop it exactly as
+ * `runAggregates` does. A table that kept it would publish a p50 the experiment
+ * card contradicts, over a sample nothing measured.
+ */
+describe('TICKET 055b — a 0 ms sample is dropped from every percentile, by whichever path', () => {
+  const ZERO_RECORDING_ID = 'rec-zero-ms';
+  const ZERO_CATEGORY: UtteranceCategory = 'short-reply';
+
+  /** Four gate-passing Arm-B runs on one recording: 0, 500, 900 and 1200 ms. */
+  const LATENCIES_MS = [0, 500, 900, 1200] as const;
+
+  /**
+   * Nearest-rank over the THREE that survive — sorted [500, 900, 1200]:
+   *   p50 = sorted[ceil(0.50·3) − 1] = sorted[1] = 900
+   *   p95 = sorted[ceil(0.95·3) − 1] = sorted[2] = 1200
+   * Keeping the 0 gives sorted [0, 500, 900, 1200] and
+   *   p50 = sorted[ceil(0.50·4) − 1] = sorted[1] = 500 — the arithmetic these
+   * tests exist to forbid, and the one figure that separates the two pools.
+   */
+  const SURVIVING_P50_MS = 900;
+  const SURVIVING_P95_MS = 1_200;
+  const POOLED_WITH_ZERO_P50_MS = 500;
+
+  function zeroLedger(): RunLedger {
+    const ledger = new RunLedger();
+    ledger.appendRecording(
+      makeRecordingEntity({ id: ZERO_RECORDING_ID, label: 'zero-ms clip' }),
+    );
+    LATENCIES_MS.forEach((ms, i) => {
+      ledger.appendRun(
+        runWithLatency(ms, {
+          id: `run-zero-${i}`,
+          recordingId: ZERO_RECORDING_ID,
+          annotations: {
+            utteranceId: 'u1',
+            category: ZERO_CATEGORY,
+            repIndex: i + 1,
+            corpusVersion: CORPUS_VERSION,
+          },
+        }),
+      );
+    });
+    return ledger;
+  }
+
+  it('the premise: the 0 ms run is stored COMPLETE and does reach these tables', () => {
+    const ledger = zeroLedger();
+    // Not refused at write time — a zero is not an inversion — so the filter
+    // under test is the only thing that can drop it.
+    expect(ledger.getRuns().map((r) => r.status)).toEqual([
+      'complete',
+      'complete',
+      'complete',
+      'complete',
+    ]);
+    const row = recordingRow(groupByRecording(ledger), ZERO_RECORDING_ID);
+    expect(row.runCount).toBe(4);
+    expect(row.failedCount).toBe(0);
+  });
+
+  it('groupByRecording drops it from the percentile pool, exactly as runAggregates does', () => {
+    const ledger = zeroLedger();
+    const row = recordingRow(groupByRecording(ledger), ZERO_RECORDING_ID);
+
+    expect(row.p50Ms).toBe(SURVIVING_P50_MS);
+    expect(row.p95Ms).toBe(SURVIVING_P95_MS);
+    // Named explicitly, because this is the figure `ms !== null` would print.
+    expect(row.p50Ms).not.toBe(POOLED_WITH_ZERO_P50_MS);
+
+    // `n` on this row counts the COMPLETE records the group produced, not the
+    // percentile pool — the 0 ms sample is still listed, which is what makes
+    // the drop visible rather than silent. The aggregate's `n` is the pool.
+    expect(row.n).toBe(4);
+  });
+
+  it('groupByCategory drops it too — one predicate, not one per table', () => {
+    const ledger = zeroLedger();
+    const rows = groupByCategory(ledger);
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.category).toBe(ZERO_CATEGORY);
+
+    expect(row.p50Ms).toBe(SURVIVING_P50_MS);
+    expect(row.p95Ms).toBe(SURVIVING_P95_MS);
+    expect(row.p50Ms).not.toBe(POOLED_WITH_ZERO_P50_MS);
+  });
+
+  it('the two rows and the experiment card report ONE figure — PRD §8', () => {
+    const ledger = zeroLedger();
+    const card = deriveExperimentAggregates(ledger).perArm['B']!;
+
+    // The aggregate drops the 0 from the numerator AND the denominator, so its
+    // own `n` is the three that were measured.
+    expect(card.n).toBe(3);
+    expect(card.p50Ms).toBe(SURVIVING_P50_MS);
+    expect(card.p95Ms).toBe(SURVIVING_P95_MS);
+
+    // THE CLAIM the comments make: no table may disagree with the card about
+    // what counted as a latency.
+    const byRecording = recordingRow(groupByRecording(ledger), ZERO_RECORDING_ID);
+    const byCategory = groupByCategory(ledger)[0]!;
+    expect(byRecording.p50Ms).toBe(card.p50Ms);
+    expect(byRecording.p95Ms).toBe(card.p95Ms);
+    expect(byCategory.p50Ms).toBe(card.p50Ms);
+    expect(byCategory.p95Ms).toBe(card.p95Ms);
+  });
+});

@@ -434,11 +434,19 @@ class SlowStartTransport extends FixtureTransport {
     super(opts);
   }
   override async start(config: Parameters<FixtureTransport['start']>[0]): Promise<void> {
+    // TICKET 055b — A LATE HANDSHAKE DELAYS THE ANSWER, IT DOES NOT PRECEDE IT.
+    // The stall used to run AFTER `super.start()`, which arms the fixture's
+    // script: the answer's audio then landed 30 ms into a handshake that took
+    // another 25 s, i.e. 25 s BEFORE the run's own `t0`, and the Run came out
+    // with an `audio_queued` earlier than the speech end it is measured from.
+    // No transport can answer a clip it has not been handed. The `forever` and
+    // `rejects` modes keep their order exactly.
+    if (this.mode.afterMs !== undefined) {
+      await new Promise<void>((resolve) => setTimeout(resolve, this.mode.afterMs));
+    }
     await super.start(config);
     if (this.mode.forever) return new Promise<void>(() => {});
     if (this.mode.rejects !== undefined) throw new Error(this.mode.rejects);
-    if (this.mode.afterMs === undefined) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, this.mode.afterMs));
   }
 }
 
@@ -453,7 +461,16 @@ function realHarness(opts: {
   const wav = writeWav(ramp((SAMPLE_RATE * clipMs) / 1000), SAMPLE_RATE);
   // The Recording must agree with the bytes, or `cost` and `speech_end` describe
   // a different clip from the one the pacer actually plays.
-  const recording: Recording = { ...RECORDING, durationMs: clipMs, speechEndMs: clipMs };
+  //
+  // TICKET 055b — `speechEndMs` IS 20, NOT `clipMs`. Every script in this file
+  // answers at 30 ms, so a clip whose speech ran to the very end made each of
+  // these runs report its answer BEFORE the speech that produced it had ended
+  // (−20 ms at the default 50 ms clip, −44970 at the 45 s one). That interval is
+  // physically impossible, it is exactly the defect run 7acb0cc9 stored, and it
+  // is now dropped from every aggregate — which would have emptied the `perArm`
+  // entries these tests count reps in. The speech ends at 20 ms and the answer
+  // sounds at 30; `durationMs` still describes the bytes the pacer plays.
+  const recording: Recording = { ...RECORDING, durationMs: clipMs, speechEndMs: 20 };
   const posted: Run[] = [];
   const createCalls: { id: string; at: number }[] = [];
   const uploads: string[] = [];
