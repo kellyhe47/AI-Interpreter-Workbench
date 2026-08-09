@@ -43,6 +43,12 @@ import {
   type BatchProgress,
   type BatchSummary,
 } from './runner';
+/**
+ * TICKET 065 — read as a NAMESPACE so the estimator can be probed before it
+ * exists. A named import of a missing export is a compile error, and this
+ * ticket's tests have to typecheck cleanly while they are still red.
+ */
+import * as batchRunner from './runner';
 
 // ---------------------------------------------------------------------------
 // Matrix vocabulary
@@ -863,5 +869,75 @@ describe('createRunOnceExecutor — the executed repIndex reaches the ledger', (
     for (const retained of posted.slice(1)) {
       expect(isAggregatableRun(retained)).toBe(true);
     }
+  });
+});
+
+/* ================ TICKET 065 — the count the OPERATOR is billed for ======== */
+
+/**
+ * TICKET 065 — `executionCount` is the arithmetic behind the pre-launch
+ * confirmation, and it lives HERE, beside the planner it has to agree with.
+ *
+ * THE WHOLE POINT IS THE TERM `totalRuns` LEAVES OUT. `startBatch` computes
+ * `totalRuns = recordings × configurations × reps` (runner.ts:308) — warmups
+ * EXCLUDED — and that is the number already on screen in BatchProgress ("run 17
+ * of 45"), so it is the number a fresh implementer reaches for. It is 20% short
+ * of what the sweep actually executes, and therefore 20% short of both the bill
+ * and the wall clock. A confirmation that named it would be this project's
+ * characteristic failure: a figure that is precise, derived, and about the
+ * wrong quantity.
+ *
+ * The last test grounds the helper in what the runner ACTUALLY does rather than
+ * in a second copy of the same formula — if `planCells` ever stops emitting one
+ * warmup per (recording × configuration), the estimator is wrong and this says
+ * so.
+ */
+describe('TICKET 065 — executionCount counts the warmups the bill includes', () => {
+  type ExecutionCountFn = (recordings: number, configurations: number, reps: number) => number;
+
+  /** Probed off the namespace: the export does not exist yet (see the import). */
+  const executionCount = (batchRunner as unknown as { executionCount?: ExecutionCountFn })
+    .executionCount;
+
+  it('is exported from the module that owns the plan, so the two cannot drift', () => {
+    expect(typeof executionCount).toBe('function');
+  });
+
+  it('1 × 3 × 5 is EIGHTEEN executions — not the fifteen totalRuns reports', () => {
+    // Hand-derived, deliberately not re-expressed from the component's own
+    // constants: 3 arms × (5 retained + 1 warmup) = 18 over one recording.
+    expect(executionCount!(1, 3, 5)).toBe(18);
+    expect(executionCount!(1, 3, 5)).not.toBe(15);
+  });
+
+  it('at PRD §15A’s three reps a single-clip sweep is TWELVE executions', () => {
+    // 3 arms × (3 retained + 1 warmup) = 12; runner.totalRuns would say 9.
+    expect(executionCount!(1, 3, 3)).toBe(12);
+    expect(executionCount!(1, 3, 3)).not.toBe(9);
+  });
+
+  it('the reps multiplier is really in the arithmetic: 3 → 5 adds configurations × 2', () => {
+    // A per-cell estimate that forgot to multiply by reps moves by 0 here.
+    expect(executionCount!(1, 3, 5) - executionCount!(1, 3, 3)).toBe(6);
+    expect(executionCount!(2, 4, 5) - executionCount!(2, 4, 3)).toBe(2 * 4 * 2);
+  });
+
+  it('the recordings multiplier is in it too', () => {
+    expect(executionCount!(3, 3, 3)).toBe(36);
+  });
+
+  it('IT AGREES WITH WHAT THE RUNNER ACTUALLY EXECUTES, not with a second formula', async () => {
+    const exec = makeExecutor();
+    const summary = await drain(
+      run({ recordingIds: ['rec-1'], configurations: CONFIGS, reps: 3, execute: exec.execute }),
+    );
+
+    // Every execution the executor saw, retries excluded — warmups included.
+    const executed = exec.calls.filter((c) => c.attempt === 1).length;
+    expect(executed).toBe(8); // 1 × 2 × (3 + 1)
+    expect(executionCount!(1, CONFIGS.length, 3)).toBe(executed);
+    // ...and the runner's own measured count is a DIFFERENT, smaller number.
+    expect(summary.totalRuns).toBe(6);
+    expect(executionCount!(1, CONFIGS.length, 3)).toBeGreaterThan(summary.totalRuns);
   });
 });

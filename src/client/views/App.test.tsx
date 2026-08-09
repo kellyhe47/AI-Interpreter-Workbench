@@ -485,3 +485,122 @@ describe('App supplies rng, evaluatorLanguage and recordBlindComparison', () => 
     expect(comparison.evaluatorLanguage.length).toBeGreaterThan(0);
   });
 });
+
+/* ====== TICKET 066 — the Recording selection survives a tab round-trip ==== */
+
+/**
+ * TICKET 066 — `ReplayView.tsx:379` holds the selected Recording in a plain
+ * `useState<string | null>(null)`, and App mounts EXACTLY ONE VIEW: switching
+ * tab unmounts the one you left. So `Replay → Results → Replay` drops the
+ * selection to null, the Runs panel renders "No Runs of this Recording yet." —
+ * and the sidebar row still reads "2 runs", because `runCounts` is built from
+ * the full `runs` array and never mentions the selection. The library says the
+ * Recording has runs; the panel says it has none.
+ *
+ * THE ROUND TRIP IS DRIVEN THROUGH THE REAL VIEW SWITCHER, inside ONE
+ * `render(<App/>)` — never by re-rendering ReplayView with a prop, and never by
+ * a second `render`. RTL appends to `document.body` and these accessors are
+ * global `document.querySelector`, so a second mount would leave the "it
+ * survived" assertion reading the FIRST mount's DOM.
+ *
+ * `makeReplayDeps()` DELIBERATELY supplies no persistence seam. App is the host
+ * that fills one in — the same rule it already follows for `rng`,
+ * `evaluatorLanguage` and `recordBlindComparison` — so a fix that makes the
+ * seam a required host responsibility leaves the feature dead in the product's
+ * own shell, and these tests say so.
+ */
+describe('TICKET 066 — Replay keeps its selection across a tab change', () => {
+  const NO_SELECTION_HINT = 'Select a Recording in the library to run against';
+  const RUNS_EMPTY = 'No Runs of this Recording yet.';
+
+  const text = (element: Element | null): string => (element?.textContent ?? '').trim();
+
+  const replayRow = (): HTMLElement =>
+    get(`[data-recording-row][data-recording="${REC.id}"]`);
+
+  const runCardIds = (): string[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('[data-run-card]'))
+      .map((card) => card.getAttribute('data-run') ?? '')
+      .sort();
+
+  /** Opens Replay and selects the seeded Recording, with its two runs listed. */
+  async function selectOnReplay(): Promise<void> {
+    await showTab('Replay');
+    await waitFor(() =>
+      expect(q(`[data-recording-row][data-recording="${REC.id}"]`)).not.toBeNull(),
+    );
+    fireEvent.click(replayRow());
+    await waitFor(() => {
+      expect(replayRow()).toHaveAttribute('data-selected', 'true');
+      expect(runCardIds()).toEqual([RUN_B.id, RUN_C.id].sort());
+    });
+  }
+
+  it('nothing is selected before the operator picks a clip', async () => {
+    // The control for the two below: a fix that simply marks the first row
+    // selected on mount would satisfy them and break this.
+    renderPinnedWorkbench();
+    await showTab('Replay');
+    await waitFor(() => expect(q('[data-recordings-library]')).not.toBeNull());
+
+    expect(document.querySelectorAll('[data-recording-row][data-selected="true"]')).toHaveLength(0);
+    expect(get('[data-run-button]')).toBeDisabled();
+    expect(get('[data-batch-button]')).toBeDisabled();
+  });
+
+  it.each(['Results', 'Help', 'Live'] as const)(
+    'Replay → %s → Replay keeps the row selected, the runs listed and the count agreeing',
+    async (away) => {
+      renderPinnedWorkbench();
+      await selectOnReplay();
+      const before = runCardIds();
+      expect(before).toEqual([RUN_B.id, RUN_C.id].sort());
+
+      await showTab(away);
+      await showTab('Replay');
+
+      // Row marker, run cards and sidebar count in ONE assertion: the defect is
+      // that these can disagree, so a race that satisfies them one at a time
+      // must not pass. The run IDS are pinned, not just the count — a refetch
+      // that landed late would otherwise look like a restored selection.
+      await waitFor(() => {
+        const element = replayRow();
+        expect(element).toHaveAttribute('data-selected', 'true');
+        expect(runCardIds()).toEqual(before);
+        expect(text(element.querySelector('[data-recording-run-count]'))).toContain('2');
+      });
+      // The screen must not contradict itself in the other direction either.
+      expect(screen.queryByText(RUNS_EMPTY)).toBeNull();
+    },
+  );
+
+  it('after the round trip Run and Batch sweep are enabled, with no no-selection hint', async () => {
+    renderPinnedWorkbench();
+    await selectOnReplay();
+    expect(get('[data-run-button]')).not.toBeDisabled();
+
+    await showTab('Results');
+    await showTab('Replay');
+
+    await waitFor(() => expect(replayRow()).toHaveAttribute('data-selected', 'true'));
+    for (const selector of ['[data-run-button]', '[data-batch-button]']) {
+      expect(get(selector), selector).not.toBeDisabled();
+      // A control disabled for a reason that is no longer true is the same
+      // contradiction wearing a tooltip (tickets 024, 044).
+      expect(get(selector), selector).not.toHaveAttribute('title', NO_SELECTION_HINT);
+    }
+  });
+
+  it('the target-language control comes back with the clip it belongs to', async () => {
+    // Ticket 061's control is a property of the SELECTED clip, so its absence
+    // after the round trip is the same lost selection said a fourth way.
+    renderPinnedWorkbench();
+    await selectOnReplay();
+    expect(q('[data-target-language]')).not.toBeNull();
+
+    await showTab('Results');
+    await showTab('Replay');
+
+    await waitFor(() => expect(q('[data-target-language]')).not.toBeNull());
+  });
+});

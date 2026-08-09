@@ -1386,3 +1386,438 @@ describe('ReplayView — the target-language control appears only with a clip', 
     expect(screen.queryByText('target language')).toBeNull();
   });
 });
+
+/* ========== TICKET 065 — the ellipsis is a promise of a next step ========== */
+
+/**
+ * TICKET 065 — `Batch sweep…` calls `deps.startBatch` SYNCHRONOUSLY on click.
+ * One click starts 1 recording × 3 frozen arms × (reps + 1) executions —
+ * roughly $4 and ~68 minutes at PRD §7's scale — with no cost estimate, no
+ * time estimate and no confirmation. A trailing ellipsis promises a next step;
+ * there is none, and there is no dialog primitive anywhere in `src/client`.
+ *
+ * ============ THE DOM CONTRACT THESE TESTS INVENT (it does not exist) =======
+ * [data-sweep-confirm]              the intermediate step, rendered OPEN (jsdom
+ *                                   has no <dialog>.showModal), role="dialog"
+ *                                   with an accessible name. Absent until the
+ *                                   batch button is pressed; absent again after
+ *                                   either of its two controls.
+ *   [data-sweep-reps=<n>]           the retained reps in force — the value that
+ *                                   is passed as `reps` to startBatch
+ *   [data-sweep-executions=<n>]     TOTAL executions INCLUDING the per-cell
+ *                                   warmups: recordings × configurations ×
+ *                                   (reps + 1). NOT runner.totalRuns, which
+ *                                   excludes them and is 20% short of the bill
+ *   [data-sweep-wallclock-ms=<n>]   estimated wall clock: the SELECTED clip's
+ *                                   durationMs × executions (replay is paced at
+ *                                   1× — eval 08), never a constant
+ *   [data-sweep-cost]               an estimated $ figure, or the words
+ *                                   `not measured` (COST_NOT_MEASURED_CELL).
+ *                                   Never `$0.00` — eval 07
+ *   [data-sweep-confirm-start]      button: the ONLY path to deps.startBatch
+ *   [data-sweep-confirm-cancel]     button: dismisses, launching nothing
+ * ===========================================================================
+ *
+ * The value-bearing `data-*` attributes follow the file's existing convention
+ * (`data-derived-tag={tag}`, `data-target-language={language}`): the datum on
+ * the attribute, the prose in the text, so an assertion never has to parse copy.
+ *
+ * These tests DELIBERATELY do not pin the button's label. Removing the ellipsis
+ * and keeping the confirmation both satisfy AC1; what may not survive is a
+ * click that reaches an executor.
+ */
+describe('TICKET 065 — Batch sweep confirms before it spends anything', () => {
+  const batchButton = (): HTMLElement => get('[data-batch-button]');
+  const confirmPanel = (): HTMLElement | null => q('[data-sweep-confirm]');
+  const startControl = (): HTMLElement => get('[data-sweep-confirm-start]');
+  const cancelControl = (): HTMLElement => get('[data-sweep-confirm-cancel]');
+
+  /** The datum off the attribute, never scraped out of the copy. */
+  const datum = (selector: string, attribute: string): number => {
+    const raw = get(selector).getAttribute(attribute);
+    expect(raw, `${selector} must carry ${attribute}`).not.toBeNull();
+    return Number(raw);
+  };
+
+  /** Selects a clip and presses the batch button. Nothing may launch. */
+  async function openConfirm(recordingId: string = CORPUS_REC.id) {
+    const fakes = await mount({
+      recordings: [CORPUS_REC, MIC_REC],
+      runs: [] as SeededRun[],
+    });
+    await selectRecording(recordingId);
+    fireEvent.click(batchButton());
+    await waitFor(() => expect(confirmPanel()).not.toBeNull());
+    return fakes;
+  }
+
+  /* -- AC1 + AC5: the click opens something, and spends nothing ------------ */
+
+  it('the click opens an intermediate step and calls startBatch ZERO times', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+
+    fireEvent.click(batchButton());
+
+    await waitFor(() => expect(confirmPanel()).not.toBeNull());
+    // THE assertion of this ticket. An implementation that renders a panel and
+    // launches anyway has changed the screen and not the behaviour.
+    expect(fakes.startBatch).not.toHaveBeenCalled();
+    expect(fakes.batches).toHaveLength(0);
+    expect(q('[data-batch-progress]')).toBeNull();
+  });
+
+  it('the step is a dialog by role, and it names itself', async () => {
+    await openConfirm();
+    const panel = confirmPanel()!;
+    expect(panel).toHaveAttribute('role', 'dialog');
+    const name = panel.getAttribute('aria-label') ?? panel.getAttribute('aria-labelledby') ?? '';
+    expect(name.length).toBeGreaterThan(0);
+  });
+
+  it('CANCEL dismisses it, starts nothing, and opens no progress panel', async () => {
+    const fakes = await openConfirm();
+
+    fireEvent.click(cancelControl());
+
+    await waitFor(() => expect(confirmPanel()).toBeNull());
+    expect(fakes.startBatch).not.toHaveBeenCalled();
+    expect(fakes.batches).toHaveLength(0);
+    expect(q('[data-batch-progress]')).toBeNull();
+  });
+
+  /* -- AC2: the count includes the warmups -------------------------------- */
+
+  it('names the execution count INCLUDING warmups — twelve, not the nine totalRuns reports', async () => {
+    await openConfirm();
+
+    // Hand-derived from the matrix, not re-expressed from the component's
+    // constants: 1 clip × 3 frozen arms × (3 retained reps + 1 warmup) = 12.
+    // `runner.ts` would report 9 for the same sweep, and 9 is the number
+    // already on screen in BatchProgress — so it is the one a fix reaches for.
+    expect(datum('[data-sweep-executions]', 'data-sweep-executions')).toBe(12);
+    expect(datum('[data-sweep-executions]', 'data-sweep-executions')).not.toBe(9);
+    expect(text(get('[data-sweep-executions]'))).toContain('12');
+  });
+
+  /* -- AC6: §15A cut five-rep sweeps to three ----------------------------- */
+
+  it('the reps in force are THREE — PRD §15A (2026-08-09) beats §17 22c', async () => {
+    await openConfirm();
+    expect(datum('[data-sweep-reps]', 'data-sweep-reps')).toBe(3);
+    expect(datum('[data-sweep-reps]', 'data-sweep-reps')).not.toBe(5);
+  });
+
+  it('the reps the operator was SHOWN are the reps the sweep is started with', async () => {
+    const fakes = await openConfirm();
+    const shown = datum('[data-sweep-reps]', 'data-sweep-reps');
+
+    fireEvent.click(startControl());
+
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    expect(fakes.batches[0]!.request.reps).toBe(shown);
+    expect(fakes.batches[0]!.request.reps).toBe(3);
+  });
+
+  /* -- AC3: the wall clock comes from the CLIP ---------------------------- */
+
+  const CLIPS = [
+    { name: 'the 60 s corpus clip', recordingId: CORPUS_REC.id, wallclockMs: 720_000 },
+    { name: 'the 30 s mic clip', recordingId: MIC_REC.id, wallclockMs: 360_000 },
+  ] as const;
+
+  it.each(CLIPS)(
+    'the wall-clock estimate is derived from $name, not from a constant',
+    async ({ recordingId, wallclockMs }) => {
+      await openConfirm(recordingId);
+      // durationMs × 12 executions — replay is paced at 1× (eval 08), so the
+      // duration of a sweep is bounded by real time, not by compute. Two clips
+      // of different lengths must produce two different figures; a constant
+      // fails one of these two cases whichever constant it is.
+      expect(datum('[data-sweep-wallclock-ms]', 'data-sweep-wallclock-ms')).toBe(wallclockMs);
+    },
+  );
+
+  /* -- AC4: an unpriced estimate says so ---------------------------------- */
+
+  it('the cost is a figure or the words `not measured` — never $0.00', async () => {
+    await openConfirm();
+    const cost = text(get('[data-sweep-cost]'));
+
+    expect(cost).not.toBe('');
+    // Unmeasured is null and renders `not measured`; a zero would report the
+    // sweep as free (eval 07, and COST_NOT_MEASURED_CELL in core/pricing).
+    // Two legal answers and no third: a priced figure that is not zero, or the
+    // words. `$0.00` is neither, and is the failure this criterion names.
+    const figure = /\$([\d.]+)/.exec(cost);
+    if (figure === null) {
+      expect(cost).toBe('not measured');
+    } else {
+      expect(Number(figure[1])).toBeGreaterThan(0);
+    }
+  });
+
+  /* -- AC5: confirming is the only path to the executor -------------------- */
+
+  it('CONFIRM starts exactly one sweep, over the selected clip and the three arms', async () => {
+    const fakes = await openConfirm();
+
+    fireEvent.click(startControl());
+
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    const request = fakes.batches[0]!.request;
+    expect(request.recordingIds).toEqual([CORPUS_REC.id]);
+    expect(request.configurations).toHaveLength(3);
+    expect(request.configurations.map((c) => c.id).sort()).toEqual(['A', 'B', 'C']);
+    await waitFor(() => expect(q('[data-batch-progress]')).not.toBeNull());
+    await waitFor(() => expect(confirmPanel()).toBeNull());
+  });
+
+  it('pressing the batch button twice cannot launch twice — the GATE is on the handler', async () => {
+    // The trap: a confirm added INSIDE startSweep, after its
+    // `if (selectedRecordingId === null || sweep !== null) return;` guard, is
+    // re-enterable while `sweep` is still null.
+    const fakes = await openConfirm();
+
+    fireEvent.click(batchButton());
+    fireEvent.click(batchButton());
+    expect(fakes.startBatch).not.toHaveBeenCalled();
+
+    fireEvent.click(startControl());
+
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    expect(fakes.startBatch).toHaveBeenCalledTimes(1);
+  });
+
+  it('the chosen target language survives the confirmation (ticket 061 regression)', async () => {
+    const fakes = await mount(DEFAULT_LIBRARY);
+    await selectRecording(CORPUS_REC.id);
+    fireEvent.click(
+      within(get('[data-target-language]')).getByRole('button', { name: 'Cantonese' }),
+    );
+
+    fireEvent.click(batchButton());
+    await waitFor(() => expect(confirmPanel()).not.toBeNull());
+    fireEvent.click(startControl());
+
+    await waitFor(() => expect(fakes.batches).toHaveLength(1));
+    for (const configuration of fakes.batches[0]!.request.configurations) {
+      expect(configuration.config.languagePair).toBe('EN↔YUE');
+      expect(configuration.config.direction).toBe('en→yue');
+      expect(configuration.config.targetLanguage).toBe('Cantonese');
+    }
+  });
+});
+
+/* ===== TICKET 066 — a restored selection resolves against the library ====== */
+
+/**
+ * TICKET 066 — the selection lives in a plain `useState<string | null>(null)`
+ * that `App.tsx` unmounts on every tab change, so `Replay → Results → Replay`
+ * leaves the Runs panel saying "No Runs of this Recording yet." while the
+ * sidebar row still reads "3 runs". The round-trip itself is asserted through
+ * the REAL view switcher in App.test.tsx; what lives here is the half that is
+ * ReplayView's alone — what a RESTORED id means when it names nothing.
+ *
+ * ================= THE SEAM THESE TESTS INVENT (it does not exist) =========
+ * `ReplayDeps.selectionStore?: { get(): string | null; set(id: string | null): void }`
+ *   — injected, on the deps bag, exactly as `RunLedger`'s localStorage-shaped
+ *   seam is (ledger.ts:382 → browserDeps.ts:522). OPTIONAL on the bag, because
+ *   App must fill it in for a host that omits one — the same way App already
+ *   supplies `rng`, `evaluatorLanguage` and `recordBlindComparison`. That is
+ *   what keeps App.test.tsx's deliberately-minimal bag working, and it is what
+ *   the App round-trip test proves.
+ *
+ * The two failure cases below are where the contradiction MOVES rather than
+ * disappears: an id whose Recording is gone is a selection with no row, which
+ * is the same bug inverted.
+ * ===========================================================================
+ */
+describe('TICKET 066 — a restored Recording selection', () => {
+  interface SelectionSeam {
+    get: () => string | null;
+    set: (id: string | null) => void;
+  }
+
+  /** A fakes bag carrying a pre-loaded selection store, plus a way to read it. */
+  function withRestoredSelection(
+    options: { recordings?: Recording[]; runs?: SeededRun[]; listDeleted?: boolean },
+    restored: string | null,
+  ) {
+    const fakes = makeFakes({ recordings: options.recordings, runs: options.runs });
+    if (options.listDeleted === true) {
+      // The default fake hides soft-deleted Recordings from `list()`. A stored
+      // id naming one has to be REACHABLE to be resolved, so this bag answers
+      // with the whole store — which is what the production client does, and
+      // why `selectedRecording` (all recordings) and `visibleRecordings`
+      // (deletedAt === undefined) can disagree at all.
+      fakes.recordings.list.mockImplementation(async () =>
+        fakes.store.recordings.map((r) => ({ ...r })),
+      );
+    }
+    let current = restored;
+    const selectionStore: SelectionSeam = {
+      get: () => current,
+      set: (id) => {
+        current = id;
+      },
+    };
+    const deps = { ...fakes.deps, selectionStore } as ReplayDeps;
+    return { ...fakes, deps, read: (): string | null => current };
+  }
+
+  const selectedRows = (): HTMLElement[] =>
+    Array.from(document.querySelectorAll<HTMLElement>('[data-recording-row][data-selected="true"]'));
+
+  const NO_SELECTION_HINT = 'Select a Recording in the library to run against';
+
+  /** The RESTORED clip is really selected — without this, the two below pass dead. */
+  it('naming a live Recording selects it, and the count and the Runs list agree', async () => {
+    const bag = withRestoredSelection(
+      {
+        recordings: [CORPUS_REC, MIC_REC],
+        runs: [RUN_CASCADE, RUN_REALTIME, RUN_FAILED, RUN_ON_MIC],
+      },
+      CORPUS_REC.id,
+    );
+    render(<ReplayView deps={bag.deps} />);
+
+    await waitFor(() => {
+      const element = row(CORPUS_REC.id);
+      expect(element).toHaveAttribute('data-selected', 'true');
+      // The library's count and the panel's list, read in the SAME assertion:
+      // the defect is that these two can disagree, so they are never checked
+      // one after the other.
+      expect(text(element.querySelector('[data-recording-run-count]'))).toContain('3');
+      expect(runCards().map((card) => card.getAttribute('data-run')).sort()).toEqual(
+        [RUN_CASCADE.id, RUN_FAILED.id, RUN_REALTIME.id].sort(),
+      );
+    });
+    expect(screen.queryByText('No Runs of this Recording yet.')).toBeNull();
+    expect(get('[data-run-button]')).not.toBeDisabled();
+    expect(get('[data-batch-button]')).not.toBeDisabled();
+  });
+
+  it('naming a Recording ABSENT from the library resolves to NO selection', async () => {
+    const bag = withRestoredSelection(
+      { recordings: [CORPUS_REC, MIC_REC], runs: [RUN_CASCADE] },
+      'rec-that-is-gone',
+    );
+    render(<ReplayView deps={bag.deps} />);
+    await waitFor(() => expect(rows()).toHaveLength(2));
+
+    // Not one row left marked selected...
+    expect(selectedRows()).toHaveLength(0);
+    // ...and no control left holding the stale id: both actions are disabled
+    // for the NO-SELECTION reason, which is the reason that is true.
+    expect(get('[data-run-button]')).toBeDisabled();
+    expect(get('[data-batch-button]')).toBeDisabled();
+    expect(get('[data-run-button]')).toHaveAttribute('title', NO_SELECTION_HINT);
+    expect(get('[data-batch-button]')).toHaveAttribute('title', NO_SELECTION_HINT);
+    expect(text(get('[data-run-config-panel]'))).toContain('select a Recording to run against');
+    // No clip means no legal targets, so the 061 control is absent too.
+    expect(q('[data-target-language]')).toBeNull();
+  });
+
+  it('naming a SOFT-DELETED Recording resolves to NO selection the same way', async () => {
+    // `selectedRecording` searches ALL recordings while `visibleRecordings`
+    // excludes soft-deleted ones, so this id otherwise yields a non-null
+    // selection with no row to mark — the contradiction, inverted.
+    const DELETED_MIC: Recording = { ...MIC_REC, deletedAt: T0 + 5_000 };
+    const bag = withRestoredSelection(
+      {
+        recordings: [CORPUS_REC, DELETED_MIC],
+        runs: [RUN_CASCADE, RUN_ON_MIC],
+        listDeleted: true,
+      },
+      MIC_REC.id,
+    );
+    render(<ReplayView deps={bag.deps} />);
+    await waitFor(() => expect(rows()).toHaveLength(1));
+
+    expect(q(`[data-recording-row][data-recording="${MIC_REC.id}"]`)).toBeNull();
+    expect(selectedRows()).toHaveLength(0);
+    expect(get('[data-run-button]')).toBeDisabled();
+    expect(get('[data-batch-button]')).toBeDisabled();
+    expect(get('[data-run-button]')).toHaveAttribute('title', NO_SELECTION_HINT);
+    expect(text(get('[data-run-config-panel]'))).toContain('select a Recording to run against');
+  });
+
+  it('an operator selection is written to the store it was restored from', async () => {
+    const bag = withRestoredSelection(
+      { recordings: [CORPUS_REC, MIC_REC], runs: [RUN_ON_MIC] },
+      null,
+    );
+    render(<ReplayView deps={bag.deps} />);
+    await waitFor(() => expect(rows()).toHaveLength(2));
+
+    await selectRecording(MIC_REC.id);
+
+    // A store that is only ever READ restores whatever it was seeded with and
+    // never the clip the operator actually picked.
+    await waitFor(() => expect(bag.read()).toBe(MIC_REC.id));
+  });
+});
+
+/* ===== TICKET 066 — the count and the empty state never contradict ======== */
+
+/**
+ * AC6 — `No Runs of this Recording yet.` may render only when a Recording IS
+ * selected and its `runCounts` entry is 0. These two are the invariant stated
+ * in both directions; the case where today's code breaks it (after a tab
+ * round-trip) is asserted through <App /> in App.test.tsx, because the
+ * contradiction needs the unmount to appear at all.
+ */
+describe('TICKET 066 — the sidebar count and the Runs panel say the same thing', () => {
+  it('a clip WITH runs: no empty state, and the count equals the cards', async () => {
+    await mount({
+      recordings: [CORPUS_REC, MIC_REC],
+      runs: [RUN_CASCADE, RUN_REALTIME, RUN_FAILED, RUN_ON_MIC],
+    });
+    await selectRecording(CORPUS_REC.id);
+
+    await waitFor(() => expect(runCards()).toHaveLength(3));
+    expect(screen.queryByText('No Runs of this Recording yet.')).toBeNull();
+    expect(text(row(CORPUS_REC.id).querySelector('[data-recording-run-count]'))).toContain(
+      String(runCards().length),
+    );
+  });
+
+  it('a clip with ZERO runs: the empty state, and a count that says zero', async () => {
+    await mount({
+      recordings: [CORPUS_REC, MIC_REC],
+      runs: [RUN_CASCADE, RUN_REALTIME, RUN_FAILED],
+    });
+    await selectRecording(MIC_REC.id);
+
+    await waitFor(() =>
+      expect(screen.queryByText('No Runs of this Recording yet.')).not.toBeNull(),
+    );
+    expect(runCards()).toHaveLength(0);
+    expect(text(row(MIC_REC.id).querySelector('[data-recording-run-count]'))).toContain('0');
+  });
+});
+
+/* ======= TICKET 066 — the persistence is a SEAM, not a global reach ======= */
+
+describe('TICKET 066 — no view reaches for browser storage directly', () => {
+  const FILES = ['src/client/views/ReplayView.tsx', 'src/client/App.tsx'] as const;
+
+  /** Blanks comments while preserving line count (see deletions.test.ts). */
+  function strip(source: string): string {
+    return source
+      .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+      .replace(/(^|[^:])\/\/[^\n]*/g, (_m, lead: string) => lead);
+  }
+
+  it.each(FILES)('%s names no localStorage or sessionStorage', (file) => {
+    // The precedent is `new RunLedger(window.localStorage)` in browserDeps.ts:
+    // the store is handed IN. A view that reaches for `window.localStorage`
+    // works in jsdom, which is exactly why the bypass survives a test suite.
+    // (The URL is a legitimate alternative store — ticket 066's own note — so
+    // it is not forbidden here; it too must arrive through the bag.)
+    const code = strip(readFileSync(resolve(process.cwd(), file), 'utf8'));
+    expect(code, `${file} must take its store through deps`).not.toMatch(/\blocalStorage\b/);
+    expect(code, `${file} must take its store through deps`).not.toMatch(/\bsessionStorage\b/);
+  });
+});
