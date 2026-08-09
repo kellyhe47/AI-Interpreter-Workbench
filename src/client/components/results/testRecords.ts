@@ -85,8 +85,13 @@ export function makeRecordingEntity(overrides: Partial<Recording> = {}): Recordi
 
 /**
  * A Run that PASSES the ledger gate by default: Arm-B triple, sweep origin,
- * complete status, real providers. Every exclusion case is this minus one
- * thing, which is what makes the exclusion table honest.
+ * complete status, recorded languages, real providers. Every exclusion case is
+ * this minus one thing, which is what makes the exclusion table honest.
+ *
+ * TICKET 061 — the languages are a builder DEFAULT for the same reason
+ * `origin: 'sweep'` is: the gate requires them, so a fixture that omitted them
+ * would be excluded for a reason the test never meant to exercise. The tests
+ * that are ABOUT direction pass their own.
  */
 export function makeRunEntity(overrides: Partial<AnnotatedRun> = {}): AnnotatedRun {
   entitySeq += 1;
@@ -99,6 +104,8 @@ export function makeRunEntity(overrides: Partial<AnnotatedRun> = {}): AnnotatedR
     armTag: 'B',
     origin: 'sweep',
     status: 'complete',
+    languagePair: 'EN↔ES',
+    direction: 'en→es',
     timings: { speech_end: T0, audio_queued: T0 + 800 },
     transcripts: { source: 'hello', target: 'hola' },
     outputAudioPath: `runs/run-${entitySeq}.out.wav`,

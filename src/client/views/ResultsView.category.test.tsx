@@ -16,6 +16,8 @@
  */
 
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { armLabel } from '../../core/arms';
@@ -203,7 +205,20 @@ describe('ResultsView — TICKET 061: two directions render as two rows', () => 
       );
       expect(derived).toBeDefined();
       // Scoped to THIS row: a document-wide query would read the other one.
-      expect(within(row).getByText(formatMs(derived!.p50Ms))).toBeInTheDocument();
+      //
+      // getAllByText, not getByText: each row here holds n = 1, and nearest
+      // rank makes p50 === p95 for a single sample, so the row renders the SAME
+      // string in both cells. The original getByText threw
+      // getMultipleElementsFoundError on that — an ambiguous query, not a
+      // missing split. Widening the fixture to n = 2 is not the fix: the
+      // sibling test pins data-n as ['1','1'].
+      expect(within(row).getAllByText(formatMs(derived!.p50Ms)).length).toBeGreaterThan(0);
+      // ...and the bite the original lacked. Containment alone would survive a
+      // row that ALSO rendered the other direction's figure — which is exactly
+      // what pooling looks like once the rows are split but the samples are not.
+      const other = rows.find((r) => r !== derived);
+      expect(other).toBeDefined();
+      expect(within(row).queryByText(formatMs(other!.p50Ms))).toBeNull();
     }
     // The two directions differ by a full second, so a pooled row would render
     // one of these and not the other.
@@ -228,5 +243,145 @@ describe('ResultsView — TICKET 061: two directions render as two rows', () => 
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+/* ============= TICKET 061 follow-up — the direction an OPERATOR can read === */
+
+/**
+ * A SPLIT NOBODY CAN SEE IS HALF A SPLIT.
+ *
+ * 061 split the by-category rows on direction and stopped there: the table
+ * rendered category / arm / N / p50 / p95 / cost / WER, so a mixed-direction
+ * ledger produced two rows both reading "numbers-dates · Arm B", carrying
+ * different numbers, with nothing on screen telling them apart. The direction
+ * existed only in `data-direction` — a fact about this test harness, not about
+ * the operator.
+ *
+ * That is this ticket's own headline complaint — two runs of the same clip,
+ * indistinguishable in the record — reproduced one layer up. AC4 asks for "two
+ * rows where one appeared before"; two rows a reader cannot tell apart deliver
+ * half of it. EN→YUE and YUE→EN are separate claims (PRD §7) and the ASYMMETRY
+ * BETWEEN THEM is the finding, so which row is which has to be legible.
+ *
+ * Every query below is scoped with `within(row)`. RTL appends each render to
+ * the same document, so a document-wide accessor would happily match the other
+ * direction's cell — which is exactly how a pooled table passes a split-table
+ * test.
+ */
+describe('ResultsView — the by-category table shows WHICH DIRECTION each row is', () => {
+  const CATEGORY = 'numbers-dates';
+
+  /** Two rows that differ ONLY in the direction their parent Run recorded. */
+  function mixedDirectionLedger(): RunLedger {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: 'rec-vis', label: 'visible direction' }));
+    const seed = (direction: string, pair: string, latencyMs: number, id: string): void => {
+      ledger.appendRun(
+        runWithLatency(latencyMs, {
+          id,
+          recordingId: 'rec-vis',
+          languagePair: pair,
+          direction,
+          annotations: {
+            utteranceId: 'u1',
+            category: CATEGORY,
+            repIndex: 1,
+            corpusVersion: CORPUS_VERSION,
+          },
+        }),
+      );
+    };
+    seed('en→es', 'EN↔ES', 1_000, 'run-vis-es');
+    seed('en→yue', 'EN↔YUE', 2_000, 'run-vis-yue');
+    return ledger;
+  }
+
+  const categoryRows = (): HTMLElement[] =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>(`[data-category-row][data-category="${CATEGORY}"]`),
+    );
+
+  it('the header names a direction column', () => {
+    showCorpusSecondaryTab(mixedDirectionLedger());
+    const header = document.querySelector('[data-card="category"] [data-grid-header]');
+    expect(header).not.toBeNull();
+    expect(header!.textContent ?? '').toMatch(/direction/i);
+  });
+
+  it('each row renders its OWN direction as a visible cell — never the other row’s', () => {
+    const ledger = mixedDirectionLedger();
+    const derived = groupByCategory(ledger);
+    showCorpusSecondaryTab(ledger);
+
+    const rows = categoryRows();
+    expect(rows).toHaveLength(2);
+
+    for (const row of rows) {
+      const direction = row.getAttribute('data-direction');
+      expect(direction).not.toBeNull();
+
+      // Scoped to THIS row. `within(row)` searches descendants only, so a cell
+      // belonging to the sibling row cannot satisfy it.
+      const cell = within(row).getByText(direction!);
+      expect(cell).toHaveAttribute('data-category-direction');
+      expect((cell.textContent ?? '').trim()).not.toBe('');
+
+      const other = direction === 'en→es' ? 'en→yue' : 'en→es';
+      expect(within(row).queryByText(other)).toBeNull();
+    }
+
+    // NOT A CONSTANT: the two rendered strings are the two different directions,
+    // in derivation order. A hardcoded literal satisfies at most one of them.
+    expect(derived.map((row) => row.direction)).toEqual(['en→es', 'en→yue']);
+    expect(
+      rows.map((row) => {
+        const cell = within(row).getByText(row.getAttribute('data-direction')!);
+        return (cell.textContent ?? '').trim();
+      }),
+    ).toEqual(['en→es', 'en→yue']);
+  });
+
+  it('the cell is the DERIVATION’s cell, verbatim — the view formats nothing', () => {
+    // The idiom the cost column already follows: absence is decided in ONE
+    // place, so no view can invent a blank for a direction nobody recorded.
+    const ledger = mixedDirectionLedger();
+    const derived = groupByCategory(ledger);
+    showCorpusSecondaryTab(ledger);
+
+    const rows = categoryRows();
+    expect(rows).toHaveLength(derived.length);
+    rows.forEach((row, index) => {
+      const expected = derived[index]!.directionCell;
+      expect(expected).not.toBe('');
+      const cell = within(row).getByText(expected);
+      expect(cell).toHaveAttribute('data-category-direction');
+    });
+  });
+
+  it('ABSENCE IS NOT A BLANK, and the view cannot make it one', () => {
+    // `isAggregatableRun` rejects a Run that recorded no direction, so NO
+    // ledger can render a row with an absent one — which is exactly why the
+    // absence branch cannot be reached through the DOM, and why the two halves
+    // of the rule are pinned separately:
+    //   1. the DERIVATION decides the cell   (derive.test.ts, formatDirection)
+    //   2. the VIEW only reads it back       (here)
+    // Without (2) a later hand-rolled `row.direction ?? ''` would reintroduce
+    // the empty cell with every DOM test above still green.
+    const source = readFileSync(
+      resolve(process.cwd(), 'src/client/views/ResultsView.tsx'),
+      'utf8',
+    )
+      .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+      .replace(/(^|[^:])\/\/[^\n]*/g, (_m, lead: string) => lead);
+
+    expect(source).toContain('{row.directionCell}');
+    // The two shapes that turn "never recorded" into a value the table shows
+    // as nothing at all. `data-direction={row.direction}` is NOT one of them —
+    // an omitted attribute is a readable absence; an empty text node is not —
+    // so the element-body form is what is barred, and the attribute stays.
+    expect(source).not.toMatch(/row\.direction\s*\?\?\s*''/);
+    expect(source).not.toMatch(/>\s*\{\s*row\.direction\s*\}/);
+    expect(source).toContain('data-direction={row.direction}');
   });
 });

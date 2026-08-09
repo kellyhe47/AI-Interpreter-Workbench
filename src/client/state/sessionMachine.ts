@@ -287,6 +287,62 @@ export function languageSelectionForSource(sourceCode: string): LanguageSelectio
   return deriveLanguageSelection(0, false);
 }
 
+/**
+ * TICKET 061 — EVERY LEGAL TARGET for a clip of `sourceCode`, in `pairs` order.
+ *
+ * `languageSelectionForSource` returns the FIRST pair whose source matches, and
+ * `pairs[0]` is EN↔ES — so every English clip resolved to Spanish and EN→YUE
+ * was unreachable from Replay, sweeps included. The kept Cantonese track (PRD
+ * §7) could not be produced at all, and the asymmetry between EN→YUE and YUE→EN
+ * — the finding this study exists to report — had no way of being measured.
+ *
+ * A run can never point at the language it is already IN, so the clip's own
+ * language never appears here: a Spanish clip has exactly one legal target and
+ * nothing for an operator to resolve. An unrecognised code falls back to the
+ * default pair's forward target, matching `languageSelectionForSource`'s own
+ * fallback — one rule, so the list and the resolution can never disagree.
+ */
+export function targetLanguagesForSource(sourceCode: string): string[] {
+  const code = sourceCode.toLowerCase();
+  const targets: string[] = [];
+  for (const pair of pairs) {
+    let target: string | undefined;
+    if (languageCode(pair.src) === code) target = pair.tgt;
+    else if (languageCode(pair.tgt) === code) target = pair.src;
+    if (target !== undefined && !targets.includes(target)) targets.push(target);
+  }
+  if (targets.length === 0) targets.push(deriveLanguageSelection(0, false).targetLanguage);
+  return targets;
+}
+
+/**
+ * TICKET 061 — the selection for a clip of `sourceCode` run into a CHOSEN
+ * target language. The operator's half of the fact; the clip supplies the other.
+ *
+ * A target that is not legal for this clip resolves to the clip's first legal
+ * one rather than to nothing — which is what stops a choice made for an English
+ * clip ('Cantonese') from following the operator onto a Spanish one, where
+ * 'es→yue' is not a pair this study runs.
+ */
+export function languageSelectionForTarget(
+  sourceCode: string,
+  targetLanguage: string,
+): LanguageSelection {
+  const code = sourceCode.toLowerCase();
+  for (let idx = 0; idx < pairs.length; idx += 1) {
+    const pair = pairs[idx]!;
+    if (languageCode(pair.src) === code && pair.tgt === targetLanguage) {
+      return deriveLanguageSelection(idx, false);
+    }
+    if (languageCode(pair.tgt) === code && pair.src === targetLanguage) {
+      return deriveLanguageSelection(idx, true);
+    }
+  }
+  const fallback = targetLanguagesForSource(sourceCode)[0]!;
+  if (fallback === targetLanguage) return languageSelectionForSource(sourceCode);
+  return languageSelectionForTarget(sourceCode, fallback);
+}
+
 export function createInitialState(overrides?: Partial<SessionState>): SessionState {
   return {
     status: 'idle',

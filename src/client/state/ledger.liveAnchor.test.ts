@@ -219,6 +219,11 @@ function replayRun(overrides: Partial<Run> = {}): Run {
     armTag: 'B',
     origin: 'sweep',
     status: 'complete',
+    // TICKET 061 — a builder default beside `origin: 'sweep'`: the aggregation
+    // gate requires recorded languages, and this fixture is about the LATENCY
+    // ANCHOR, not about which languages a run named.
+    languagePair: 'EN↔ES',
+    direction: 'en→es',
     timings: {
       speech_end: T0,
       vad_fired: T0 + 500,

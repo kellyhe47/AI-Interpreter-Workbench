@@ -405,7 +405,13 @@ function makeRecording(overrides: Partial<Recording> = {}): Recording {
 
 /**
  * A Run that PASSES the gate by default: Arm-B triple, sweep origin, complete
- * status, real providers. Every exclusion case is this minus one thing.
+ * status, recorded languages, real providers. Every exclusion case is this
+ * minus one thing.
+ *
+ * TICKET 061 — the languages are a DEFAULT of the builder, for the same reason
+ * `origin: 'sweep'` is: the gate now requires them, so a builder that omitted
+ * them would make every exclusion test pass for the wrong reason. The tests
+ * that are ABOUT the languages strip or overwrite them explicitly.
  */
 function makeRun(overrides: Partial<Run> = {}): Run {
   entitySeq += 1;
@@ -418,6 +424,8 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     armTag: 'B',
     origin: 'sweep',
     status: 'complete',
+    languagePair: 'EN↔ES',
+    direction: 'en→es',
     timings: { speech_end: 1_000, audio_queued: 1_500 },
     transcripts: { source: 'hello', target: 'hola' },
     outputAudioPath: `runs/run-${entitySeq}.out.wav`,

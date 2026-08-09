@@ -106,6 +106,20 @@ export interface Run {
   armTag: ArmTag;
   origin: RunOrigin;
   status: RunStatus;
+  /**
+   * TICKET 061 — the languages the run ACTUALLY ran with. Mirrors
+   * `src/client/state/ledger.ts`'s `Run` field-for-field, for the same reason
+   * the Recording shape is mirrored: tsconfig.json excludes src/server from the
+   * client program, so neither side may import the other and the compiler can
+   * never compare them. The route stores the client's Run verbatim, so a field
+   * this side fails to declare still lands on disk and still comes back out —
+   * which is exactly why the drift is invisible at runtime.
+   *
+   * OPTIONAL is load-bearing: the three pre-061 Runs in `data/runs/` carry
+   * neither field, and they are read, listed and exported unchanged.
+   */
+  languagePair?: string;
+  direction?: string;
   timings: Record<string, number | null>;
   transcripts: { source?: string; target?: string };
   outputAudioPath?: string;

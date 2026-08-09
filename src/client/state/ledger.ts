@@ -580,13 +580,35 @@ export function isAggregatableLiveSession(session: LiveSession): boolean {
 
 /**
  * The aggregation gate (PRD §7, §8, §17 22d): derived armTag is a named arm
- * AND origin === 'sweep' AND status === 'complete' — then the realness rule
- * on top.
+ * AND origin === 'sweep' AND status === 'complete' AND the run RECORDED the
+ * languages it ran — then the realness rule on top.
+ *
+ * TICKET 061 — A CONTROLLED VARIABLE THAT IS NOT RECORDED IS NOT CONTROLLED.
+ * PRD §7's register pins "language pair + direction — fixed per sweep", and a
+ * Run that does not say which direction it ran cannot be reproduced from the
+ * ledger, cannot be grouped by the by-category view, and cannot be told apart
+ * from a run of the OTHER direction. Runs 7acb0cc9 (Spanish) and dbeb6d94
+ * (German) are exactly that: two different experiments, byte-indistinguishable.
+ *
+ * THIS IS THE ONE PLACE THAT DECIDES AGGREGATION. Rejecting a fieldless Run in
+ * `groupByCategory`, `runSamples` or `exportResults` instead would split the
+ * rule across five files, each free to disagree; `isAggregatableUtterance`
+ * applies it THROUGH the parent Run and needs no clause of its own.
+ *
+ * `?? ''` COVERS BOTH SHAPES. Absent is the pre-061 Run; `''` is what the
+ * runner's own `?? ''` used to store, and it is a VALUE that sails through any
+ * `!== undefined` check. Neither names a language.
+ *
+ * IT IS NOT A LANGUAGE POLICE: it asks whether the run recorded its direction,
+ * never which one. A gate that admitted only 'en→es' would quietly delete the
+ * Cantonese track, whose asymmetry is the finding.
  */
 export function isAggregatableRun(run: Run): boolean {
   if (runArmTag(run) === 'ad-hoc') return false;
   if (run.origin !== 'sweep') return false;
   if (run.status !== 'complete') return false;
+  if ((run.languagePair ?? '') === '') return false;
+  if ((run.direction ?? '') === '') return false;
   return isRealRun(run);
 }
 

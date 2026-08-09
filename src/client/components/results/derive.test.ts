@@ -7,11 +7,13 @@ import { describe, expect, it } from 'vitest';
 import { armLabel } from '../../../core/arms';
 import { RunLedger } from '../../state/ledger';
 import {
+  DIRECTION_NOT_RECORDED_CELL,
   PINNED_ENDPOINTING_MS,
   STT_UNCHANGED_CELL,
   deriveComparison,
   deriveExperimentAggregates,
   deriveLiveModel,
+  formatDirection,
   formatMs,
   formatUsd,
   groupByCategory,
@@ -702,5 +704,69 @@ describe('TICKET 061 — groupByCategory splits on direction, never pools two of
     expect(rows).toHaveLength(2);
     expect(rows.reduce((sum, r) => sum + r.n, 0)).toBe(agg.n);
     expect(rows.reduce((sum, r) => sum + (r.costUsd ?? 0), 0)).toBeCloseTo(agg.costUsd!, 10);
+  });
+});
+
+/* ========== TICKET 061 follow-up — an unrecorded direction is not a blank == */
+
+/**
+ * ABSENCE IS NOT A BLANK. `groupByCategory` used to coerce a missing direction
+ * with `run.direction ?? ''`, and `''` is a VALUE, not an absence: it renders
+ * as an empty table cell that reads "this row has no direction column" rather
+ * than "this run never recorded one", and it collides React keys built from
+ * `${category}|${arm}|${direction}`.
+ *
+ * The rule is the repo's standing one, one level over from `formatWer`'s
+ * `'—'` and `WER_NOT_MEASURED_CELL`: the DERIVATION decides the cell, in one
+ * place, so no view can invent a blank — or a zero — for something nobody
+ * recorded.
+ *
+ * `isAggregatableRun` already rejects a Run that recorded no direction, so no
+ * ledger can produce such a ROW. That is precisely why the absence branch has
+ * to be pinned here, on the function itself: it is the only reachable seam,
+ * and an unpinned branch is how `''` got in.
+ */
+describe('formatDirection — a direction nobody recorded reads as not recorded', () => {
+  it('renders the not-recorded literal for undefined and for the empty string', () => {
+    expect(formatDirection(undefined)).toBe(DIRECTION_NOT_RECORDED_CELL);
+    expect(formatDirection('')).toBe(DIRECTION_NOT_RECORDED_CELL);
+  });
+
+  it('the literal is neither empty, nor a zero, nor a language', () => {
+    expect(DIRECTION_NOT_RECORDED_CELL.trim()).not.toBe('');
+    expect(DIRECTION_NOT_RECORDED_CELL).not.toBe('0');
+    expect(DIRECTION_NOT_RECORDED_CELL).not.toMatch(/→/);
+  });
+
+  it('renders a recorded direction verbatim — it is a readout, not a translation', () => {
+    expect(formatDirection('en→yue')).toBe('en→yue');
+    expect(formatDirection('yue→en')).toBe('yue→en');
+  });
+
+  it('every row groupByCategory builds carries the cell already rendered', () => {
+    const ledger = new RunLedger();
+    ledger.appendRecording(makeRecordingEntity({ id: 'rec-cell', label: 'direction cell clip' }));
+    for (const [direction, pair, latencyMs, id] of [
+      ['en→es', 'EN↔ES', 1_000, 'run-cell-es'],
+      ['en→yue', 'EN↔YUE', 2_000, 'run-cell-yue'],
+    ] as const) {
+      ledger.appendRun(
+        runWithLatency(latencyMs, {
+          id,
+          recordingId: 'rec-cell',
+          languagePair: pair,
+          direction,
+          annotations: {
+            utteranceId: 'u1',
+            category: 'numbers-dates',
+            repIndex: 1,
+            corpusVersion: CORPUS_VERSION,
+          },
+        }),
+      );
+    }
+    const rows = groupByCategory(ledger);
+    expect(rows.map((r) => r.directionCell)).toEqual(['en→es', 'en→yue']);
+    for (const row of rows) expect(row.directionCell).toBe(formatDirection(row.direction));
   });
 });

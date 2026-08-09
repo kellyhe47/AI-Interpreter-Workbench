@@ -144,7 +144,8 @@ import type { RunOnceConfig, RunOnceResult } from '../replay/runner';
 import type { InterpreterTransport } from '../transport/types';
 import type { BlindComparison, Recording, Run } from '../state/ledger';
 import {
-  languageSelectionForSource,
+  languageSelectionForTarget,
+  targetLanguagesForSource,
   type LanguageSelection,
 } from '../state/sessionMachine';
 
@@ -400,6 +401,14 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
   const [config, setConfig] = useState<ReplayConfigState>(initialConfig);
+  /**
+   * TICKET 061 — the target language the OPERATOR picked, or null for "whatever
+   * the selected clip's first legal target is". A name, not an index: the
+   * chosen language has to survive a change of clip only when it is still legal
+   * for the new one, and a name is the only form that can be checked against
+   * that clip's own list.
+   */
+  const [chosenTarget, setChosenTarget] = useState<string | null>(null);
   const [sweep, setSweep] = useState<SweepState | null>(null);
   /**
    * Ticket 044 — a MANUAL run this view started and has not seen settle. It
@@ -537,15 +546,31 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
   /**
    * TICKET 062 — the languages a run over the SELECTED clip must use.
    *
-   * Replay has no language selector, and it does not need one: a Recording
-   * already declares its own `sourceLanguage`, so the direction is a property of
-   * the clip rather than a control that can be left blank. A Spanish take runs
-   * `es→en`; an English take runs into the other end of its pair. A run over a
-   * clip can therefore never be language-less, and can never be pointed at the
-   * language it is already in.
+   * A Recording declares its own `sourceLanguage`, so the SOURCE half of the
+   * direction is a property of the clip rather than a control that can be left
+   * blank. A run over a clip can therefore never be language-less, and can
+   * never be pointed at the language it is already in.
+   *
+   * TICKET 061 — THE TARGET HALF IS THE OPERATOR'S. `languageSelectionForSource`
+   * returns the first pair whose source matches, and `pairs[0]` is EN↔ES, so
+   * every English clip resolved to Spanish: EN→YUE was unreachable from Replay,
+   * and sweeps run through Replay, so the kept Cantonese track could not be
+   * produced at all. The choice is now made on a visible control (AC2) and read
+   * from here, so `run()` and `startSweep()` cannot disagree about it.
+   *
+   * The clip's own legal targets are the authority, never the stored choice: a
+   * 'Cantonese' picked for an English clip is not legal for a Spanish one, and
+   * resolving it to that clip's first legal target is what stops the choice
+   * leaking across a selection change.
    */
+  const targetOptions = targetLanguagesForSource(selectedRecording?.sourceLanguage ?? '');
+  const targetLanguage =
+    chosenTarget !== null && targetOptions.includes(chosenTarget)
+      ? chosenTarget
+      : targetOptions[0]!;
+
   const runLanguages = (): LanguageSelection =>
-    languageSelectionForSource(selectedRecording?.sourceLanguage ?? '');
+    languageSelectionForTarget(selectedRecording?.sourceLanguage ?? '', targetLanguage);
 
   const run = (): void => {
     // The guard mirrors startSweep's: the disabled button is the affordance,
@@ -756,6 +781,12 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
             recordingLabel={selectedRecording === null ? null : selectedRecording.label}
             config={config}
             onConfigChange={setConfig}
+            /* TICKET 061 — the operator's half of the direction. The options
+               are the SELECTED clip's legal targets, so the control can never
+               point a clip at the language it is already in. */
+            targetLanguages={selectedRecording === null ? null : targetOptions}
+            targetLanguage={targetLanguage}
+            onTargetLanguageChange={setChosenTarget}
             onRun={run}
             onBatchSweep={startSweep}
             batchProgress={batchProgress}

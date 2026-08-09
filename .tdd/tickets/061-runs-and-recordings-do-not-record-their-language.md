@@ -1,13 +1,13 @@
 ---
 id: 061
 title: Runs record no languagePair or direction, and Recordings record no lang — a controlled variable that is not recorded is not controlled
-status: pending
+status: done
 source: spec-audit + qa
 depends_on: []
 touches: [src/client/replay/runner.ts, src/client/views/ReplayView.tsx, src/client/state/ledger.ts, src/server/storage/types.ts, src/client/components/results/derive.ts, src/client/views/ResultsView.tsx]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — re-verified against the repo (one claim CORRECTED)
@@ -270,3 +270,66 @@ yourself editing them, you have gone out of scope.
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2174 passing / 0 failing. Golden eval case 11 (`a-run-records-its-own-direction`) now passes;
+eval overall unchanged at 8 pass / 5 fail (01/02/04 · 055, 10 · 060, 12 · 056).
+
+Ticket 062 had already delivered the client `Run` fields and the Replay wiring. Six items remained,
+all verified still-missing before any test was written:
+
+- **Server type mirrored.** `languagePair?` / `direction?` on `src/server/storage/types.ts`. The two
+  shapes are kept field-for-field because neither program may import the other; the test parses both
+  interface bodies and asserts the server declares every field the client does, so a two-name spot
+  check cannot drift.
+- **`abandonedRunStub`** — a second Run construction site that was missed — now carries the languages
+  from its own config, omitting the key entirely when the value is absent or `''`. Pinned through the
+  real `startBatch` budget-abort path, not only the seam. (`batch/runner.ts:646` spreads the stub, so
+  it inherits rather than being a fourth silent omission.)
+- **`groupByCategory`** keys `${category}|${arm}|${direction}`, with the `ResultsView` React key and
+  `data-direction` moved in step. EN→YUE and YUE→EN no longer collapse into one row.
+- **The gate.** Two clauses inside `isAggregatableRun` and nowhere else. A relocation into
+  `groupByCategory` or `isAggregatableUtterance` is caught, not just a deletion, because the locked
+  tests assert the verdict at the gate function itself.
+- **Stored Runs untouched.** No backfill, no inferred direction, no migration. A fieldless Run still
+  parses, lists, exports and round-trips byte-identical.
+
+### The scope finding
+
+`languageSelectionForSource` returned the **first** matching pair, so `'en'` always resolved to
+`EN↔ES`. `ReplayView` was its only caller and sweeps run through Replay — so **no Replay or sweep run
+could target Cantonese, and the kept Cantonese track (PRD §7) could not be produced at all.** AC2
+already specified the fix; Replay now has an operator-visible target-language control
+(`RunConfigPanel`, `[data-target-language]`), absent until a clip is selected, offering only targets
+that are not the clip's own language. Spanish stays the default for an EN clip, so 062's locked block
+still holds.
+
+### Adversarial review
+
+GREEN after 24 mutations. Every headline defect is caught, including the two relocation mutations
+(gate moved out of `isAggregatableRun`; fix wired to `run()` but not `startSweep()` — the repo's #1
+historical failure). All five fixture builders confirmed to be builders taking `Partial` overrides;
+no `expect` was weakened anywhere. The four pre-existing gate clauses were each deleted in turn to
+prove the new defaults mask nothing (34 / 34 / 16 / 26 tests red).
+
+Two review findings, both closed:
+
+1. The control's "absent until a clip is selected" contract was asserted in three code comments and
+   tested nowhere. Now pinned — mutating it renders a lone "Spanish" button belonging to no clip,
+   which is PRD §17 25c verbatim.
+2. **The rows were split but the table could not report it.** Two rows both read "numbers-dates ·
+   Arm B" with different numbers and no on-screen way to tell them apart — this ticket's own headline
+   complaint, reproduced at the presentation layer. `direction` is now a visible column, rendered
+   from `row.directionCell`; absence reads `not recorded` (not "not measured" — direction is a
+   declared controlled variable, not a measurement), and `''` is normalised to absence so no empty
+   string reaches React's key.
+
+### One locked test repaired by the orchestrator
+
+`ResultsView.category.test.tsx:194` used `within(row).getByText(formatMs(p50))`. Each row there holds
+n = 1, and nearest rank makes p50 === p95, so both cells render `1.00 s` and the query threw
+`getMultipleElementsFoundError` — an ambiguous query, not a missing split. Widening the fixture was
+not available (the sibling test pins `data-n` as `['1','1']`). Replaced with `getAllByText(...)` plus
+a strictly stronger clause: the row must NOT contain the other direction's p50. Verified to bite —
+splitting the rows while pooling the percentiles goes red on exactly that line.

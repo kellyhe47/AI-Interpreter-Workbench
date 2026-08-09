@@ -427,10 +427,28 @@ export interface WerCategoryRow extends WerAggregate {
   arm: ArmTag;
 }
 
-/** One row of the "By utterance category" secondary tab: category × arm. */
+/**
+ * One row of the "By utterance category" secondary tab: category × arm ×
+ * DIRECTION (ticket 061).
+ */
 export interface CategoryGroupRow {
   category: UtteranceCategory;
   arm: ArmTag;
+  /**
+   * TICKET 061 — the direction the samples in this row ran, e.g. 'en→yue'.
+   * Part of the row's IDENTITY, not decoration: EN→YUE and YUE→EN are separate
+   * claims (PRD §7) and the asymmetry between them is the finding, so a row
+   * that could not report its direction would be a split the table cannot show.
+   * Optional only because the type is a public shape; every row `groupByCategory`
+   * builds carries one, because `isAggregatableRun` admits no sample without it.
+   */
+  direction?: string;
+  /**
+   * The rendered direction cell, decided HERE so no view can invent a blank —
+   * the same division of labour as `costCell`. A row whose Run recorded no
+   * direction reads `DIRECTION_NOT_RECORDED_CELL`, never an empty string.
+   */
+  directionCell: string;
   n: number;
   p50Ms: number | null;
   p95Ms: number | null;
@@ -879,26 +897,49 @@ export function groupByRecording(ledger: RunLedger): RecordingGroupRow[] {
  * Rows are keyed on (category × DERIVED arm), never on category alone: a mixed
  * ledger yields several rows per category and a category-only lookup silently
  * picks whichever arm was appended first.
+ *
+ * TICKET 061 — AND ON THE DIRECTION THE RUN RECORDED. Without it two samples
+ * that differ ONLY in the language they ran land in the same row and are
+ * averaged into a single number — a claim about no language in particular, over
+ * a population that was half Spanish and half Cantonese. EN→YUE and YUE→EN are
+ * separate claims (PRD §7) and the asymmetry between them is the finding, so
+ * pooling them makes the one comparison the corpus was built to support
+ * unrepresentable in the table §8 calls "where the heterogeneity lives".
+ *
+ * The direction is read off the PARENT RUN, which is the only thing that
+ * records it, and it is always present here: `isAggregatableRun` admits no run
+ * that failed to record one.
  */
 export function groupByCategory(ledger: RunLedger): CategoryGroupRow[] {
   const order: string[] = [];
-  const groups = new Map<string, Array<{ category: UtteranceCategory; sample: RunSample }>>();
+  const groups = new Map<
+    string,
+    Array<{ category: UtteranceCategory; direction: string | undefined; sample: RunSample }>
+  >();
 
   for (const run of ledger.getRuns() as AnnotatedRun[]) {
     for (const sample of runSamples(run)) {
       // The gate, through the parent Run. A record inside an ad-hoc, manual,
-      // failed or fixture-sourced Run reaches nothing here.
+      // failed or fixture-sourced Run reaches nothing here — and, since 061, a
+      // record inside a Run that named no direction reaches nothing either.
       if (!isAggregatableUtterance(run, sample.utterance)) continue;
       const category = sampleCategory(sample);
       if (category === undefined) continue;
-      const key = `${category}|${sample.arm}`;
+      // ABSENT STAYS ABSENT. The old `?? ''` turned "this Run recorded no
+      // direction" into a VALUE — one that renders as an empty table cell and
+      // that collides the DOM row key built from this same triple. `''` is the
+      // shape the runner's own `?? ''` used to store, so it is normalised here
+      // rather than trusted.
+      const direction =
+        run.direction === undefined || run.direction === '' ? undefined : run.direction;
+      const key = `${category}|${sample.arm}|${direction ?? DIRECTION_ABSENT_KEY}`;
       let group = groups.get(key);
       if (!group) {
         group = [];
         groups.set(key, group);
         order.push(key);
       }
-      group.push({ category, sample });
+      group.push({ category, direction, sample });
     }
   }
 
@@ -911,11 +952,45 @@ export function groupByCategory(ledger: RunLedger): CategoryGroupRow[] {
     return {
       category: first.category,
       arm: first.sample.arm,
+      direction: first.direction,
+      // Rendered ONCE, here, so the table cannot show a blank where a Run
+      // recorded nothing (see `formatDirection`).
+      directionCell: formatDirection(first.direction),
       n: group.length,
       ...percentilesOf(samples),
       ...costOf(group.map((entry) => entry.sample.cost)),
     };
   });
+}
+
+/**
+ * TICKET 061 — what a by-category row shows where its Run recorded no
+ * direction. Absence is NOT a blank: an empty cell reads as "this table has no
+ * direction column here", which is indistinguishable from a rendering bug,
+ * while the standing rule is that an unrecorded fact says so in words — the
+ * same rule `WER_NOT_MEASURED_CELL` and `costCell` follow.
+ *
+ * "not recorded", not "not measured": a direction is a CONTROLLED VARIABLE the
+ * operator declares, never a measurement anyone could have taken later.
+ */
+export const DIRECTION_NOT_RECORDED_CELL = 'not recorded';
+
+/**
+ * The grouping-key segment standing in for a direction that was never
+ * recorded. A NUL-prefixed literal, so it cannot collide with any real
+ * direction ('en→yue', 'yue→en'), and — unlike the `''` it replaces — it
+ * cannot collide with the DOM row key of a DIFFERENT row either.
+ */
+export const DIRECTION_ABSENT_KEY = '\u0000no-direction';
+
+/**
+ * TICKET 061 — one direction, as an operator reads it. A pure readout of what
+ * the Run recorded (never re-derived from transcripts, which is the guess the
+ * ticket forbids), with absence spelled out rather than blanked.
+ */
+export function formatDirection(direction: string | undefined): string {
+  if (direction === undefined || direction === '') return DIRECTION_NOT_RECORDED_CELL;
+  return direction;
 }
 
 /**

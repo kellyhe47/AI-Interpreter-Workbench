@@ -52,6 +52,19 @@ export interface RunConfigPanelProps {
   recordingLabel: string | null;
   config: ReplayConfigState;
   onConfigChange: (next: ReplayConfigState) => void;
+  /**
+   * TICKET 061 — every LEGAL target language for the selected clip, or null
+   * when no Recording is selected (there is nothing to target, so the control
+   * is absent rather than empty — PRD §17 25c, the same rule the actions obey).
+   *
+   * The list is the caller's, derived from the clip's own `sourceLanguage`, so
+   * the clip's language is never among the options: a run into the language the
+   * clip is already in measures nothing.
+   */
+  targetLanguages?: readonly string[] | null;
+  /** The target in force — the operator's choice, or the clip's first legal one. */
+  targetLanguage?: string;
+  onTargetLanguageChange?: (language: string) => void;
   onRun: () => void;
   onBatchSweep: () => void;
   /** Rendered inside the panel while a sweep is in flight. */
@@ -94,6 +107,13 @@ const CASCADE = 'Cascade';
 
 const RUN = 'Run';
 const BATCH_SWEEP = 'Batch sweep…';
+
+/**
+ * TICKET 061 — the direction is an OPERATOR choice, and this is where it is
+ * made. Named for what it selects: the clip already fixes the SOURCE, so the
+ * only thing left to decide is what the run translates INTO.
+ */
+const TARGET_LABEL = 'target language';
 
 const CONTEXT_LABEL = 'replay context';
 /** Says the quantity in words: a locked field, never an empty control. */
@@ -227,6 +247,9 @@ function tagPillStyle(named: boolean): CSSProperties {
 export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement {
   const { config } = props;
 
+  /** TICKET 061 — no Recording selected means no clip, so no legal targets. */
+  const targetLanguages = props.targetLanguages ?? null;
+
   /** No Recording to act on — the precondition both actions need (ticket 024). */
   const noSelection = props.recordingLabel === null;
 
@@ -323,6 +346,44 @@ export default function RunConfigPanel(props: RunConfigPanelProps): ReactElement
               </div>
             ))
           : null}
+
+        {/* TICKET 061 — THE CONTROL THE DIRECTION COMES FROM. Absent until a
+            Recording is selected, because the legal targets are a property of
+            the clip: without one there is no list to offer, and an empty group
+            would read as a choice that exists and happens to be unavailable. */}
+        {targetLanguages !== null && targetLanguages.length > 0 ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+            <span style={fieldLabelStyle}>{TARGET_LABEL}</span>
+            <div
+              data-target-language={props.targetLanguage ?? ''}
+              style={{
+                display: 'flex',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                overflow: 'hidden',
+              }}
+            >
+              {targetLanguages.map((language, index) => (
+                <button
+                  key={language}
+                  type="button"
+                  aria-pressed={language === props.targetLanguage}
+                  onClick={() => props.onTargetLanguageChange?.(language)}
+                  style={
+                    index === targetLanguages.length - 1
+                      ? {
+                          ...toggleButtonStyle(language === props.targetLanguage),
+                          borderRight: 'none',
+                        }
+                      : toggleButtonStyle(language === props.targetLanguage)
+                  }
+                >
+                  {language}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         <div data-replay-context="" data-locked="true" style={lockedFieldStyle}>
           <span style={fieldLabelStyle}>{CONTEXT_LABEL}</span>

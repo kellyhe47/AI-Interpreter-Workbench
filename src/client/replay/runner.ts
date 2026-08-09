@@ -579,7 +579,7 @@ export function abandonedRunStub(args: {
   reason: string;
 }): Run {
   const config = resolveConfig(args.config);
-  return {
+  const stub: Run = {
     id: args.id,
     recordingId: args.recordingId,
     architecture: config.architecture,
@@ -596,6 +596,22 @@ export function abandonedRunStub(args: {
     errors: [args.reason],
     createdAt: args.createdAt,
   };
+
+  // TICKET 061 — THE SECOND CONSTRUCTION SITE, under the SAME rule as the real
+  // Run below. An abandoned row is the only record that a rep was attempted at
+  // all and it rides the arm's provenance denominator forever, so a stub that
+  // cannot say which direction the sweep was running leaves the hole this
+  // ticket exists to close, in the one table whose job is to report what was
+  // attempted. Read off the same `config` the transport would have been started
+  // with — one source, never two.
+  //
+  // ABSENCE STAYS ABSENCE. `''` is what `runner.ts` fills the transport config
+  // with, and an empty string in an append-only ledger is a VALUE — a row
+  // claiming a pair it never had. The KEY is omitted, not written blank.
+  if ((config.languagePair ?? '') !== '') stub.languagePair = config.languagePair;
+  if ((config.direction ?? '') !== '') stub.direction = config.direction;
+
+  return stub;
 }
 
 /**

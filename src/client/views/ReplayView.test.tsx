@@ -1328,3 +1328,53 @@ describe('TICKET 061 — an operator-visible control picks the target language',
     expect(config.targetLanguage).toBe('English');
   });
 });
+
+/* ============ the target-language control is a property of the SELECTED clip */
+
+/**
+ * COVERAGE GAP CLOSED — the "absent until a Recording is selected" half of the
+ * 061 control contract was asserted in three code comments (ReplayView.tsx
+ * :784-786, RunConfigPanel.tsx :350-353) and in no test: every existing case
+ * selects a Recording first, so rendering the control with nothing selected
+ * left the whole suite green.
+ *
+ * PRD §17 25c — AN OPERATION THAT IS DISALLOWED HAS NO AFFORDANCE. The legal
+ * targets are a property of the CLIP, so with no clip there is no list to
+ * offer, and a group rendered anyway "would read as a choice that exists and
+ * happens to be unavailable".
+ *
+ * RunConfigPanel's own `targetLanguages.length > 0` guard cannot carry this:
+ * `targetLanguagesForSource('')` is NOT empty — it falls back to the default
+ * pair's forward target (sessionMachine.ts:314) — so an unselected view that
+ * forwarded `targetOptions` unconditionally would render a one-button
+ * 'Spanish' control belonging to no clip at all. The withholding has to happen
+ * in the VIEW, and this is the test that makes that line load-bearing.
+ */
+describe('ReplayView — the target-language control appears only with a clip', () => {
+  it('is ABSENT with no Recording selected, and present once one is', async () => {
+    await mount(DEFAULT_LIBRARY);
+
+    // Not "disabled", not "empty" — not in the document.
+    expect(q('[data-target-language]')).toBeNull();
+    expect(screen.queryByText('target language')).toBeNull();
+    // And no stray option from the fallback pair is operable either.
+    expect(screen.queryByRole('button', { name: 'Spanish' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cantonese' })).toBeNull();
+
+    await selectRecording(CORPUS_REC.id);
+
+    expect(q('[data-target-language]')).not.toBeNull();
+    expect(screen.getByText('target language')).toBeInTheDocument();
+    expect(
+      within(get('[data-target-language]'))
+        .getAllByRole('button')
+        .map((button) => (button.textContent ?? '').trim()),
+    ).toEqual(['Spanish', 'Cantonese']);
+  });
+
+  it('an EMPTY library never renders it — there is no clip to select', async () => {
+    await mount({ recordings: [] });
+    expect(q('[data-target-language]')).toBeNull();
+    expect(screen.queryByText('target language')).toBeNull();
+  });
+});

@@ -88,6 +88,11 @@ function run(overrides: Partial<AnnotatedRun> & Pick<AnnotatedRun, 'id'>): Annot
     armTag: 'B',
     origin: 'sweep',
     status: 'complete',
+    // TICKET 061 — a builder default, exactly like `origin: 'sweep'` above: the
+    // gate requires recorded languages, so a fixture Run that omitted them
+    // would be excluded for a reason none of these four cases is about.
+    languagePair: 'EN↔ES',
+    direction: 'en→es',
     timings: { speech_end: T0, audio_queued: T0 + EXCLUDED_LATENCY_MS },
     transcripts: { source: 'hello', target: 'hola' },
     outputAudioPath: `runs/${overrides.id}.out.wav`,

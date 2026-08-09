@@ -107,6 +107,11 @@ function makeRun(req: BatchExecutorRequest, status: RunStatus): Run {
     // adapter does. A warmup run must not be handed 'sweep'.
     origin: req.origin,
     status,
+    // TICKET 061 — the fake mirrors runOnce here too: the Run records the
+    // languages of the config it ran, so the configuration is the one source
+    // and this builder invents nothing. CONFIG_A/CONFIG_B both carry them.
+    languagePair: req.config.languagePair,
+    direction: req.config.direction,
     timings: { speech_end: 1_000, audio_queued: 1_500 },
     transcripts: { source: 'hello', target: 'hola' },
     cost: 0.01,

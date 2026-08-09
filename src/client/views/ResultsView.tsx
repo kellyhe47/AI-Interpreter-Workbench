@@ -82,6 +82,10 @@
  *   [data-observation]             coverage per-cell observation note
  *   [data-time-to-add]             one of the three time-to-add tiles
  *   [data-category-row][data-category="<category>"][data-n="<n>"]
+ *                                  [data-direction="<direction>"]
+ *   [data-category-direction]      ticket 061 — that row's direction, VISIBLE:
+ *                                  the split has to be readable, not only
+ *                                  machine-readable
  *   [data-category-wer]            ticket 042 — that row's WER cell
  *   [data-recording-row][data-recording="<id>"][data-arm][data-excluded]
  *   [data-failed-count][data-run-count]  on a recording row, ONLY when the
@@ -114,6 +118,7 @@
 import { useEffect, useState, type CSSProperties, type ReactElement, type ReactNode } from 'react';
 import { armLabel, type ArmTag } from '../../core/arms';
 import {
+  DIRECTION_ABSENT_KEY,
   WER_NOT_MEASURED_CELL,
   deriveComparison,
   deriveLiveModel,
@@ -326,7 +331,10 @@ function gridStyle(columns: string, first: boolean): CSSProperties {
 const METRIC_COLUMNS = '1.5fr 1fr 1fr 1fr';
 const COVERAGE_COLUMNS = '1.5fr 1fr 1fr 1fr 1fr';
 /** Ticket 042 added the seventh track: the by-category WER cell. */
-const CATEGORY_COLUMNS = '1.5fr .8fr .5fr 1fr 1fr 1fr 1fr';
+// TICKET 061 follow-up — a `direction` column sits between `arm` and `N`, in
+// the same order as the row's identity triple (category × arm × direction).
+// Sized like `arm`: both hold a short identity token, not a number.
+const CATEGORY_COLUMNS = '1.5fr .8fr .8fr .5fr 1fr 1fr 1fr 1fr';
 const RECORDING_COLUMNS = '1.3fr 1.6fr .6fr .8fr .5fr .8fr .8fr .8fr 1.4fr';
 
 /* -------------------------------------------------------------- fragments -- */
@@ -743,6 +751,7 @@ function CategoryCard(props: { rows: CategoryGroupRow[]; werRows: WerCategoryRow
         <div data-grid-header="" style={gridStyle(CATEGORY_COLUMNS, true)}>
           <div style={headerCellStyle}>category</div>
           <div style={headerCellStyle}>arm</div>
+          <div style={headerCellStyle}>direction</div>
           <div style={headerCellStyle}>N</div>
           <div style={headerCellStyle}>p50</div>
           <div style={headerCellStyle}>p95</div>
@@ -751,9 +760,17 @@ function CategoryCard(props: { rows: CategoryGroupRow[]; werRows: WerCategoryRow
         </div>
         {props.rows.map((row) => (
           <div
-            key={`${row.category}|${row.arm}`}
+            // TICKET 061: the DIRECTION is part of the row's identity, here as
+            // well as in derive.ts. Splitting only the derivation would leave
+            // two rows sharing one React key — React logs the collision and
+            // then reconciles two different measurements onto one child, so the
+            // pooling this ticket removes would survive in the rendered output.
+            key={`${row.category}|${row.arm}|${row.direction ?? DIRECTION_ABSENT_KEY}`}
             data-category-row=""
             data-category={row.category}
+            // Its own attribute, exactly as `data-n` is: the two directions have
+            // to be distinguishable without parsing a concatenated text blob.
+            data-direction={row.direction}
             // TICKET 032: N is the number this row exists to correct — a SAMPLE
             // count (utterances x reps), never a rep count. Exposed as its own
             // attribute so it is assertable without parsing a text blob.
@@ -762,6 +779,19 @@ function CategoryCard(props: { rows: CategoryGroupRow[]; werRows: WerCategoryRow
           >
             <div style={labelCellStyle}>{row.category}</div>
             <div style={cellStyle}>{armLabel(row.arm)}</div>
+            {/* TICKET 061 follow-up — THE SPLIT, MADE READABLE. 061 split these
+                rows on direction and showed it only in `data-direction`, so a
+                mixed-direction ledger rendered two rows both reading
+                "numbers-dates · Arm B" with different numbers and no on-screen
+                way to tell them apart — this ticket's own complaint, one layer
+                up. EN→YUE and YUE→EN are separate claims (PRD §7) and the
+                asymmetry between them is the finding.
+                The cell comes from the DERIVATION, exactly as `costCell` does,
+                so a row whose Run recorded no direction reads `not recorded`
+                and never an empty cell. */}
+            <div data-category-direction="" style={cellStyle}>
+              {row.directionCell}
+            </div>
             <div style={cellStyle}>{row.n}</div>
             <div data-arm={row.arm} style={cellStyle}>
               {formatMs(row.p50Ms)}
