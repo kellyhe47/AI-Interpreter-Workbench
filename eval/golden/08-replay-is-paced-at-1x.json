@@ -1,0 +1,11 @@
+{
+  "name": "replay-is-paced-at-1x",
+  "why": "PRD §7: dumping the clip invalidates VAD, endpointing and every latency figure — and it would look like it worked. This is the failure that is invisible in a green suite, so it is pinned on wall-clock, not on frame count alone.",
+  "surface": "pure",
+  "given": { "recording": { "duration_ms": 20940, "sample_rate": 24000, "frame_ms": 20 } },
+  "expect": {
+    "result_type": "pacing_trace",
+    "counts": { "frames_sent": 1047 },
+    "within_tolerance": { "field": "wall_clock_ms", "target": 20940, "pct": 10 }
+  }
+}

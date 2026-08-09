@@ -1,0 +1,26 @@
+{
+  "name": "live-intervals-are-anchored-and-commensurable",
+  "why": "Rubric must-have #7. Ticket 051 round 2 fixed a defect where the two arms' totals measured DIFFERENT quantities under one label: cascade stamps audio_queued per chunk (last chunk wins = time-to-LAST-audio) while Arm A stamps it once from output_audio_buffer.started (time-to-FIRST-audio). Both now anchor on firstAudio = tts_first_byte ?? audio_queued. Live cannot measure endpointing at all — it has no ground truth for when the human stopped — so that row is REMOVED, not blanked. Observed working at HEAD ca40359.",
+  "surface": "dom",
+  "given": {
+    "cascade_marks": ["vad_fired", "stt_final", "mt_first_token", "tts_first_byte", "audio_queued"],
+    "realtime_marks": ["server_speech_stopped", "audio_queued"]
+  },
+  "expect": {
+    "result_type": "interval_breakdown",
+    "counts": { "cascade_rows": 4, "realtime_rows": 1 },
+    "must_include": [
+      { "id": "transcribe:detected end of speech → transcript", "reason": "every row names the two events it spans — 'endpointing' is jargon that needs a glossary" },
+      { "id": "translate:transcript → translated text", "reason": "same" },
+      { "id": "synthesize:translated text → audio starts", "reason": "same" },
+      { "id": "deliver:audio starts → audio complete", "reason": "outside the headline; shown as information" },
+      { "id": "realtime.model.opaque", "reason": "explicitly labelled opaque, not hidden" },
+      { "id": "total_label_identical_across_arms", "reason": "'total detected end of speech → audio starts' — byte-identical, or the two arms' numbers get compared as if they were the same quantity" }
+    ],
+    "invariants": [
+      { "id": "headline_sums", "rule": "transcribe + translate + synthesize == total; deliver is EXCLUDED" },
+      { "id": "bars_decompose_the_headline", "rule": "the three headline bars sum to 100%; deliver renders a track and NO fill" }
+    ],
+    "must_not_contain": ["endpointing", "queue"]
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "armtag-is-derived-never-declared",
+  "why": "PRD §6 quarantine (decision 22d): membership is DERIVED, never declared, so mislabelling cannot move a number. Rubric #3 — 'providers can be swapped without rewriting the app' — is graded on exactly this seam.",
+  "surface": "pure",
+  "given": {
+    "configs": [
+      { "id": "exact-b",  "architecture": "cascade",  "triple": ["gpt-4o-transcribe", "gpt-4o-mini", "gpt-4o-mini-tts"] },
+      { "id": "exact-c",  "architecture": "cascade",  "triple": ["gpt-4o-transcribe", "gpt-4o-mini", "eleven_flash_v2_5"] },
+      { "id": "one-off",  "architecture": "cascade",  "triple": ["gpt-4o-transcribe", "claude-haiku-4-5", "gpt-4o-mini-tts"] },
+      { "id": "realtime", "architecture": "realtime", "triple": null },
+      { "id": "liar",     "architecture": "cascade",  "triple": ["gpt-4o-transcribe", "claude-haiku-4-5", "gpt-4o-mini-tts"], "declared_armTag": "B" }
+    ]
+  },
+  "expect": {
+    "result_type": "arm_tags",
+    "must_include": [
+      { "id": "exact-b:B", "reason": "matches the frozen Arm B triple" },
+      { "id": "exact-c:C", "reason": "exactly one stage differs from B" },
+      { "id": "one-off:ad-hoc", "reason": "MT deviates; explorable, never evidence" },
+      { "id": "realtime:A", "reason": "sealed box" },
+      { "id": "liar:ad-hoc", "reason": "a declared armTag that disagrees with the configuration is IGNORED entirely" }
+    ]
+  }
+}

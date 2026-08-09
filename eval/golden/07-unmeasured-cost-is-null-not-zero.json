@@ -1,0 +1,16 @@
+{
+  "name": "unmeasured-cost-is-null-not-zero",
+  "why": "Ticket 052. Zero is a measurement; null is an absence, and $0.00 reads as 'this configuration is free'. VERIFIED STILL LEAKING at HEAD ca40359: Live's footer correctly reads 'session not measured · 0 of 0 metered', but Results › By Recording renders '$0.000' and Replay's run cards render '$0.000/min'. Cost is a rubric Key Impact Metric.",
+  "surface": "dom",
+  "given": {
+    "run": { "architecture": "cascade", "usage": { "stt": null, "mt": null, "tts": null }, "audio_ms": 20940 }
+  },
+  "expect": {
+    "result_type": "cost_record",
+    "total_usd": null,
+    "per_minute": null,
+    "surfaces_checked": ["live_footer", "results_by_recording", "replay_run_card", "results_experiment_card", "export_bundle"],
+    "must_include": [{ "id": "not measured", "reason": "absence is stated on EVERY surface, never rendered as a figure on any" }],
+    "must_not_contain": ["$0.000", "$0.00", "0.000/min"]
+  }
+}

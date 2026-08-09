@@ -1,0 +1,16 @@
+{
+  "name": "output-audio-is-retained-for-blind-scoring",
+  "why": "VERIFIED: every run in the UI reads 'no output audio stored'. PRD §7 requires output audio be retained; §10 requires scoring be playback-only 'because reading the text would let the Mandarin-pronunciation class of error pass unnoticed' — a TTS that reads Cantonese text aloud in Mandarin produces a transcript that reads correctly and audio that is wrong. With the Cantonese track kept, this is the single most distinctive finding in the project and it is detectable ONLY by listening. BlindCompare.tsx exists and has never scored anything.",
+  "surface": "pure",
+  "given": {
+    "run": { "id": "any-complete", "armTag": "C", "utterances": 4 }
+  },
+  "expect": {
+    "result_type": "run_record",
+    "must_include": [
+      { "id": "outputAudioPath", "reason": "a complete run that produced audio must retain it, or quality is structurally unmeasurable" }
+    ],
+    "counts": { "blind_compare_playable_pairs": 1 },
+    "must_not_contain": ["no output audio stored"]
+  }
+}

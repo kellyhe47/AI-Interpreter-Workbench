@@ -63,3 +63,24 @@ Give the provider protocol a usage channel, and meter the two stages that curren
   is ever published.
 - The `realtime-cached-tokens-are-a-subset` assumption is registered `verified: false` until
   confirmed against a live `response.done`. That confirmation is an operator task, not a code task.
+
+---
+
+## STATUS: COMPLETE ON BRANCH, PARKED — not merged
+
+Implementation is green on `tdd/053` (129 files / 2114 tests, both typechecks, build clean). It is
+**not merged**, by operator decision: it optimises the precision of a cost figure with zero samples
+behind it, while the evidence layer — a real corpus, a sweep, and the write-up — is the actual gap.
+
+**What it established, which stands regardless of when it lands:**
+- `openai-mt` can report usage with `stream_options: { include_usage: true }`
+- `anthropic-mt` can, from `message_start` + `message_delta`
+- `elevenlabs-tts` can, from `alignment.chars` — **a reported figure that supersedes 052's
+  `chunk_length_schedule` modelling**, removing an unverified assumption rather than adding one
+- **`openai-tts` structurally cannot.** `POST /v1/audio/speech` returns raw PCM and no usage, while
+  `gpt-4o-mini-tts` bills audio-out TOKENS. Bytes are not tokens. **Arm B's cascade total stays
+  `null` and that is the finding, not a gap** — one provider tells you what you spent and the other
+  does not, which is itself evidence on the rubric's *operational control* dimension.
+
+**Reopen only if time remains after the write-up.** Until then cascade cost is reported per stage
+where metered and `not measured` otherwise — never estimated into a total.

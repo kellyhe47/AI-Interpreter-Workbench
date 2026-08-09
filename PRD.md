@@ -2,7 +2,17 @@
 
 **Realtime API vs. Cascade Pipeline**
 
-> Scope contract: everything in this document will be built. Nothing here is aspirational. Items considered and cut are recorded in **§17** with reasoning, not carried as optional scope. **§15 records what is built today and what remains** — the contract holds, the work is partially done.
+> **Scope contract (AMENDED 2026-08-09).** The original contract read *"everything in this document
+> will be built; nothing here is aspirational."* Against a brief that allots **3–4 days / 15–20
+> hours**, that promise is what kept the backlog regenerating faster than it drained — 048 spawned
+> 050; 051 spawned 052 spawned 053. It is hereby narrowed.
+>
+> **The contract now: everything in §16 Deliverables will be built. §15A names what is cut, and §15B
+> what is deferred, each with a reason.** A cut item is not a debt and does not return as a ticket.
+> Items considered and rejected during design remain in **§17**.
+>
+> **The rubric is the grading contract; this document is the method.** Where they disagree, the
+> rubric wins and the disagreement is recorded rather than resolved by building both.
 
 ---
 
@@ -947,6 +957,64 @@ Ordered by dependency, not by day.
 ### Process rules
 - **Commit continuously**, scoped to logical units. The sequence above produces natural commit boundaries. Git history reflecting iterative development is graded and cannot be reconstructed afterward.
 - **AGENTS.md written from day 1**, accreted live — actual instructions that worked, corrections made, places the agent was overridden. Written from memory on day 10 it would be vague and partly invented.
+
+---
+
+## 15A. Cut — 2026-08-09
+
+Cut against the brief's 3–4 day / 15–20 hour envelope. **A cut item is not a debt.** None of these
+is graded; each was costing days.
+
+| § | Cut | Reason |
+|---|---|---|
+| §7, §8 | **5-repetition sweeps → 3** | 3 reps gives p50 and a defensible interval. p95 over 60 samples of read speech is precision nobody is grading, and it halves the operator's blocked time. |
+| §10 | **In-app blind pairwise scoring as a graded subsystem** | A whole subsystem for one evaluator and ~24 judgements. **The component stays** (`BlindCompare.tsx` is built and works) and the operator uses it — but the finding is a listened-to note in `FINDINGS.md`, not a persisted scoring corpus. |
+| §7, §8 | **Heap sampling / leak detection / 60-minute fixture soak** | The rubric asks only for *"without… memory leaks"* inside the one 5-minute session. One before/after heap number there satisfies it. See ticket 058 — the scaffolding is typed through five layers and hardcoded `null`. |
+| §8 | **Counterbalanced order + warmup discard as enforced machinery** | Real methodology, but at 3 recordings it is a paragraph of disclosure, not a runner feature. **The batch runner already implements it and stays** — this cuts the obligation to defend and extend it, not the code. |
+| §14 | **EC2 + Caddy deploy** | Rubric: *"Optional… Local-only with clear setup instructions is fine."* AWS credentials absent. |
+| §7 | **Recording soft-delete / purge / undeletable-corpus lifecycle** | Three rules and their tests defending a library of four items. |
+| §5, §6 | **Second SAME-VENDOR option per stage** (`gpt-4o-mini-transcribe`, `eleven_multilingual_v2`) | The rubric grades the *cross-vendor* swap. Two options per stage prove it; the same-vendor contrast is a nice-to-have. |
+
+### Explicitly NOT cut — ruled in, 2026-08-09
+
+- **The Cantonese track (§5, §9, §11) stays.** The rubric's *"minimum: English ↔ Spanish"* is a
+  floor. Cantonese is the only place this project answers *provider flexibility* and
+  *time-to-onboard a new language pair* — two named Key Impact Metrics — with evidence rather than
+  assertion. It is also the sharpest evidence for the auditability thesis: §10's Mandarin-
+  pronunciation trap is a failure *a text-only evaluation scores as a success*.
+  **Consequence:** retaining output audio per run (ticket 056) becomes **load-bearing**, because
+  that finding is audible only. It moves ahead of the sweep.
+- **The Help tab stays.** Not in §16 and not in the rubric, but it is the clearest prose in the
+  project and it is the write-up's first draft (ticket 057 harvests it). Do not extend it — new
+  prose belongs in `FINDINGS.md`.
+
+## 15B. Deferred — not this cycle
+
+| Item | Reason |
+|---|---|
+| **050 · idempotent run POST** | Requires the server to accept a connection and never respond. Ticket 048 already surfaces the loss in `summary.failures`; the residual is one provenance denominator reading low, and it is pinned by an assertion that must be *updated*, never deleted. |
+| **026 · LiveSession records configured rather than actual providers** | The reporting layer is already gated. Deferred by design since it was filed. |
+| **053 · provider usage channel** | Complete and green on `tdd/053`, **not merged.** It refines the precision of a cost figure with zero samples behind it. Its findings stand — see the ticket. Reopen only if time remains after the write-up. |
+
+## 15C. Status correction — 2026-08-09
+
+**Every stored record predates the code that would have populated it.** No record carries
+`pricingVersion` (they predate `core/pricing.ts`); all 8 LiveSessions store `p50: null` (they predate
+ticket 051); 2 of 3 Runs render every stage as `—` for the same reason. **051 and 052 are correct and
+landed. Nothing has been re-run since.**
+
+Re-running is worth more than the next three tickets combined, and no amount of further code changes
+that.
+
+**§15 item 11 (real corpus) is now partially resolved.** Three EN Recordings were recorded through
+the app's own `Record new clip` flow on 2026-08-09 — 12 utterances, every one categorised with
+verbatim reference text, `origin: 'corpus'`, `corpusVersion: 'corpus-v1'`. No import step was needed
+or built: `RecordTake.tsx` already produces exactly the shape the pipeline consumes. **The 36
+committed `corpus/*.wav` files are synthetic tone bursts and are deleted by ticket 054** — the
+generator's own header states *"a tone burst + silence tail… NOT speech."*
+
+Remaining on item 11: **YUE takes 1–3** (solo, improvised, no reference text) and **ES takes 1–3**
+(blocked on the coworker — the only externally-blocked item in the project).
 
 ---
 

@@ -1,0 +1,22 @@
+{
+  "name": "experiment-card-requires-real-sweep-samples",
+  "why": "PRD §8: 'Empty states are mandatory… so polished placeholders can never be mistaken for measured evidence.' Observed on 2026-08-09 at HEAD ca40359: BOTH cards correctly rendered their empty states over the 3 manual runs on disk. This case LOCKS that behaviour rather than reporting a defect — the source audit claimed Exp 2 rendered `p50 1.15 s` / `5 of 5 reps completed`, which did not reproduce in a browser hydrated from the server.",
+  "surface": "dom",
+  "given": {
+    "ledger_runs": [
+      { "armTag": "A", "origin": "manual", "status": "failed" },
+      { "armTag": "B", "origin": "manual", "status": "complete" },
+      { "armTag": "A", "origin": "manual", "status": "complete" }
+    ]
+  },
+  "expect": {
+    "result_type": "experiment_card",
+    "exp1": { "state": "empty", "digits_rendered": 0 },
+    "exp2": { "state": "empty", "digits_rendered": 0 },
+    "must_include": [
+      { "id": "no sweep runs recorded for Arm A vs Arm B", "reason": "observed verbatim" },
+      { "id": "no sweep runs recorded for Arm B vs Arm C", "reason": "observed verbatim" }
+    ],
+    "must_not_contain": ["reps completed", "of 65 samples", "p50"]
+  }
+}

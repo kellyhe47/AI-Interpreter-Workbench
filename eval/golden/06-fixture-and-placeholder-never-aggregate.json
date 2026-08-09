@@ -1,0 +1,21 @@
+{
+  "name": "fixture-and-placeholder-never-aggregate",
+  "why": "PRD §8 hard rule: 'No number reported in the write-up may come from a fixture run.' VERIFIED: scripts/generate-placeholder-corpus.mjs states 'Every clip is a tone burst + silence tail — NOT speech. The manifest is marked placeholder so no reported number can come from it.'",
+  "surface": "pure",
+  "given": {
+    "records": [
+      { "id": "r1", "providers": { "stt": "fixture", "mt": "fixture", "tts": "fixture" } },
+      { "id": "r2", "corpusId": "placeholder-v0", "providers": { "stt": "openai", "mt": "openai", "tts": "openai" } },
+      { "id": "r3", "corpusId": "corpus-v1", "providers": { "stt": "openai", "mt": "openai", "tts": "openai" } }
+    ]
+  },
+  "expect": {
+    "result_type": "aggregate_input",
+    "counts": { "samples_admitted": 1 },
+    "must_include": [{ "id": "r3", "reason": "real providers on a real corpus" }],
+    "must_exclude": [
+      { "id": "r1", "reason": "fixture latency is a configured constant, not a measurement" },
+      { "id": "r2", "reason": "the placeholder corpus is a tone burst; STT has nothing to transcribe" }
+    ]
+  }
+}

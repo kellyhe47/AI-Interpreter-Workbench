@@ -1,0 +1,23 @@
+{
+  "name": "server-ledger-is-the-only-aggregate-source",
+  "why": "VERIFIED P0-1. useSessionController.ts:740 appends a LiveSession to the local ledger UNCONDITIONALLY, then fires `liveSessions.create(session).catch(() => {})` — a swallowed rejection. A failed POST therefore leaves a session in the browser that the repo never receives, and the aggregate reads that store. PRD §8: 'One ledger under every view… a metric cannot drift between screens or between a screen and the write-up.' Scope note: Runs canNOT diverge — appendRun is called only from hydrateLedger.ts:131.",
+  "surface": "pure",
+  "given": {
+    "server": { "live_sessions": 8, "utterances": 31 },
+    "local_only_sessions": [
+      { "id": "session-local-1", "reason": "POST rejected; append had already happened" },
+      { "id": "session-local-2", "reason": "offline when the take ended" }
+    ]
+  },
+  "expect": {
+    "result_type": "results_aggregate",
+    "counts": { "sessions_reported": 8, "utterances_reported": 31 },
+    "must_exclude": [
+      { "id": "session-local-1", "reason": "the cache is hydrated FROM the server, never aggregated INTO a figure" },
+      { "id": "session-local-2", "reason": "same" }
+    ],
+    "must_surface": [
+      { "id": "unsynced-count", "reason": "a session the server never got is a finding, not a silence — the operator must be told it exists" }
+    ]
+  }
+}

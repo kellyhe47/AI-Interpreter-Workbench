@@ -1,7 +1,7 @@
 ---
 id: 051
 title: Live shows no timings at all — speech_end is never stamped, and first_audio_delta does not exist over WebRTC
-status: pending
+status: green
 source: operator
 depends_on: []
 touches: [src/client/transport/realtime.ts, src/client/transport/cascade.ts, src/client/views/useSessionController.ts, src/client/views/LiveView.tsx, src/core/timing.ts]

@@ -1,0 +1,14 @@
+{
+  "name": "onboarding-cost-cites-a-real-commit",
+  "why": "VERIFIED P1-1. ResultsView.tsx:653-654 hardcodes 'commit a4f21c' and 'commit 9d0e77'; `git cat-file -t` fails on both — Not a valid object name. PRD §11 stakes the card on 'onboarding cost is proven by commit, not claimed.' A wrong number is an error; a wrong citation is a claim that evidence was gathered when it was not.",
+  "surface": "dom",
+  "given": { "claims": [{ "pair": "en-yue", "commit": "a4f21c", "lines": 14 }] },
+  "expect": {
+    "result_type": "coverage_tile",
+    "must_include": [
+      { "id": "commit_resolves_in_repo", "reason": "every cited hash must satisfy `git cat-file -t`" },
+      { "id": "line_count_matches_diff", "reason": "the +N must come from the real diffstat, not a remembered number" }
+    ],
+    "on_unresolvable": { "render": "illustrative", "digits_rendered": 0 }
+  }
+}

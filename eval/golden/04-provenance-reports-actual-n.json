@@ -1,0 +1,16 @@
+{
+  "name": "provenance-reports-actual-n",
+  "why": "PRD §7: 'Provenance reports actual N, never intended N.' AGENTS.md names the failure directly: 'the denominator silently falls back to the numerator and every line reads a clean N of N.' Ticket 048 R4-2 found a live instance — a rep whose ledger POST went unacknowledged vanishes from the denominator entirely, so 3 reps run and the line reads '2 of 2'.",
+  "surface": "pure",
+  "given": {
+    "sweep": { "intended_reps": 3, "rows_in_ledger": 2, "unacknowledged_post": 1 }
+  },
+  "expect": {
+    "result_type": "provenance_line",
+    "must_include": [
+      { "id": "2 of 3 reps completed", "reason": "the rep that ran must remain in the denominator even when its row never landed" }
+    ],
+    "counts": { "latency_samples": 2 },
+    "must_not_contain": ["2 of 2", "3 of 3"]
+  }
+}

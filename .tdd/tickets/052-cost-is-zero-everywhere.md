@@ -1,7 +1,7 @@
 ---
 id: 052
 title: Cost is not implemented anywhere — every run, every arm, every figure is $0.00
-status: pending
+status: green
 source: discovered during 051
 depends_on: []
 touches: [src/core, src/server/cascade/orchestrator.ts, src/client/views/useSessionController.ts, src/client/replay/runner.ts]

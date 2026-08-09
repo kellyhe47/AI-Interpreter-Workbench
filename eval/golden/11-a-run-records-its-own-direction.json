@@ -1,0 +1,17 @@
+{
+  "name": "a-run-records-its-own-direction",
+  "why": "VERIFIED P1-10: languagePair and direction are undefined on ALL 3 stored Runs, and `lang` is null on all 3 newly recorded corpus Recordings. The controlled-variable register pins 'Language pair + direction — fixed per sweep.' With Cantonese in scope this matters more, not less: EN→YUE and YUE→EN are separate claims (PRD §7), and a run that does not record its own direction cannot be grouped by the by-category view or reproduced.",
+  "surface": "pure",
+  "given": {
+    "run": { "id": "any", "recordingId": "rec_msjjjc0m001", "architecture": "cascade" }
+  },
+  "expect": {
+    "result_type": "run_record",
+    "must_include": [
+      { "id": "languagePair", "reason": "a controlled variable that is not recorded is not controlled" },
+      { "id": "direction", "reason": "EN→YUE and YUE→EN are separate claims" }
+    ],
+    "must_not_contain": [null, "undefined"],
+    "counts": { "runs_missing_direction": 0 }
+  }
+}
