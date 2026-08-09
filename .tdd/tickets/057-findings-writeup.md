@@ -1,13 +1,13 @@
 ---
 id: 057
 title: FINDINGS.md — rubric must-have #8, currently 0%
-status: pending
+status: done
 source: rubric
 depends_on: []
 touches: [FINDINGS.md]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Why
@@ -209,3 +209,43 @@ sections:
 - 24 kHz PCM16 mono everywhere; `SAMPLE_RATE` in `src/core/protocol.ts` is the single source of truth.
 - Live persists no audio and creates no Run records.
 - Replay autoplays nothing; Live autoplays always.
+
+## RESOLUTION (2026-08-09)
+
+`FINDINGS.md` at the repo root, **249 lines** (limit 250). Five top-level sections in order —
+latency · quality · cost · controllability · recommendation — plus Limitations. No code changed.
+
+### One AC deviated from, deliberately, by the orchestrator
+
+AC2 allows only two states: a number citing a `results/<date>/` bundle, or the literal
+`not yet measured`. **`results/` has never been generated**, so read literally every figure becomes
+`not yet measured` — a blank page that demonstrates nothing.
+
+Real verified measurements do exist on disk. They are included inside a visibly-marked
+**`MEASURED TODAY — PRE-EXPORT`** blockquote that names its source file (`data/live-sessions.jsonl`),
+states the recomputation method, and says outright that it predates any bundle and is not cited from
+one. **Nothing is presented as bundle-cited that is not.** Every remaining figure is
+`not yet measured` followed on the same line by the specific run, sweep or export that would fill it
+— nine of them.
+
+### What the document actually establishes
+
+- Live latency: `realtime · default` p50 **260 ms** (n=7), `realtime · trimmed` **423 ms** (n=8),
+  `cascade` **1487 ms** / p95 **2858 ms** (n=16) — cascade *partially* meets the rubric's
+  "under 3s, target under 2s", and the two Realtime policies were pooled at **399 ms** until ticket
+  064 split them (a wrong number, not a missing one; p95 unchanged at 512).
+- Onboarding: **1351 insertions** for the first additional language pair (`a6ca500` +694,
+  `a57cd3a` +657, both verified against git by `npm run verify-citations`), then one `pairs` entry
+  for the next. **The shape of the curve is the finding**, and it contradicts the fabricated
+  "+11 lines · one language constant" claim ticket 060 deleted.
+- Cost stated as a **controllability** finding: Arm A is the only arm metered end to end; Arms B and
+  C both report `not measured`; Arm C additionally carries `verified: false`. *The architecture with
+  more knobs is the one you can least account for financially.*
+- Zero aggregate-eligible Runs: all 3 stored Runs are `origin: 'manual'`, one failed.
+
+The recommendation section gives four scenarios, each with what it rests on **and what it lacks**,
+and refuses to recommend on cost predictability — *"anyone quoting a per-minute figure for Arm B or C
+is quoting nothing."* The single most consequential unknown is named as such: whether Realtime's
+Cantonese comes back as fluent Mandarin. It is audible only, and nobody has listened.
+
+The "single native evaluator" claim is sourced — PRD.md:791.
