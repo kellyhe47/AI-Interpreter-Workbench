@@ -102,7 +102,10 @@ export class AnthropicMt implements MtProvider {
     if (signal?.aborted) return;
     const fetchImpl = this.deps.fetchImpl ?? defaultFetch;
 
-    const targetLang = this.config.targetLang ?? 'Spanish';
+    // TICKET 062 — THE CALL WINS, exactly as in openai-mt.ts: the registry
+    // builds this adapter from `{ model }` only, so the construction default was
+    // the instruction for every pair and both directions.
+    const targetLang = opts?.targetLanguage ?? this.config.targetLang ?? 'Spanish';
     const sourceHint = this.config.sourceLang ? ` from ${this.config.sourceLang}` : '';
     // Kept semantically equivalent to openai-mt.ts's system prompt so that
     // swapping MT providers measures the model, not the prompt.

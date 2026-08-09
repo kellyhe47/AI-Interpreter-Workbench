@@ -143,6 +143,10 @@ import type { SegmentedUtterance } from '../replay/segment';
 import type { RunOnceConfig, RunOnceResult } from '../replay/runner';
 import type { InterpreterTransport } from '../transport/types';
 import type { BlindComparison, Recording, Run } from '../state/ledger';
+import {
+  languageSelectionForSource,
+  type LanguageSelection,
+} from '../state/sessionMachine';
 
 /** One manual run request, as the view asks for it. */
 export interface ReplayRunRequest {
@@ -357,9 +361,27 @@ function initialConfig(): ReplayConfigState {
   };
 }
 
-/** The sweep matrix: the frozen arms, named by the derivation that owns them. */
-function sweepConfigurations(): BatchConfiguration[] {
-  return ARMS.map((entry) => ({ id: entry.tag, label: entry.label, config: entry.config }));
+/**
+ * The sweep matrix: the frozen arms, named by the derivation that owns them,
+ * each carrying the LANGUAGES the clip implies (ticket 062).
+ *
+ * A sweep is the same run 45 times, so an omitted language field here is the
+ * defect 45 times — and it is the shape run dbeb6d94 was produced in. The arms
+ * stay frozen: `entry.config` is spread, never mutated, and languages are not
+ * part of the recipe `deriveArmTag` matches on, so every leg still derives to
+ * the arm it belongs to.
+ */
+function sweepConfigurations(languages: LanguageSelection): BatchConfiguration[] {
+  return ARMS.map((entry) => ({
+    id: entry.tag,
+    label: entry.label,
+    config: {
+      ...entry.config,
+      languagePair: languages.languagePair,
+      direction: languages.direction,
+      targetLanguage: languages.targetLanguage,
+    },
+  }));
 }
 
 /* ------------------------------------------------------------------ view -- */
@@ -512,12 +534,26 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
     });
   };
 
+  /**
+   * TICKET 062 — the languages a run over the SELECTED clip must use.
+   *
+   * Replay has no language selector, and it does not need one: a Recording
+   * already declares its own `sourceLanguage`, so the direction is a property of
+   * the clip rather than a control that can be left blank. A Spanish take runs
+   * `es→en`; an English take runs into the other end of its pair. A run over a
+   * clip can therefore never be language-less, and can never be pointed at the
+   * language it is already in.
+   */
+  const runLanguages = (): LanguageSelection =>
+    languageSelectionForSource(selectedRecording?.sourceLanguage ?? '');
+
   const run = (): void => {
     // The guard mirrors startSweep's: the disabled button is the affordance,
     // this is the fact. Both halves are needed — a click that arrives anyway
     // (keyboard, a stale render) must not spend the provider budget twice.
     if (selectedRecordingId === null || runInFlight) return;
     setRunInFlight(true);
+    const languages = runLanguages();
     void deps
       .runOnce({
         recordingId: selectedRecordingId,
@@ -525,6 +561,13 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
           architecture: config.architecture,
           realtimeModel: config.realtimeModel,
           providers: config.providers,
+          // TICKET 062 — THE OMISSION THAT SHIPPED GERMAN. This object was
+          // `{ architecture, realtimeModel, providers }` and nothing else, so
+          // `runOnce` filled the language fields with '' and the realtime
+          // session was instructed to "translate into ".
+          languagePair: languages.languagePair,
+          direction: languages.direction,
+          targetLanguage: languages.targetLanguage,
         },
       })
       .then((result) => {
@@ -545,7 +588,7 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
 
   const startSweep = (): void => {
     if (selectedRecordingId === null || sweep !== null) return;
-    const configurations = sweepConfigurations();
+    const configurations = sweepConfigurations(runLanguages());
     const handle = deps.startBatch({
       recordingIds: [selectedRecordingId],
       configurations,

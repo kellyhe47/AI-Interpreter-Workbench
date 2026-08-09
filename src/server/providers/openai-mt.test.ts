@@ -198,4 +198,23 @@ describe('TICKET 062 — translate() honours the session target language', () =>
     await collect(mt.translate('hola mundo', { targetLanguage: 'English' } as never));
     expect(systemPromptOf(calls)).not.toContain('Spanish');
   });
+
+  // ADVERSARIAL REVIEW FINDING 1 — the cases above are titled "overriding the
+  // construction default" but never SET one: `resolveTriple` builds this adapter
+  // with `{ model }` only, so `config.targetLang` is undefined and
+  // `opts ?? config` and `config ?? opts` are indistinguishable. Inverting the
+  // precedence left every one of them green. A construction default that DIFFERS
+  // from the call is the only shape in which the word "overriding" is falsifiable.
+  it('a construction-time targetLang loses to the call — the precedence is real', async () => {
+    const { calls, fetchImpl } = okSseFetch();
+    const mt = new OpenAiMt(
+      { apiKey: 'k', model: 'gpt-4o-mini', targetLang: 'German' },
+      { fetchImpl },
+    );
+    await collect(mt.translate('hello world', { targetLanguage: 'English' } as never));
+    const system = systemPromptOf(calls);
+    expect(system).toContain('English');
+    // German is exactly the language run dbeb6d94 came back in.
+    expect(system).not.toContain('German');
+  });
 });

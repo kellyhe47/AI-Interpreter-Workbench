@@ -218,6 +218,75 @@ export const pairs: readonly LanguagePairDef[] = [
   { src: 'English', tgt: 'Cantonese' },
 ];
 
+/**
+ * TICKET 062 — the ONE place a selection becomes the strings that go on a wire.
+ *
+ * `pairs` + `langIdx` + `reversed` is the whole of what the operator chose, and
+ * before this ticket NOTHING in production turned it into `'EN↔ES'` / `'en→es'`
+ * / `'Spanish'`: Live re-derived two of the three inline (twice), Replay derived
+ * none of them, and the realtime transport interpolated the resulting empty
+ * string into "Translate everything the user says into ." — which is how run
+ * dbeb6d94 came back in German on an English↔Spanish project.
+ *
+ * It lives HERE, beside `pairs`, because the pair table is the fact these
+ * strings are derived FROM. A second copy anywhere else is a second thing that
+ * can disagree with the selector, and disagreeing silently is the entire defect.
+ */
+const LANGUAGE_CODES: Readonly<Record<string, string>> = {
+  English: 'en',
+  Spanish: 'es',
+  Cantonese: 'yue',
+};
+
+/** Lower-case code for a language NAME ('Spanish' -> 'es'); unknown names pass through. */
+export function languageCode(name: string): string {
+  return LANGUAGE_CODES[name] ?? name.toLowerCase();
+}
+
+/** Everything a transport has to be told about a session's languages. */
+export interface LanguageSelection {
+  /** Pair label, upper-case and order-free: 'EN↔ES'. */
+  languagePair: string;
+  /** The direction actually running, lower-case: 'en→es'. */
+  direction: string;
+  /** Human-readable source language: 'English'. */
+  sourceLanguage: string;
+  /** Human-readable target language — what the model is instructed to speak. */
+  targetLanguage: string;
+}
+
+/** The selection for a `langIdx` / `reversed` pair of the session state. */
+export function deriveLanguageSelection(langIdx: number, reversed: boolean): LanguageSelection {
+  const pair = pairs[langIdx] ?? pairs[0]!;
+  const sourceLanguage = reversed ? pair.tgt : pair.src;
+  const targetLanguage = reversed ? pair.src : pair.tgt;
+  return {
+    languagePair: `${languageCode(pair.src).toUpperCase()}↔${languageCode(pair.tgt).toUpperCase()}`,
+    direction: `${languageCode(sourceLanguage)}→${languageCode(targetLanguage)}`,
+    sourceLanguage,
+    targetLanguage,
+  };
+}
+
+/**
+ * The selection for a clip whose own `sourceLanguage` code is known — Replay's
+ * case, where there is no selector at all but the Recording already says what
+ * language it is IN. A run over Spanish speech is `es→en` by construction; a run
+ * can therefore never be language-less, and never point at its own language.
+ *
+ * An unrecognised code falls back to the default pair's forward direction rather
+ * than to nothing: an empty string is exactly what this ticket exists to remove.
+ */
+export function languageSelectionForSource(sourceCode: string): LanguageSelection {
+  const code = sourceCode.toLowerCase();
+  for (let idx = 0; idx < pairs.length; idx += 1) {
+    const pair = pairs[idx]!;
+    if (languageCode(pair.src) === code) return deriveLanguageSelection(idx, false);
+    if (languageCode(pair.tgt) === code) return deriveLanguageSelection(idx, true);
+  }
+  return deriveLanguageSelection(0, false);
+}
+
 export function createInitialState(overrides?: Partial<SessionState>): SessionState {
   return {
     status: 'idle',

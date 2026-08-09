@@ -68,6 +68,15 @@ export type ClientToServerMessage =
       mode: Mode;
       languagePair: string;
       direction: string;
+      /**
+       * TICKET 062 — the human-readable language the translation must come out
+       * as ('Spanish'). `languagePair` is order-free and `direction` is a code
+       * pair; neither can be put into an MT prompt, so this is the ONLY thing on
+       * the frame from which the server can instruct the MT stage. Optional so a
+       * pre-062 client still parses — and a session that omits it translates
+       * into nothing rather than into a confident default.
+       */
+      targetLanguage?: string;
       providers: { stt: string; mt: string; tts: string };
       /** Recording being replayed, when this session is not live capture. */
       recordingId?: string;

@@ -66,7 +66,12 @@ export class OpenAiMt implements MtProvider {
     if (signal?.aborted) return;
     const fetchImpl = this.deps.fetchImpl ?? defaultFetch;
 
-    const targetLang = this.config.targetLang ?? 'Spanish';
+    // TICKET 062 — THE CALL WINS. The registry builds this adapter from
+    // `{ model }` only, so a construction-time default is the same instruction
+    // for every pair and both directions: an ES→EN run said "into Spanish" and
+    // an EN→YUE run said "into Spanish". The session knows the direction; the
+    // adapter has to be told, per call.
+    const targetLang = opts?.targetLanguage ?? this.config.targetLang ?? 'Spanish';
     const sourceHint = this.config.sourceLang ? ` from ${this.config.sourceLang}` : '';
     const system =
       `You are a professional translator. Translate the user's text${sourceHint} ` +

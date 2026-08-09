@@ -1480,4 +1480,60 @@ describe('TICKET 062 — the Run records the language pair and direction it actu
     expect(run.status).not.toBe('complete');
     expect(run.errors.join(' ')).toMatch(/language/i);
   });
+
+  // -------------------------------------------------------------------------
+  // ADVERSARIAL REVIEW FINDING 3 — ABSENCE MUST STAY ABSENCE.
+  //
+  // The two guarded writes in runner.ts ("if (transportConfig.languagePair !==
+  // '')") could be made UNCONDITIONAL and the whole suite stayed green: nothing
+  // asserted what a language-LESS run stores. `''` in an append-only ledger is a
+  // VALUE — a row claiming a pair it never had — and it is precisely what run
+  // dbeb6d94 stored. ledger.ts's own contract (§ Run.languagePair) says absent.
+  // -------------------------------------------------------------------------
+  it('a run that named NO language stores absence, never an empty string', async () => {
+    const h = makeHarness();
+    const { run } = await runHappy(h, {
+      architecture: 'cascade',
+      providers: DEFAULT_CASCADE_TRIPLE,
+    });
+
+    const stored = run as Run & { languagePair?: string; direction?: string };
+    expect(stored.languagePair).toBeUndefined();
+    expect(stored.direction).toBeUndefined();
+    // `undefined` is not enough: an explicitly-written '' would also read as
+    // falsy to a careless assertion. The KEY must not be there at all.
+    expect(Object.keys(stored)).not.toContain('languagePair');
+    expect(Object.keys(stored)).not.toContain('direction');
+    // The failure is still stored (PRD §12) — and the POSTed row carries the
+    // same absence, because that row is what the ledger keeps forever.
+    expect(h.posted).toHaveLength(1);
+    expect(Object.keys(h.posted[0]!)).not.toContain('languagePair');
+    expect(Object.keys(h.posted[0]!)).not.toContain('direction');
+  });
+
+  // -------------------------------------------------------------------------
+  // ADVERSARIAL REVIEW FINDING 4 — A BLANK NAME IS NOT A NAME.
+  //
+  // Dropping `.trim()` from the runner's `namesTarget` check kept every test
+  // green: the realtime transport has its own trim-refusal, so only the CASCADE
+  // path is exposed. A '   ' target would ride `session.start`, reach the MT
+  // system prompt as "into   .", and the run would report `complete` — the exact
+  // dbeb6d94 shape with whitespace instead of nothing.
+  // -------------------------------------------------------------------------
+  it('CASCADE: a whitespace-only target language is refused like a missing one', async () => {
+    const h = makeHarness();
+    const { run } = await runHappy(h, {
+      architecture: 'cascade',
+      providers: DEFAULT_CASCADE_TRIPLE,
+      languagePair: 'EN↔ES',
+      direction: 'en→es',
+      targetLanguage: '   ',
+    });
+
+    expect(run.status).not.toBe('complete');
+    expect(run.errors.join(' ')).toMatch(/language/i);
+    // And nothing was ever put on the wire under a nameless instruction —
+    // cascade has no refusal of its own to fall back on.
+    expect(h.startConfigs).toHaveLength(0);
+  });
 });

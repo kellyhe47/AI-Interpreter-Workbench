@@ -100,6 +100,7 @@ import type { LiveContextPolicy, LiveSession, LiveSessionUtterance, RunLedger } 
 import {
   LIVE_MAX_SESSION_MS,
   createInitialState,
+  deriveLanguageSelection,
   pairs,
   reduce,
   type ContextPolicy,
@@ -127,6 +128,25 @@ export interface LiveRunConfig extends RunConfig {
   /** Set when architecture === 'cascade'. */
   providers?: ProviderTriple;
   contextPolicy: ContextPolicy;
+  /**
+   * TICKET 062 — the SELECTED languages, part of the recipe the live transport
+   * is reconciled against. `transportKey` is the serialized LiveRunConfig, so a
+   * pair or direction change is only a real switch if it is visible HERE: with
+   * these fields absent the key never moved, the started session was never
+   * replaced, and the model kept translating into whatever the first
+   * `session.update` named while the selector's label said otherwise.
+   *
+   * `deriveArmTag` reads `architecture` + `realtimeModel` / `providers` ONLY, so
+   * naming them here cannot move an arm: languages are not part of the frozen
+   * recipe an arm holds fixed (PRD §6 22d).
+   *
+   * OPTIONAL only so a hand-built config in a fixture bag stays valid; the
+   * controller always fills all three from `deriveLanguageSelection`, and the
+   * realtime transport refuses a session whose target is missing or blank.
+   */
+  languagePair?: string;
+  direction?: string;
+  targetLanguage?: string;
 }
 
 /** Callbacks the controller hands to the injected capture seam. */
@@ -250,9 +270,6 @@ export interface SessionController {
 
 /** Exact opaque-failure copy (matches REALTIME_OPAQUE_ERROR_MESSAGE). */
 const OPAQUE_FAILURE_COPY = 'opaque failure — no stage attribution · session still running';
-
-const LANG_CODE: Record<string, string> = { English: 'EN', Spanish: 'ES', Cantonese: 'YUE' };
-const LANG_LOWER: Record<string, string> = { English: 'en', Spanish: 'es', Cantonese: 'yue' };
 
 /** The provider names a realtime run advertises (one model does all three). */
 const REALTIME_PROVIDERS = {
@@ -384,6 +401,7 @@ export function useSessionController(deps: SessionDeps): SessionController {
 
   // The resolved recipe, recomputed every render and mirrored into a ref so
   // transport construction and record stamping never read a stale copy.
+  const selection = deriveLanguageSelection(state.langIdx, state.reversed);
   const runConfig: LiveRunConfig = {
     architecture: state.mode,
     // Resolve the pinned snapshot HERE: the transport's own default is the
@@ -392,6 +410,11 @@ export function useSessionController(deps: SessionDeps): SessionController {
     realtimeModel: REALTIME_MODEL,
     providers: { ...state.providers },
     contextPolicy: state.contextPolicy,
+    // TICKET 062 — see LiveRunConfig: this is what makes a pair or direction
+    // change move `transportKey` and therefore reach the wire.
+    languagePair: selection.languagePair,
+    direction: selection.direction,
+    targetLanguage: selection.targetLanguage,
   };
   const runConfigRef = useRef(runConfig);
   runConfigRef.current = runConfig;
@@ -470,16 +493,14 @@ export function useSessionController(deps: SessionDeps): SessionController {
         return { ...(completion as UtteranceRecord), arm, runId };
       }
       const s = stateRef.current;
-      const pair = pairs[s.langIdx] ?? pairs[0]!;
-      const src = s.reversed ? pair.tgt : pair.src;
-      const tgt = s.reversed ? pair.src : pair.tgt;
+      const languages = deriveLanguageSelection(s.langIdx, s.reversed);
       const target = store.target;
       return {
         id: `utt-${completion.utt ?? target.utt}`,
         arm,
         mode: s.mode,
-        languagePair: `${LANG_CODE[pair.src] ?? pair.src}↔${LANG_CODE[pair.tgt] ?? pair.tgt}`,
-        direction: `${LANG_LOWER[src] ?? src}→${LANG_LOWER[tgt] ?? tgt}`,
+        languagePair: languages.languagePair,
+        direction: languages.direction,
         sourcePartials: [...store.sourcePartials],
         sourceFinal: store.sourceFinal,
         targetPartials: [...store.targetPartials],
@@ -608,13 +629,11 @@ export function useSessionController(deps: SessionDeps): SessionController {
 
   const buildTransportConfig = (): TransportConfig => {
     const s = stateRef.current;
-    const pair = pairs[s.langIdx] ?? pairs[0]!;
-    const src = s.reversed ? pair.tgt : pair.src;
-    const tgt = s.reversed ? pair.src : pair.tgt;
+    const languages = deriveLanguageSelection(s.langIdx, s.reversed);
     return {
-      languagePair: `${LANG_CODE[pair.src] ?? pair.src}↔${LANG_CODE[pair.tgt] ?? pair.tgt}`,
-      direction: `${LANG_LOWER[src] ?? src}→${LANG_LOWER[tgt] ?? tgt}`,
-      targetLanguage: tgt,
+      languagePair: languages.languagePair,
+      direction: languages.direction,
+      targetLanguage: languages.targetLanguage,
       providers: s.mode === 'cascade' ? { ...s.providers } : undefined,
     };
   };

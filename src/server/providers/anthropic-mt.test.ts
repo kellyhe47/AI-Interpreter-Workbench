@@ -256,4 +256,17 @@ describe('TICKET 062 — translate() honours the session target language', () =>
     await collect(mt.translate('hola mundo', { targetLanguage: 'English' } as never));
     expect(systemPromptOf(calls)).not.toContain('Spanish');
   });
+
+  // ADVERSARIAL REVIEW FINDING 1 — see openai-mt.test.ts. The cases above never
+  // set `config.targetLang`, so "overriding the construction default" was a claim
+  // the test could not see: swapping `opts ?? config` for `config ?? opts` kept
+  // them all green. This one sets a DIFFERENT default and watches the call win.
+  it('a construction-time targetLang loses to the call — the precedence is real', async () => {
+    const { calls, fetchImpl } = okSseFetch();
+    const mt = new AnthropicMt({ apiKey: 'k', targetLang: 'German' }, { fetchImpl });
+    await collect(mt.translate('hello world', { targetLanguage: 'English' } as never));
+    const system = systemPromptOf(calls);
+    expect(system).toContain('English');
+    expect(system).not.toContain('German');
+  });
 });

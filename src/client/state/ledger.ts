@@ -267,6 +267,20 @@ export interface Run {
   armTag: ArmTag;
   origin: RunOrigin;
   status: RunStatus;
+  /**
+   * TICKET 062 — the languages the run ACTUALLY ran with, copied from the
+   * config the transport was started with rather than declared beside it.
+   *
+   * Run dbeb6d94 translated English into German and recorded no pair at all, so
+   * nothing stored could contradict it: without these fields a wrong-language
+   * run and a right-language one are byte-identical in the ledger, and every WER
+   * score, latency figure and blind-compare pairing derived from it is a claim
+   * about a language nobody can name. Optional — every Run written before this
+   * ticket has neither, and an absent field must stay absent rather than become
+   * a default nobody can take back out of an append-only ledger.
+   */
+  languagePair?: string;
+  direction?: string;
   timings: Record<string, number | null>;
   transcripts: { source?: string; target?: string };
   outputAudioPath?: string;

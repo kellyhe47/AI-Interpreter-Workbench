@@ -124,6 +124,13 @@ export class CascadeTransport implements InterpreterTransport {
       mode: 'cascade',
       languagePair: this.config?.languagePair,
       direction: this.config?.direction,
+      // TICKET 062 — the RESOLVED target language, and the only thing on this
+      // frame the MT stage can put into a prompt. `languagePair` does not say
+      // which way the session runs and `direction` is a code pair; without this
+      // field the server had no source at all for what the translation must come
+      // out as, so every cascade run fell back to the MT adapter's construction
+      // default (Spanish) whatever pair the operator selected.
+      targetLanguage: this.config?.targetLanguage,
       providers: this.config?.providers,
     };
   }

@@ -115,6 +115,30 @@ export const OPENAI_REALTIME_CALLS_URL = 'https://api.openai.com/v1/realtime/cal
 export const REALTIME_OPAQUE_ERROR_MESSAGE =
   'opaque failure — no stage attribution · session still running';
 
+/**
+ * TICKET 062 — what a session with no target language is REFUSED with.
+ *
+ * The interpreter instructions are a template with the target language in them,
+ * so an empty `targetLanguage` does not fail: it ships "Translate everything the
+ * user says into ." — an instruction naming no language, which the model
+ * resolves however it likes. Run dbeb6d94 is that instruction's output: German,
+ * on an English↔Spanish project, stored `status: 'complete'` with
+ * `languagePair: ''`, and aggregated into Arm A's latency figures.
+ *
+ * REFUSING IS THE FIX, not a caller-side check. Every caller filled in the
+ * empty string on the way here (`?? ''`), and a caller-only fix leaves the next
+ * caller free to do it again — silently, because a nameless instruction produces
+ * a fluent answer in SOME language and nothing downstream can tell. The ticket
+ * rules out post-hoc language detection explicitly: the instruction has to be
+ * correct at the source, so a session that cannot name its target never opens.
+ *
+ * It is LOUD (onError + 'disconnected', never 'connected') because the runner
+ * turns a dead session into `status: 'failed'`, which is what keeps a run whose
+ * output language cannot be confirmed out of every aggregate (AC4).
+ */
+export const REALTIME_NO_TARGET_LANGUAGE =
+  'no target language for this session — refusing to start the interpreter';
+
 export interface RtcDataChannelLike {
   readonly label: string;
   send(data: string): void;
@@ -392,6 +416,16 @@ export class RealtimeTransport implements InterpreterTransport {
 
   async start(config: TransportConfig): Promise<void> {
     this.config = config;
+    // TICKET 062 — the refusal comes BEFORE the token request: nothing is
+    // negotiated, no channel is opened, and no session.update is serialized for
+    // a session that cannot say what language it is translating into.
+    if ((config.targetLanguage ?? '').trim() === '') {
+      if (!this.stopped) {
+        this.handlers.onError?.({ message: REALTIME_NO_TARGET_LANGUAGE, opaque: true });
+        this.handlers.onConnectionState?.('disconnected');
+      }
+      return;
+    }
     const ok = await this.connect();
     if (ok) {
       if (!this.stopped) this.handlers.onConnectionState?.('connected');
@@ -538,7 +572,10 @@ export class RealtimeTransport implements InterpreterTransport {
   }
 
   private sessionUpdate(): unknown {
-    const targetLanguage = this.config?.targetLanguage ?? '';
+    // Non-blank by construction: `start()` refuses a session that cannot name
+    // its target, so there is no `?? ''` left for a nameless instruction to
+    // slip through (see REALTIME_NO_TARGET_LANGUAGE).
+    const targetLanguage = (this.config?.targetLanguage ?? '').trim();
     return {
       type: 'session.update',
       session: {

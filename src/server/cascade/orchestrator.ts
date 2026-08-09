@@ -103,6 +103,14 @@ export type CascadeEvent =
 export interface CascadeSessionInfo {
   languagePair?: string;
   direction?: string;
+  /**
+   * TICKET 062 — what the MT stage must translate INTO ('Spanish'). The pair and
+   * direction on this object are copied onto the emitted record and read by
+   * nothing else, which is exactly how a record could say `direction: 'es→en'`
+   * above a Spanish translation of Spanish with nothing in the pipeline
+   * disagreeing. Optional, and passed through UNINVENTED: see ProviderCallOpts.
+   */
+  targetLanguage?: string;
   arm?: string;
   corpusId?: string;
   runId?: string;
@@ -382,7 +390,16 @@ export async function* runCascade(
       const targetPartials: string[] = [];
       let totalSamples = 0;
 
-      const mtStream = providers.mt.translate(finalText, { signal: uttAc.signal });
+      // TICKET 062 — the session's target language reaches the stage that needs
+      // it. Spread rather than assigned: a session that named none must leave
+      // the key ABSENT, so the adapter's own default applies visibly instead of
+      // the pipeline inventing 'Spanish' for a run nobody told anything.
+      const mtStream = providers.mt.translate(finalText, {
+        signal: uttAc.signal,
+        ...(opts?.session?.targetLanguage === undefined
+          ? {}
+          : { targetLanguage: opts.session.targetLanguage }),
+      });
       const ttsStream = providers.tts.synthesize(bridge.iterable, { signal: uttAc.signal });
 
       const mtTask = (async () => {

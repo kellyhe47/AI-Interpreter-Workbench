@@ -364,6 +364,26 @@ export const MAX_CLIP_MS = 45_000;
  */
 export const CAPTURE_GATE_NEVER_OPENED = 'output audio capture: gate never opened';
 
+/**
+ * TICKET 062 — the reason a run that cannot name its target language is not run.
+ *
+ * `runOnce` used to fill the three language fields with `?? ''` and hand them to
+ * the transport, so a caller that simply forgot them (ReplayView, for its whole
+ * life) produced a realtime session instructed to "translate into ", a fluent
+ * answer in a language nobody selected, and a Run stored `complete` with
+ * `languagePair: ''`. That is run dbeb6d94, and every Arm A figure derived from
+ * it is a measurement of an unrequested language.
+ *
+ * UNLIKE THE CAPTURE DIAGNOSTIC, THIS IS FATAL. A run whose output language
+ * cannot be confirmed must not be aggregated (AC4), and `status: 'failed'` is
+ * how that is enforced — through `isAggregatableRun`'s EXISTING clause, never a
+ * second gate beside it. The Run is still STORED: a failure is real information
+ * (PRD §12), and a run that vanished would leave the operator with the same
+ * silence that hid this defect.
+ */
+export const RUN_NO_TARGET_LANGUAGE =
+  'no target language: the run names no language to translate into and was not started';
+
 export interface RunOnceConfig extends RunConfig {
   /** Forwarded to the transport config. */
   languagePair?: string;
@@ -941,13 +961,19 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     targetLanguage: config.targetLanguage ?? '',
     providers: config.providers,
   };
+  // TICKET 062 — a run that cannot name its target language never starts a
+  // transport. The `?? ''` above is the mechanism that shipped German, not a
+  // safety net: an empty target is a nameless instruction, and a nameless
+  // instruction still answers. See RUN_NO_TARGET_LANGUAGE.
+  const namesTarget = transportConfig.targetLanguage.trim() !== '';
+  if (!namesTarget) fail(RUN_NO_TARGET_LANGUAGE);
   // TICKET 048 ROUND 3 (R3-3) — ABORT-AWARE. A handshake that never lands would
   // otherwise hold a transport (Arm A: two AudioContexts) for as long as it takes
   // — forever, in the case this exists for — after the sweep has abandoned the
   // attempt. Nothing else changes: a rejecting `start()` still loses its stage,
   // and on an abort the pacer below no-ops on the same signal, `cancelled` is
   // re-read, and the run falls into the existing teardown.
-  await untilSettledOrAborted(transport.start(transportConfig), signal);
+  if (namesTarget) await untilSettledOrAborted(transport.start(transportConfig), signal);
 
   // The clock anchor: epoch ms of frame 0. Every timing the run reports is
   // meaningful only relative to this.
@@ -1188,6 +1214,16 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // Only ever the path the SERVER reported, and only when it really reported
   // one: `outputAudioPath` is a report of bytes on disk, never a promise.
   if (outputAudioPath !== undefined) run.outputAudioPath = outputAudioPath;
+
+  // TICKET 062 — WHAT THE TRANSPORT WAS ACTUALLY TOLD, read back off the config
+  // that was handed to `start()` rather than off `config` again. Ticket 061 owns
+  // the fields; this owns the claim that they are not a lie — a Run that copied
+  // a constant, or the operator's intent rather than the session's instruction,
+  // would satisfy 061 while still describing a run that translated into
+  // something else. Absent when the run named nothing: an empty string in an
+  // append-only ledger is a value, and `''` is precisely what dbeb6d94 stored.
+  if (transportConfig.languagePair !== '') run.languagePair = transportConfig.languagePair;
+  if (transportConfig.direction !== '') run.direction = transportConfig.direction;
 
   // TICKET 033 — the corpus version travels with the measurement. Only when the
   // Recording declares one: an absent version stays absent rather than becoming

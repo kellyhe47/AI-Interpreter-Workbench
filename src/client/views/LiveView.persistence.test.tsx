@@ -33,6 +33,7 @@ import {
   cascadeUtteranceScript,
   clickStartMicrophone,
   makeDeps,
+  realtimeUtteranceScript,
 } from './sessionTestKit';
 import type { TestDeps } from './sessionTestKit';
 
@@ -179,5 +180,79 @@ describe('ticket 041 — stopping a Live session POSTs it to the server', () => 
 
     expect(h.create).not.toHaveBeenCalled();
     expect(h.kit.ledger.getLiveSessions()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 062 / ADVERSARIAL REVIEW FINDING 2 — THE LEDGER RECORD, not the wire.
+//
+// LiveView.test.tsx pins what leaves the Live TRANSPORT; runner.test.ts pins
+// what a Replay RUN stores. Nothing pinned the third thing 062 stamps: the
+// `languagePair` / `direction` of a Live UtteranceRecord, which
+// `useSessionController.assembleRecord` derives for the realtime path (cascade
+// records arrive whole from the server).
+//
+// Replacing that derivation with the literals 'EN↔ES' / 'en→es' left the entire
+// suite green — i.e. an EN↔YUE session could put Cantonese on the wire and file
+// every record as Spanish. That is 062's own defect class, moved from the wire
+// to the ledger: the record contradicts the session that produced it.
+//
+// So: switch the pair through the REAL control (an operator's only route), then
+// read the record the ledger actually holds. Both a non-default PAIR and a
+// non-default DIRECTION are covered — the default is exactly what a hardcoded
+// literal satisfies.
+// ---------------------------------------------------------------------------
+
+/** A realtime Live session (the client-assembled record path) on a real ledger. */
+function renderRealtimeLive(): TestDeps {
+  const kit = makeDeps({
+    initialState: { mode: 'realtime' },
+    scripts: { realtime: realtimeUtteranceScript() },
+  });
+  render(createElement(App, { deps: kit.deps }));
+  return kit;
+}
+
+describe('TICKET 062 — a Live utterance RECORD names the selected languages', () => {
+  it('the default EN→ES session files its record as EN↔ES / en→es', async () => {
+    const kit = renderRealtimeLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+
+    const records = kit.ledger.getRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.languagePair).toBe('EN↔ES');
+    expect(records[0]!.direction).toBe('en→es');
+  });
+
+  it('switching the pair to EN↔YUE files the record as EN↔YUE / en→yue', async () => {
+    const kit = renderRealtimeLive();
+    await clickStartMicrophone();
+
+    // The operator's route: the language button, at a boundary (nothing in
+    // flight), which the button's own label confirms applied.
+    fireEvent.click(screen.getByRole('button', { name: /English → Spanish/ }));
+    expect(screen.getByRole('button', { name: /English → Cantonese/ })).toBeInTheDocument();
+    await advance(1_400);
+
+    const records = kit.ledger.getRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]!.languagePair).toBe('EN↔YUE');
+    expect(records[0]!.direction).toBe('en→yue');
+  });
+
+  it('swapping the direction files the record as es→en, not en→es', async () => {
+    const kit = renderRealtimeLive();
+    await clickStartMicrophone();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Swap direction' }));
+    expect(screen.getByRole('button', { name: /Spanish → English/ })).toBeInTheDocument();
+    await advance(1_400);
+
+    const records = kit.ledger.getRecords();
+    expect(records).toHaveLength(1);
+    // The pair is order-free and stays EN↔ES; the DIRECTION is what moved.
+    expect(records[0]!.languagePair).toBe('EN↔ES');
+    expect(records[0]!.direction).toBe('es→en');
   });
 });

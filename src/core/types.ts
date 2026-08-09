@@ -6,6 +6,20 @@
 /** Options passed to every provider call. */
 export interface ProviderCallOpts {
   signal?: AbortSignal;
+  /**
+   * TICKET 062 — the human-readable language THIS CALL must produce ('Spanish').
+   * A per-CALL fact, not a construction one: the registry builds every MT
+   * adapter from `{ model }` alone, so an adapter that could only read its
+   * construction default put "into Spanish" in the system prompt for every pair
+   * and both directions — an ES→EN run asked for Spanish translated into
+   * Spanish, and an EN→YUE run produced Spanish.
+   *
+   * ABSENT MEANS ABSENT. A session that named no target language must not be
+   * given an invented one here; the pipeline passes nothing and the adapter's
+   * own default applies, which is a fact the run can be judged on rather than a
+   * confident wrong answer manufactured mid-pipeline.
+   */
+  targetLanguage?: string;
 }
 
 /**

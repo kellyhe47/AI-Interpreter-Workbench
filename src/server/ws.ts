@@ -196,6 +196,11 @@ export function attachCascadeWs(
               session: {
                 languagePair: msg.languagePair,
                 direction: msg.direction,
+                // TICKET 062 — THE MISSING LINK. The pair and direction were
+                // copied onto the emitted record and used nowhere else, so the
+                // MT stage was never told what to translate into and every
+                // cascade run produced the adapter's construction default.
+                targetLanguage: msg.targetLanguage,
                 corpusId: recordingId,
                 runId,
               },
