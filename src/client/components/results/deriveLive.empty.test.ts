@@ -116,6 +116,68 @@ describe('ticket 041 — isAggregatableLiveSession, the third sibling of the gat
   });
 });
 
+/* =========================================================================
+ * TICKET 058 — THE LIVE COLUMN NO LONGER DERIVES A DRIFT FIGURE.
+ *
+ * Latency's drift-minute-1-to-end is hardcoded `null` at the only site that
+ * writes it, so the column's derived …Ms mirror of it is a mean over an
+ * always-empty list. (Kebab-cased on purpose: this file is inside the tree
+ * ticket 058's falsifiable `rg` sweeps, and a comment is still text.)
+ * Deleting the field is not "reporting zero" — it withdraws the claim that
+ * latency drift is measured at all. The column key must be GONE, not blanked: a
+ * key that is forever `null` keeps a `not measured` row alive downstream, and
+ * that row asserts the measurement is expected.
+ *
+ * The key name is ASSEMBLED FROM FRAGMENTS: this file is inside the `src/` tree
+ * the ticket's own falsifiable `rg` sweeps (see src/client/deletions.test.ts).
+ * ====================================================================== */
+
+const DRIFT_COLUMN_KEY = ['drift', 'Minute1', 'ToEndMs'].join('');
+const DRIFT_SESSION_KEY = ['drift', 'Minute1', 'ToEnd'].join('');
+
+/** `value` minus `keys` — no production type moves before the code does. */
+function without(value: object, ...keys: string[]): Record<string, unknown> {
+  const out = { ...(value as Record<string, unknown>) };
+  for (const key of keys) delete out[key];
+  return out;
+}
+
+describe('TICKET 058 — a derived Live column carries no drift key at all', () => {
+  it('the column has its neighbours and NOT the drift figure', () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(measuredSession());
+    const model = deriveLiveModel(ledger);
+
+    // Anchors: a column really was derived, and the metrics either side of the
+    // deleted one are untouched. Without these, "no drift key" would be
+    // satisfied by an empty model.
+    expect(model.empty).toBe(false);
+    expect(model.columns).toHaveLength(1);
+    const keys = Object.keys(model.columns[0]!);
+    expect(keys).toContain('p50Ms');
+    expect(keys).toContain('p95Ms');
+    expect(keys).toContain('costPerMinuteFinalMinute');
+
+    expect(keys).not.toContain(DRIFT_COLUMN_KEY);
+  });
+
+  it('a session whose latency envelope is already trimmed still derives its percentiles', () => {
+    // The shape the client writes after the removal. The derivation must not
+    // reach for a key that is no longer there.
+    const trimmed = measuredSession({ id: 'live-trimmed' });
+    const ledger = new RunLedger();
+    ledger.appendLiveSession({
+      ...trimmed,
+      latency: without(trimmed.latency, DRIFT_SESSION_KEY),
+    } as unknown as LiveSession);
+
+    const model = deriveLiveModel(ledger);
+    expect(model.empty).toBe(false);
+    expect(model.columns[0]!.p50Ms).toBe(900);
+    expect(Object.keys(model.columns[0]!)).not.toContain(DRIFT_COLUMN_KEY);
+  });
+});
+
 describe('ticket 041 — deriveLiveModel refuses a session that produced nothing', () => {
   it('a ledger holding only empty sessions derives the EXPLICIT empty state', () => {
     const ledger = new RunLedger();

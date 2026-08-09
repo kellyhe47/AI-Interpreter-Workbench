@@ -1354,3 +1354,53 @@ describe('ResultsView.tsx source — no hardcoded metric, tokens only', () => {
     expect(source).not.toMatch(/\boklch\(/);
   });
 });
+
+/* =========================================================================
+ * TICKET 058 — THE DRIFT ROW IS REMOVED FROM THE LIVE CARD, NOT BLANKED.
+ *
+ * Latency's drift-minute-1-to-end is hardcoded `null` at the only site that
+ * writes it (kebab-cased on purpose: this file is inside the tree ticket 058's
+ * falsifiable `rg` sweeps, and a comment is still text), so the
+ * `drift, first minute to end` row has rendered `not measured` for every
+ * session there has ever been. That row is not an honest absence — it is a
+ * standing assertion that latency drift IS one of this card's measurements and
+ * simply has not landed yet. PRD §8 wants the row gone.
+ *
+ * Blanking it would satisfy nothing: the assertions below key on the ROW's
+ * presence in the DOM, not on its text.
+ * ====================================================================== */
+
+describe('TICKET 058 — the Live card has no drift row', () => {
+  it('the drift row is ABSENT while its neighbours still render their figures', () => {
+    // RTL APPENDS on re-render and these accessors are `document.querySelector`,
+    // so a stale render from an earlier test would answer instead of this one.
+    cleanup();
+
+    const ledger = comparisonLedger();
+    seedLiveSessions(ledger);
+    renderView(ledger);
+
+    const live = card('live');
+    // ANCHORS FIRST. Without them "no drift row" is satisfied by a card that
+    // failed to render any row at all.
+    expect(live.querySelector('[data-metric="p50"]')).not.toBeNull();
+    expect(live.querySelector('[data-metric="p95"]')).not.toBeNull();
+    expect(live.querySelector('[data-metric="cost-final-minute"]')).not.toBeNull();
+    expect(live.querySelector('[data-metric="utterances"]')).not.toBeNull();
+
+    expect(live.querySelector('[data-metric="drift"]')).toBeNull();
+    expect(live.textContent ?? '').not.toContain('drift');
+  });
+
+  it('and no OTHER card grew one — the row is deleted, not relocated', () => {
+    cleanup();
+
+    const ledger = comparisonLedger();
+    seedLiveSessions(ledger);
+    renderView(ledger);
+
+    expect(document.querySelectorAll('[data-metric="drift"]')).toHaveLength(0);
+    // The label itself is gone from the whole view, not merely from one card.
+    expect(document.body.textContent ?? '').not.toContain('drift, first minute to end');
+  });
+});

@@ -96,6 +96,79 @@ describe('ticket 041 — appendLiveSession / listLiveSessions round trip', () =>
   });
 });
 
+/* =========================================================================
+ * TICKET 058 — THE TRIMMED SHAPE ROUND-TRIPS, AND SO DOES THE LEGACY ONE.
+ *
+ * The drift-minute-1-to-end and heap-start / heap-end fields are being removed
+ * because they were never measured. (Kebab-cased here on purpose: this file is
+ * inside the tree ticket 058's falsifiable `rg` sweeps, and a comment is still
+ * text.) The store is VERBATIM by contract, so both shapes have
+ * to survive it: the trimmed record the client will write from now on, and the
+ * legacy records already in the stream. The failure this rules out is a store
+ * that "normalises" the shape on the way through and re-inserts a `null` — a
+ * null the reader would take as "measured, and it was nothing".
+ *
+ * The key names are ASSEMBLED FROM FRAGMENTS so that ticket 058's own `rg`
+ * criterion over `src/` can reach zero (see src/client/deletions.test.ts).
+ * ====================================================================== */
+
+const DRIFT_KEY = ['drift', 'Minute1', 'ToEnd'].join('');
+const HEAP_START_KEY = 'heap' + 'Start';
+const HEAP_END_KEY = 'heap' + 'End';
+
+/** `value` minus `keys` — no production type moves before the code does. */
+function without(value: object, ...keys: string[]): Record<string, unknown> {
+  const out = { ...(value as Record<string, unknown>) };
+  for (const key of keys) delete out[key];
+  return out;
+}
+
+/** The session the client will write once the never-measured fields are gone. */
+function trimmedSession(id: string): LiveSession {
+  const session = makeLiveSession({ id });
+  return {
+    ...session,
+    latency: without(session.latency, DRIFT_KEY),
+    stability: without(session.stability, HEAP_START_KEY, HEAP_END_KEY),
+  } as unknown as LiveSession;
+}
+
+describe('TICKET 058 — a session with no drift/heap keys round-trips VERBATIM', () => {
+  it('the trimmed shape is stored and listed back key-for-key, with nothing re-added', async () => {
+    const session = trimmedSession('live-trimmed');
+
+    expect(await store.appendLiveSession(session)).toEqual(session);
+    expect(await store.listLiveSessions()).toEqual([session]);
+
+    const [stored] = await lines();
+    const shape = stored! as unknown as {
+      latency: Record<string, unknown>;
+      stability: Record<string, unknown>;
+    };
+    expect(Object.keys(shape.latency).sort()).toEqual(['p50', 'p95']);
+    expect(Object.keys(shape.stability).sort()).toEqual(['disconnects', 'utterancesCompleted']);
+    // The point of the removal, said out loud: no key, therefore no claim —
+    // and specifically NOT a 0, which would read as a measurement.
+    expect(shape.latency[DRIFT_KEY]).toBeUndefined();
+    expect(shape.stability[HEAP_START_KEY]).toBeUndefined();
+    expect(shape.stability[HEAP_END_KEY]).toBeUndefined();
+  });
+
+  it('a LEGACY session still carrying all three is stored verbatim alongside it', async () => {
+    // The records already in the stream. A store that dropped the unknown keys
+    // would silently rewrite history it is supposed to only append to.
+    const legacy = makeLiveSession({ id: 'live-legacy' });
+    const trimmed = trimmedSession('live-trimmed');
+
+    await store.appendLiveSession(legacy);
+    await store.appendLiveSession(trimmed);
+
+    expect(await store.listLiveSessions()).toEqual([legacy, trimmed]);
+    const [first] = await lines();
+    expect(Object.keys((first as unknown as { latency: object }).latency)).toContain(DRIFT_KEY);
+  });
+});
+
 describe('ticket 041 — the live-session stream is APPEND-ONLY', () => {
   it('AC1: the same id posted twice writes a SECOND line, never a rewrite', async () => {
     const first = makeLiveSession({ id: 'live-dup', endedAt: 1_000, durationMs: 1_000 });

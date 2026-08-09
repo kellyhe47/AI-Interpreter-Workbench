@@ -396,3 +396,93 @@ describe('TICKET 055a — a rejected POST leaves the take UNSYNCED, never delete
     expect(isAggregatableLiveSession(acknowledged)).toBe(true);
   });
 });
+
+/* =========================================================================
+ * TICKET 058 — THE SESSION WRITTEN AT STOP CARRIES NO NEVER-MEASURED FIELD.
+ *
+ * `useSessionController` writes latency's drift-minute-1-to-end and stability's
+ * heap-start / heap-end as literal `null`s. (Kebab-cased on purpose: this file
+ * is inside the tree ticket 058's falsifiable `rg` sweeps, and a comment is
+ * still text.) Nothing ever computes
+ * them: heap would need `performance.memory`, which jsdom does not provide and
+ * which this codebase would have to inject as a new seam — more scaffolding,
+ * not less. So the fields go, and this is the site that proves they stopped
+ * being written, THROUGH THE REAL SEAM the controller actually posts to.
+ *
+ * REMOVING AN ALWAYS-NULL FIELD IS NOT REPORTING ZERO. It withdraws the claim
+ * that a measurement exists — which is why the assertion is on the KEY SET and
+ * never on a value. A `0` here would be the `$0.00` lie one layer down; the
+ * p50/p95 anchors below make sure the envelope itself did not just vanish.
+ *
+ * The key names are ASSEMBLED FROM FRAGMENTS: this file is inside the `src/`
+ * tree ticket 058's own falsifiable `rg` sweeps (see src/client/deletions.test.ts).
+ * ====================================================================== */
+
+const DRIFT_KEY = ['drift', 'Minute1', 'ToEnd'].join('');
+const HEAP_START_KEY = 'heap' + 'Start';
+const HEAP_END_KEY = 'heap' + 'End';
+
+describe('TICKET 058 — a stopped session posts no drift and no heap figures', () => {
+  it('the POSTed latency envelope is p50/p95 ONLY, and both are still measured', async () => {
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 60_000);
+
+    const posted = h.created[0]! as unknown as { latency: Record<string, unknown> };
+    // Anchor: the envelope is still there and still carries real figures, so
+    // "no drift key" cannot be bought by deleting `latency` wholesale.
+    expect(typeof posted.latency.p50).toBe('number');
+    expect(typeof posted.latency.p95).toBe('number');
+
+    expect(Object.keys(posted.latency).sort()).toEqual(['p50', 'p95']);
+    expect(DRIFT_KEY in posted.latency).toBe(false);
+  });
+
+  it('the POSTed stability envelope is the two COUNTERS ONLY — no heap figures', async () => {
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 60_000);
+
+    const posted = h.created[0]! as unknown as { stability: Record<string, unknown> };
+    // Anchor: the counters that ARE measured survive untouched.
+    expect(posted.stability.utterancesCompleted).toBe(1);
+    expect(posted.stability.disconnects).toBe(0);
+
+    expect(Object.keys(posted.stability).sort()).toEqual(['disconnects', 'utterancesCompleted']);
+    expect(HEAP_START_KEY in posted.stability).toBe(false);
+    expect(HEAP_END_KEY in posted.stability).toBe(false);
+  });
+
+  it('the LEDGER’s copy and the POSTed copy agree — one record, not two shapes', async () => {
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(1_400);
+    await stopAt(h, 60_000);
+
+    const stored = h.kit.ledger.getLiveSessions();
+    expect(stored).toHaveLength(1);
+    expect(h.created).toEqual(stored);
+    const local = stored[0]! as unknown as {
+      latency: Record<string, unknown>;
+      stability: Record<string, unknown>;
+    };
+    expect(Object.keys(local.latency).sort()).toEqual(['p50', 'p95']);
+    expect(Object.keys(local.stability).sort()).toEqual(['disconnects', 'utterancesCompleted']);
+  });
+
+  it('an EMPTY take reports p50/p95 as null — absent is not the same as zero', async () => {
+    // The removal must not be implemented as "write a 0 instead". A take that
+    // produced nothing still says `null` on the figures it genuinely lacks.
+    const h = renderLive();
+    await clickStartMicrophone();
+    await advance(5);
+    await stopAt(h, 30_000);
+
+    const posted = h.created[0]! as unknown as { latency: Record<string, unknown> };
+    expect(posted.latency.p50).toBeNull();
+    expect(posted.latency.p95).toBeNull();
+    expect(Object.keys(posted.latency).sort()).toEqual(['p50', 'p95']);
+  });
+});

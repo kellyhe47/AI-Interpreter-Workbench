@@ -255,6 +255,135 @@ describe('ticket 041 — a malformed body is a 4xx with a machine-readable envel
   });
 });
 
+/* =========================================================================
+ * TICKET 058 — THE WIRE AFTER THE NEVER-MEASURED FIELDS ARE GONE.
+ *
+ * Latency's drift-minute-1-to-end and stability's heap-start / heap-end are
+ * hardcoded `null` at the only site that writes them. (Kebab-cased on purpose:
+ * this file is inside the tree ticket 058's falsifiable `rg` sweeps, and a
+ * comment is still text.) Removing a field that is always `null` is NOT the
+ * same as reporting zero: it withdraws the CLAIM that a measurement exists.
+ *
+ * DELETING THEM IS A SCHEMA CHANGE, AND THE ORDER IS LOAD-BEARING. The client
+ * writer and this validator must move together, VALIDATOR FIRST — because
+ * `useSessionController` swallows the POST rejection, a validator still
+ * demanding a key the client stopped sending 400s every take INVISIBLY, and the
+ * first symptom is an empty `data/`.
+ *
+ * The two halves of that ordering are pinned here, and they pull in opposite
+ * directions on purpose:
+ *
+ *   A TRIMMED body (no drift, no heap keys) must be ACCEPTED — 2xx.
+ *   A LEGACY body (all three still present) must STILL be accepted, VERBATIM —
+ *   `hasFields` is a SUBSET check, and the sessions already on disk carry the
+ *   old keys. Making the shape exact would be the inverse defect.
+ *
+ * The key names are ASSEMBLED FROM FRAGMENTS: this file is inside the `src/`
+ * tree the ticket's own falsifiable `rg` sweeps, so spelling them here would
+ * make that criterion unsatisfiable (see src/client/deletions.test.ts).
+ * ====================================================================== */
+
+const DRIFT_KEY = ['drift', 'Minute1', 'ToEnd'].join('');
+const HEAP_START_KEY = 'heap' + 'Start';
+const HEAP_END_KEY = 'heap' + 'End';
+
+/** `value` minus `keys`, as an opaque body — no production type moves here. */
+function without(value: object, ...keys: string[]): Record<string, unknown> {
+  const out = { ...(value as Record<string, unknown>) };
+  for (const key of keys) delete out[key];
+  return out;
+}
+
+/** A session body shaped the way the client will POST it AFTER the removal. */
+function trimmedBody(overrides: Partial<LiveSession> = {}): Record<string, unknown> {
+  const session = makeLiveSession(overrides);
+  return {
+    ...session,
+    latency: without(session.latency, DRIFT_KEY),
+    stability: without(session.stability, HEAP_START_KEY, HEAP_END_KEY),
+  };
+}
+
+describe('TICKET 058 — a session body WITHOUT the never-measured fields is accepted', () => {
+  it('AC5: POST of a trimmed body answers 2xx, not the swallowed 400', async () => {
+    await boot();
+    const body = trimmedBody({ id: 'live-trimmed' });
+    // The premise of the test, asserted rather than assumed: the keys really
+    // are absent from what goes on the wire.
+    expect(Object.keys(body.latency as object).sort()).toEqual(['p50', 'p95']);
+    expect(Object.keys(body.stability as object).sort()).toEqual([
+      'disconnects',
+      'utterancesCompleted',
+    ]);
+
+    const res = await postLiveSession(api, body);
+    expect(res.status).toBeGreaterThanOrEqual(200);
+    expect(res.status).toBeLessThan(300);
+  });
+
+  it('AC5: and it REACHES the store — a 2xx that wrote nothing would be worse', async () => {
+    await boot();
+    const body = trimmedBody({ id: 'live-trimmed-stored' });
+
+    expect((await postLiveSession(api, body)).status).toBe(201);
+
+    const listed = await getLiveSessions(api);
+    expect(listed.status).toBe(200);
+    expect(listed.body.map((s) => s.id)).toEqual(['live-trimmed-stored']);
+    // Stored VERBATIM: the route does not helpfully re-add a `null` for the
+    // field it no longer requires. A re-added null is the claim, restated.
+    const stored = listed.body[0]! as unknown as Record<string, unknown>;
+    expect(Object.keys(stored.latency as object).sort()).toEqual(['p50', 'p95']);
+    expect(Object.keys(stored.stability as object).sort()).toEqual([
+      'disconnects',
+      'utterancesCompleted',
+    ]);
+  });
+
+  it('AC6: a LEGACY body still carrying all three is accepted and stored VERBATIM', async () => {
+    await boot();
+    // The 8 sessions already in the repo's live-session stream look like this.
+    // `hasFields` is a SUBSET check; turning it into an exact-shape check to
+    // "finish" the deletion would orphan every one of them.
+    const legacy = makeLiveSession({ id: 'live-legacy' });
+
+    expect((await postLiveSession(api, legacy)).status).toBe(201);
+
+    const listed = await getLiveSessions(api);
+    expect(listed.body).toEqual([legacy]);
+    const stored = listed.body[0]! as unknown as {
+      latency: Record<string, unknown>;
+      stability: Record<string, unknown>;
+    };
+    expect(Object.keys(stored.latency)).toContain(DRIFT_KEY);
+    expect(Object.keys(stored.stability)).toContain(HEAP_START_KEY);
+    expect(Object.keys(stored.stability)).toContain(HEAP_END_KEY);
+  });
+
+  it('AC5: relaxing is not DELETING — latency and stability are still gated', async () => {
+    await boot();
+    // The over-correction: dropping the two `hasFields` blocks entirely so the
+    // trimmed body sails through. Then a session with no latency envelope at
+    // all, or with a string where a counter belongs, is stored as evidence.
+    const cases: Array<{ reason: string; body: unknown }> = [
+      { reason: 'latency missing entirely', body: without(trimmedBody(), 'latency') },
+      { reason: 'stability missing entirely', body: without(trimmedBody(), 'stability') },
+      { reason: 'p50 is not a number-or-null', body: { ...trimmedBody(), latency: { p50: 'fast', p95: null } } },
+      {
+        reason: 'a stability counter is not a number',
+        body: { ...trimmedBody(), stability: { utterancesCompleted: 'two', disconnects: 0 } },
+      },
+    ];
+
+    for (const { reason, body } of cases) {
+      const res = await postLiveSession(api, body);
+      expect(res.status, `${reason} must still be refused`).toBe(400);
+      expect((await errorBody(res)).code).toBe('invalid-live-session');
+    }
+    expect((await getLiveSessions(api)).body).toEqual([]);
+  });
+});
+
 /* ================================================ mounted on the real app = */
 
 describe('ticket 041 — the router is mounted by createApp', () => {

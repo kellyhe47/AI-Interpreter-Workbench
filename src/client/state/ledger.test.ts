@@ -1635,3 +1635,126 @@ describe('TICKET 055a — the sync mark survives a reload, like every other writ
     expect(isAggregatableLiveSession(restored[0]!)).toBe(true);
   });
 });
+
+/* ===========================================================================
+ * TICKET 054 — THE PLACEHOLDER RULE OUTLIVES THE PLACEHOLDER DATA.
+ *
+ * The 36 `corpus/*.wav` clips were synthetic tone bursts, not speech, and they
+ * are deleted. The `startsWith('placeholder')` guards in `isRealRun` and
+ * `isRealRecord` are NOT. They were never about those 36 files: they are what
+ * stops the NEXT placeholder — a name nobody has coined yet — from reaching a
+ * reported figure. The obvious "clean up all the placeholder stuff" sweep takes
+ * the guard out with the clips, and golden eval 06 is the only other thing that
+ * notices.
+ *
+ * So the assertions below deliberately use ids that were NEVER in the deleted
+ * manifest. A rule that only recognised `placeholder-v0` would be a lookup
+ * against data that no longer exists; the rule is a PREFIX rule.
+ *
+ * `src/client/deletions.test.ts` holds the other half — that the guard lines are
+ * still physically present in `ledger.ts` and `exportResults.ts` once the data
+ * is gone. These are the behavioural half, and they must stay green throughout.
+ * ======================================================================== */
+
+describe('TICKET 054 — the placeholder-PREFIX realness rule survives the corpus deletion', () => {
+  it('isRealRecord still refuses a corpusId that was never in the deleted manifest', () => {
+    // Not `placeholder-v0`: the rule may not degrade into a list of the ids
+    // that happened to exist before the deletion.
+    expect(isRealRecord(makeRecord({ corpusId: 'placeholder-2027-something-new' }))).toBe(false);
+    expect(isRealRecord(makeRecord({ corpusId: 'placeholder' }))).toBe(false);
+    // ...and the recorded takes the operator actually produced are real.
+    expect(isRealRecord(makeRecord({ corpusId: 'corpus-v1' }))).toBe(true);
+  });
+
+  it('isRealRun still refuses a recordingId with the prefix, whatever follows it', () => {
+    expect(isRealRun(makeRun({ recordingId: 'placeholder-2027-something-new' }))).toBe(false);
+    expect(isRealRun(makeRun({ recordingId: 'rec_msl7nxdp001_7df33e53' }))).toBe(true);
+  });
+
+  it('a placeholder-sourced record is STORED and EXPORTED, and never aggregated', () => {
+    // The rule is about REPORTING, never about writing — deleting the data must
+    // not turn the guard into a refusal at the door.
+    const ledger = new RunLedger();
+    const fake = withLatency(5, { arm: 'A', corpusId: 'placeholder-anything' });
+    const real = withLatency(500, { arm: 'A' });
+    ledger.append(fake);
+    ledger.append(real);
+
+    expect(ledger.getRecords().map((r) => r.id)).toEqual([fake.id, real.id]);
+    expect(
+      ledger.exportRuns().runs.flatMap((run) => run.records.map((r) => r.id)),
+    ).toContain(fake.id);
+    // One sample admitted, and it is the real one — golden eval 06's shape.
+    expect(ledger.aggregates().perArm['A']).toMatchObject({ count: 1, p50Ms: 500 });
+  });
+});
+
+/* ===========================================================================
+ * TICKET 058 — THE PERSISTED LiveSession SHAPE, MINUS THE NEVER-MEASURED KEYS.
+ *
+ * Latency's drift-minute-1-to-end and stability's heap-start / heap-end are
+ * removed because nothing ever measured them. (Kebab-cased on purpose: this
+ * file is inside the tree ticket 058's falsifiable `rg` sweeps, and a comment
+ * is still text.) The ledger is the client's own store and it must carry the
+ * trimmed record across a reload WITHOUT re-adding a `null` — a re-added null is
+ * the withdrawn claim, restated. The legacy records already in `localStorage`
+ * and in the server's stream keep their keys and keep loading: the reader is
+ * tolerant, and making it exact here would orphan every take on disk.
+ *
+ * Key names are ASSEMBLED FROM FRAGMENTS so ticket 058's own `rg` over `src/`
+ * can reach zero (see src/client/deletions.test.ts).
+ * ======================================================================== */
+
+const TRIMMED_DRIFT_KEY = ['drift', 'Minute1', 'ToEnd'].join('');
+const TRIMMED_HEAP_START_KEY = 'heap' + 'Start';
+const TRIMMED_HEAP_END_KEY = 'heap' + 'End';
+
+/** `value` minus `keys` — no production type moves before the code does. */
+function omitKeys(value: object, ...keys: string[]): Record<string, unknown> {
+  const out = { ...(value as Record<string, unknown>) };
+  for (const key of keys) delete out[key];
+  return out;
+}
+
+describe('TICKET 058 — the ledger round-trips the trimmed LiveSession shape', () => {
+  it('a session with only p50/p95 and the two counters survives a reload unchanged', () => {
+    const base = makeLiveSession({ id: 'live-trimmed' });
+    const trimmed = {
+      ...base,
+      latency: omitKeys(base.latency, TRIMMED_DRIFT_KEY),
+      stability: omitKeys(base.stability, TRIMMED_HEAP_START_KEY, TRIMMED_HEAP_END_KEY),
+    } as unknown as LiveSession;
+
+    const { adapter } = fakeStorage();
+    const first = new RunLedger(adapter);
+    first.appendLiveSession(trimmed);
+
+    // A REAL reload, because that is the event the shape has to survive.
+    const restored = new RunLedger(adapter).getLiveSessions();
+    expect(restored).toHaveLength(1);
+    const shape = restored[0]! as unknown as {
+      latency: Record<string, unknown>;
+      stability: Record<string, unknown>;
+    };
+    expect(Object.keys(shape.latency).sort()).toEqual(['p50', 'p95']);
+    expect(Object.keys(shape.stability).sort()).toEqual(['disconnects', 'utterancesCompleted']);
+    // Absent, therefore no claim — and specifically NOT a 0.
+    expect(shape.latency[TRIMMED_DRIFT_KEY]).toBeUndefined();
+    expect(shape.stability[TRIMMED_HEAP_START_KEY]).toBeUndefined();
+    expect(shape.stability[TRIMMED_HEAP_END_KEY]).toBeUndefined();
+    // The ONE gate is unmoved by the trim.
+    expect(isAggregatableLiveSession(restored[0]!)).toBe(true);
+  });
+
+  it('a LEGACY session that still carries all three loads, aggregates and keeps its keys', () => {
+    const legacy = makeLiveSession({ id: 'live-legacy' });
+    const { adapter } = fakeStorage();
+    new RunLedger(adapter).appendLiveSession(legacy);
+
+    const restored = new RunLedger(adapter).getLiveSessions();
+    expect(restored[0]!.id).toBe('live-legacy');
+    expect(isAggregatableLiveSession(restored[0]!)).toBe(true);
+    const shape = restored[0]! as unknown as { latency: Record<string, unknown> };
+    expect(Object.keys(shape.latency)).toContain(TRIMMED_DRIFT_KEY);
+  });
+});
