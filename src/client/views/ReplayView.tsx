@@ -143,8 +143,16 @@
  *
  * BatchProgress [data-batch-progress] — absent until the sweep is CONFIRMED
  *   [data-batch-position]  'run {i} of {n} · {recordingId} × {label} · rep i/n'
- *   [data-batch-clock]     'elapsed M:SS · est. remaining M:SS'
- *   [data-batch-bar]       role=progressbar, aria-valuenow/min/max
+ *   [data-batch-clock]     'elapsed M:SS · est. remaining M:SS | — | finishing'
+ *                          TICKET 067 — both figures TICK between progress
+ *                          events, through `deps.sweepClock` and nothing else,
+ *                          and every event RE-ANCHORS them to the runner's own
+ *                          numbers. 'finishing' once the countdown is spent
+ *                          with the sweep still running (never '0:00', never
+ *                          negative); '—' unchanged while the runner has
+ *                          measured no throughput to count down from.
+ *   [data-batch-bar]       role=progressbar, aria-valuenow/min/max. A per-run
+ *                          fact, with [data-batch-position]: NEVER interpolated.
  *   [data-batch-controls-note] verbatim
  *   button 'Cancel — keep completed runs' → handle.cancel(); when `done`
  *   settles the panel unmounts and every completed run is still listed.
@@ -178,7 +186,7 @@ import {
   sumMeasuredCosts,
 } from '../../core/pricing';
 import { executionCount } from '../batch/runner';
-import BatchProgressPanel from '../components/replay/BatchProgress';
+import BatchProgressPanel, { type SweepClock } from '../components/replay/BatchProgress';
 import BlindCompare from '../components/replay/BlindCompare';
 import RecordTake from '../components/replay/RecordTake';
 import RecordingsLibrary from '../components/replay/RecordingsLibrary';
@@ -275,6 +283,28 @@ export interface ReplayDeps {
     get: () => string | null;
     set: (recordingId: string | null) => void;
   };
+
+  /**
+   * TICKET 067 — WHERE THE SWEEP CLOCK'S TICKS COME FROM.
+   *
+   * `BatchProgress.elapsedMs` / `estimatedRemainingMs` are fields on a progress
+   * event, and the runner emits only at run boundaries. Replay is paced at 1×,
+   * so a one-recording sweep is twelve executions over six to eight minutes:
+   * the clock advanced twelve times and showed a stale snapshot in between,
+   * which is indistinguishable from a hung sweep. The operator refreshed, and
+   * the client-side runner died with the page. The frozen clock cost a sweep.
+   *
+   * INJECTED, and both halves together: the anchor and the tick must read ONE
+   * clock or the interpolation drifts against itself. Neither this view nor the
+   * panel may name `setInterval` or `Date.now` — jsdom supplies both, so a
+   * direct reach would pass every test in this suite while leaking a real timer
+   * past the panel's unmount.
+   *
+   * OPTIONAL, exactly as `selectionStore` and the blind seams are: App is the
+   * host that fills it in, and a bag without one simply does not tick — it
+   * shows the last measurement, unmoved, which is the pre-067 behaviour.
+   */
+  sweepClock?: SweepClock;
 
   /* --- ticket 014: the blind-compare seams (PRD §10, §17 16b) --- */
 
@@ -1118,6 +1148,11 @@ export default function ReplayView(props: ReplayViewProps): ReactElement {
         progress={sweep.progress}
         configurations={sweep.configurations}
         reps={sweep.reps}
+        /* TICKET 067 — handed down the same path as `progress`, and ONLY while
+           `sweep !== null`. The panel's mount is therefore the subscription's
+           lifetime, and this ternary is what ends it on all three paths: the
+           sweep completing, a cancel settling, and the view unmounting. */
+        sweepClock={deps.sweepClock}
         onCancel={() => sweep.handle.cancel()}
       />
     );

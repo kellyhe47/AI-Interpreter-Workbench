@@ -22,16 +22,22 @@
 // Imported directly (in addition to vitest.setup.ts) so the jest-dom matcher
 // type augmentation is visible to `tsc -p tsconfig.json`.
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App, { type AppDeps } from '../App';
 import { DEFAULT_CASCADE_TRIPLE, type ProviderTriple } from '../../core/arms';
-import type { BatchHandle } from '../batch/runner';
+import type {
+  BatchHandle,
+  BatchProgress as BatchProgressEvent,
+  BatchSummary,
+} from '../batch/runner';
 import type { RecordingsClient, RunsClient } from '../replay/recordingsClient';
 import type { RunOnceResult } from '../replay/runner';
 import { RunLedger, type Recording, type Run } from '../state/ledger';
 import { seedCleanSweep } from '../components/results/testRecords';
-import type { ReplayDeps } from './ReplayView';
+import type { ReplayBatchRequest, ReplayDeps } from './ReplayView';
 import {
   COPY,
   advance,
@@ -602,5 +608,170 @@ describe('TICKET 066 — Replay keeps its selection across a tab change', () => 
     await showTab('Replay');
 
     await waitFor(() => expect(q('[data-target-language]')).not.toBeNull());
+  });
+});
+
+/* ==== the SHELL's own sweep clock — App.tsx, the default nothing pinned ==== */
+
+/**
+ * TICKET 067, ROUND 4 (P0) — `sweepClock: bag.sweepClock ?? sweepClock` is the
+ * ONE line that makes the sweep clock tick in the real product, and it was
+ * DELETABLE with the whole suite green: dropping the `?? sweepClock` half left
+ * 2439/2439 passing and both typechecks clean. Every locked 067 test injects its
+ * own probe clock into `<ReplayView deps={…} />`, so not one of them can see
+ * whether the SHELL supplies one — and with the default gone, every host that
+ * does not inject a clock, which is the real app, stops ticking entirely. That
+ * is the exact defect ticket 067 exists to fix, silently restored.
+ *
+ * This is the repo's #1 historical failure, twice before: the inbound tap
+ * (browserDeps.inboundTap.test.ts, R2-1) and ticket 066's `selectionStore` (F1
+ * there), both deletable while green. A seam nothing wires is a seam that does
+ * not exist. The guard there is a property probe off the CONSTRUCTED bag, but
+ * App's `replayDeps` is built INSIDE the component and no probe reaches it — so
+ * this is the STRONGER form instead: a sweep is driven to a progress event
+ * through the REAL <App />, over a replay bag carrying NO `sweepClock`, and the
+ * clock cell is watched to MOVE while no second event arrives. It proves not
+ * that a default is present but that it WORKS, at the period the shell chose.
+ *
+ * IT IS DELIBERATELY A SLOW TEST — about 1.1 s of real time. Ticket 067's own
+ * tests refuse `vi.useFakeTimers` because jsdom's timers would let a direct
+ * reach for `setInterval` pass while production leaked one past unmount; here
+ * the thing under test IS the shell's real `window.setInterval` at its real 1 Hz
+ * period, so faking it out would fake out the assertion. One slow test buys the
+ * only end-to-end proof that the product ticks at all.
+ *
+ * WHAT IT DOES NOT DO: the interpolation contract (re-anchoring, `finishing`,
+ * the `—` absence) belongs to the locked 067 suite and is not restated here.
+ * This covers only that production supplies a working clock.
+ */
+
+/** Source of the shell, for the belt below. Never "the first half of a file". */
+const APP_SOURCE = readFileSync(resolve(process.cwd(), 'src/client/App.tsx'), 'utf8');
+
+/** Just the body of the `replayDeps` memo — where the defaults are filled in. */
+const REPLAY_DEPS_MEMO = APP_SOURCE.slice(
+  APP_SOURCE.indexOf('const replayDeps'),
+  APP_SOURCE.indexOf('const live ='),
+);
+
+/** `elapsed M:SS · est. remaining X` — the whole cell, read verbatim. */
+const CLOCK_CELL = /^elapsed (\d+):(\d\d) · est\. remaining (.+)$/;
+
+const clockCell = (): string => (q('[data-batch-clock]')?.textContent ?? '').trim();
+
+/** The elapsed side in whole seconds, or a loud failure if the cell is unreadable. */
+function elapsedSeconds(): number {
+  const cell = clockCell();
+  const match = CLOCK_CELL.exec(cell);
+  if (match === null) throw new Error(`unreadable sweep clock: ${JSON.stringify(cell)}`);
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+/**
+ * A replay bag that can run a sweep — and that supplies NO `sweepClock`, exactly
+ * as `makeReplayDeps` supplies none of the blind seams. `startBatch` hands back a
+ * handle whose `done` NEVER settles, because ReplayView unmounts the progress
+ * panel on `done` and this test needs the panel up while real seconds pass.
+ */
+function makeSweepingReplayDeps() {
+  const base = makeReplayDeps();
+  let emit: ((progress: Partial<BatchProgressEvent>) => void) | null = null;
+  let progressEvents = 0;
+  const cancel = vi.fn();
+
+  const startBatch = vi.fn((request: ReplayBatchRequest): BatchHandle => {
+    emit = (progress) => {
+      progressEvents += 1;
+      request.onProgress?.({
+        runIndex: 1,
+        totalRuns: 12,
+        recordingId: request.recordingIds[0] ?? '',
+        configId: request.configurations[0]?.id ?? '',
+        repIndex: 1,
+        warmup: false,
+        elapsedMs: 0,
+        estimatedRemainingMs: null,
+        ...progress,
+      });
+    };
+    return { done: new Promise<BatchSummary>(() => {}), cancel };
+  });
+
+  const deps: ReplayDeps = {
+    ...base.deps,
+    startBatch: startBatch as unknown as ReplayDeps['startBatch'],
+    // sweepClock DELIBERATELY ABSENT — App is the host that has to fill it in.
+  };
+
+  return {
+    deps,
+    startBatch,
+    /** Emit the sweep's ONE progress event. */
+    emit(progress: Partial<BatchProgressEvent>): void {
+      if (emit === null) throw new Error('no sweep was started');
+      emit(progress);
+    },
+    /** How many events the panel has actually received. */
+    progressEvents: (): number => progressEvents,
+  };
+}
+
+/** Replay → select the clip → Batch sweep… → confirm → the progress panel is up. */
+async function startSweepThroughApp(replay: ReplayDeps): Promise<void> {
+  renderWorkbench({ now: () => NOW, replay });
+  await showTab('Replay');
+  await waitFor(() =>
+    expect(q(`[data-recording-row][data-recording="${REC.id}"]`)).not.toBeNull(),
+  );
+  fireEvent.click(get(`[data-recording-row][data-recording="${REC.id}"]`));
+  await waitFor(() => expect(get('[data-batch-button]')).not.toBeDisabled());
+
+  // Ticket 065's confirm step is the only path to startBatch.
+  fireEvent.click(get('[data-batch-button]'));
+  await waitFor(() => expect(q('[data-sweep-confirm]')).not.toBeNull());
+  fireEvent.click(get('[data-sweep-confirm-start]'));
+  await waitFor(() => expect(q('[data-batch-progress]')).not.toBeNull());
+}
+
+describe('the SHELL supplies Replay a WORKING sweep clock (ticket 067, round 4)', () => {
+  it('the clock ADVANCES with no second event, over a bag that wired no sweepClock', async () => {
+    const replay = makeSweepingReplayDeps();
+    // Non-vacuity, half one: the host handed over no clock at all, so anything
+    // that ticks below can only be the one App itself supplied.
+    expect(replay.deps.sweepClock).toBeUndefined();
+
+    await startSweepThroughApp(replay.deps);
+    expect(replay.startBatch).toHaveBeenCalledTimes(1);
+
+    // The sweep's ONE measurement. The panel takes it whole: 1:00 / 5:00.
+    replay.emit({ elapsedMs: 60_000, estimatedRemainingMs: 300_000 });
+    await waitFor(() => expect(clockCell()).toMatch(/^elapsed 1:0\d · est\. remaining [45]:\d\d$/));
+    const anchored = elapsedSeconds();
+    expect(anchored).toBeGreaterThanOrEqual(60);
+
+    // THE ASSERTION. Real seconds pass and nothing else happens — no event, no
+    // click, no re-render request from the test. With `?? sweepClock` deleted the
+    // cell is frozen at the measurement forever and this times out.
+    await waitFor(() => expect(elapsedSeconds()).toBeGreaterThan(anchored), {
+      timeout: 4_000,
+      interval: 50,
+    });
+
+    // Non-vacuity, half two: the movement was NOT a second measurement.
+    expect(replay.progressEvents()).toBe(1);
+    // ...and both figures moved, in opposite directions, off the one anchor —
+    // a clock that only advanced elapsed would be a half-wired default.
+    expect(clockCell()).not.toMatch(/est\. remaining 5:00/);
+  });
+
+  it('the default is FILLED IN, not required of the host — the source belt', () => {
+    // Belt to the behavioural braces, SCOPED to the memo that builds the bag:
+    // the mutation deleted exactly this `??`. Kept lenient about the identifier
+    // so renaming the shell's local clock is not a failure, and deliberately
+    // saying nothing about WHERE the timer lives — App is allowed to own it.
+    expect(REPLAY_DEPS_MEMO).toMatch(/sweepClock:\s*bag\.sweepClock\s*\?\?\s*\w+/);
+    // The scope really is the memo body, not the whole file.
+    expect(REPLAY_DEPS_MEMO.length).toBeGreaterThan(0);
+    expect(REPLAY_DEPS_MEMO).toContain('selectionStore: bag.selectionStore ??');
   });
 });

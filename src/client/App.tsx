@@ -63,6 +63,14 @@
  * precisely the span the defect spans. App itself names no storage API: where
  * the value is PERSISTED is browserDeps' business, not the shell's.
  *
+ * APP ALSO SUPPLIES REPLAY'S SWEEP CLOCK (ticket 067), and it is the only 1 Hz
+ * timer in the product. Neither ReplayView nor BatchProgress may name a timer —
+ * jsdom supplies one, so a direct reach would pass the whole suite and leak past
+ * the panel's unmount — and the seam is optional on ReplayDeps for the same
+ * reason the two above are. It lives HERE rather than in browserDeps because
+ * every Replay bag (production, `?fixture=1`, injected) is assembled below, so
+ * one timer here ticks all of them; see the memo for the full argument.
+ *
  * A SUBMITTED COMPARISON GOES TO BOTH DESTINATIONS (ticket 023, QA F6). The
  * default `recordBlindComparison` writes the ledger AND POSTs the very same
  * record to /api/blind-comparisons through `deps.replay.blindComparisons`.
@@ -133,6 +141,15 @@ const DEFAULT_EVALUATOR_LANGUAGE = 'es';
 
 /** Copy for a host that wired no Replay seams at all (never the product). */
 const REPLAY_UNAVAILABLE = 'Replay is unavailable — this host supplied no recordings backend.';
+
+/**
+ * TICKET 067 — how often the sweep clock is asked to redraw itself.
+ *
+ * A second, because the cell it moves is an M:SS clock and anything finer would
+ * be re-rendering for a digit that did not change. Anything coarser is what the
+ * defect already was, one degree milder.
+ */
+const SWEEP_TICK_MS = 1_000;
 
 export default function App(props: AppProps): ReactElement {
   const depsRef = useRef<AppDeps | null>(null);
@@ -306,6 +323,47 @@ export default function App(props: AppProps): ReactElement {
   );
 
   /**
+   * TICKET 067 — THE REAL 1 Hz SWEEP CLOCK, and the only one in the product.
+   *
+   * The batch runner emits only at run boundaries, so between them Replay's
+   * `[data-batch-clock]` showed a snapshot that could be minutes old — which
+   * looked exactly like a hung sweep, and cost a real one when the operator
+   * refreshed the page out from under the client-side runner.
+   *
+   * WHY HERE AND NOT `browserDeps.ts`. Every Replay bag reaches the view
+   * through `replayDeps` below — the production browser bag, the `?fixture=1`
+   * bag, and any bag a host injects — so one timer here ticks all of them,
+   * while one in `browserDeps` would tick the production bag alone and leave
+   * fixture mode frozen. App would then STILL need this default for the hosts
+   * that omit one, and the timer would exist in two places disagreeing about
+   * its period. A host that supplies its own `sweepClock` (a test pinning the
+   * clock) still wins, exactly as it does for `selectionStore` and `rng`.
+   *
+   * WHY `Date.now` AND NOT `deps.now`. `now` here must be in the same units as
+   * the runner's `elapsedMs`, and the batch runner is started over `Date.now`
+   * (browserDeps). A session clock pinned by a host bag would leave the anchor
+   * and the tick reading different clocks, which is precisely the drift the
+   * seam bundles `now` and `subscribe` together to make impossible.
+   *
+   * Memoized with no dependencies: its identity is the panel's subscribe/
+   * unsubscribe key, so a fresh object per render would tear down and rebuild
+   * the interval on every re-render of the workbench.
+   */
+  const sweepClock = useMemo<NonNullable<ReplayDeps['sweepClock']>>(
+    () => ({
+      now: () => Date.now(),
+      subscribe: (onTick) => {
+        const handle = window.setInterval(onTick, SWEEP_TICK_MS);
+        // The teardown is the whole point of returning one: the panel calls it
+        // when the sweep ends, when a cancel settles, and on unmount, and a
+        // leaked interval is exactly a subscription whose teardown never ran.
+        return () => window.clearInterval(handle);
+      },
+    }),
+    [],
+  );
+
+  /**
    * The Replay bag with the blind seams filled in. Memoized on `deps` — which
    * is pinned for the App's lifetime — because ReplayView re-lists recordings
    * and runs whenever its `deps` identity changes, and a fresh object per
@@ -323,8 +381,11 @@ export default function App(props: AppProps): ReactElement {
       // reloads); otherwise the in-memory one above, which is all the tab
       // round-trip needs and is what keeps a minimal bag working.
       selectionStore: bag.selectionStore ?? selectionStore,
+      // Ticket 067 — a sweep the operator is watching MOVES. A bag with its own
+      // clock (a test pinning it) wins; every other host gets the real 1 Hz one.
+      sweepClock: bag.sweepClock ?? sweepClock,
     };
-  }, [deps, persistBlindComparison, selectionStore]);
+  }, [deps, persistBlindComparison, selectionStore, sweepClock]);
 
   // The dot describes the SESSION, not the navigation: no `view ===` gate.
   const live = LIVE_STATUSES.includes(controller.state.status);

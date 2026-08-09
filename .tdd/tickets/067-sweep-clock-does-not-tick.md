@@ -1,13 +1,13 @@
 ---
 id: 067
 title: "The sweep clock does not tick — it updates once per completed run, so a live sweep looks frozen"
-status: pending
+status: done
 source: operator (2026-08-09, during the first real sweep)
 depends_on: []
 touches: [src/client/components/replay/BatchProgress.tsx, src/client/views/ReplayView.tsx]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — reported by the operator, verified
@@ -73,3 +73,53 @@ So the frozen clock did not merely look bad — it cost a sweep.
 - The measured-vs-interpolated distinction is this project's recurring rule in a new place: the
   runner's figure is the measurement, and a tick between measurements must never be mistaken for
   one. That is why AC3 requires re-anchoring and AC4 refuses a fabricated `0:00`.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2441 passing / 0 failing. `npm run check` exits 0.
+
+`SweepClock { now, subscribe }` is optional on `ReplayDeps`; the interpolation lives in
+`BatchProgress.tsx` (the only component that renders the figure, and its mount is exactly the
+subscription's lifetime); the real 1 Hz timer lives in `App.tsx`, in **one** place, because every
+Replay bag — production, `?fixture=1`, and injected — reaches the view through App's `replayDeps`
+memo. In `browserDeps.ts` it would tick production only and leave fixture mode frozen, and App would
+still need a default, i.e. two timers that can disagree about their period.
+
+`now` is on the seam rather than reused from `deps.now` so the anchor and the tick read one clock.
+
+### The distinction that mattered
+
+A tick is an **interpolation between measurements and never a substitute for one**:
+- a progress event **re-anchors** both figures, pinned in **both** directions — an event carrying a
+  *lower* elapsed than the local accumulation wins, which kills `Math.max` and any monotonic guard;
+- `estimatedRemainingMs === null` renders `—` **however long the panel ticks** — nothing is derived
+  from the elapsed side, so no countdown is invented before there is measured throughput;
+- a spent countdown reads `finishing`, never `0:00`. The threshold is `< 1000` because `formatClock`
+  prints `0:00` for anything under a second, which is the fabricated precision AC4 refuses — and it
+  makes a negative unreachable. A measured `0:00` (`sinceMeasuredMs === 0`) is still a measurement
+  and still renders.
+
+Position and bar are pinned byte-identical across a tick — per-run facts, never interpolated.
+
+### The RED finding — the repo's #1 failure, in the very next ticket after 066
+
+`App.tsx`'s `sweepClock: bag.sweepClock ?? sweepClock` could be reduced to `bag.sweepClock` with the
+**whole suite green at 2439/2439**. Every locked 067 test injects its own probe clock, so none could
+see it. The consequence is exact: with no App default, any host that does not inject a clock — which
+is the real app — stops ticking, silently restoring the defect this ticket exists to fix.
+
+Closed behaviourally, not by grep alone: `App.test.tsx` now renders the **real `<App>`** over a bag
+that wires **no** `sweepClock`, drives a sweep to the progress panel, anchors on one event, and waits
+on **real** time for the clock to advance with `progressEvents() === 1`. ~2 s of wall clock,
+deliberately — `vi.useFakeTimers` is refused throughout this ticket because under fake timers a
+direct `setInterval` reach satisfies every behavioural assertion while production leaks past unmount.
+A scoped source belt on the `replayDeps` memo backs it up, mirroring
+`browserDeps.inboundTap.test.ts`'s two-way shape.
+
+No production change was needed for the guard — the code was right; nothing held it there.
+
+### Out of scope, still true
+
+Refresh still kills a running sweep: the batch runner is client-side and there is no resume. This
+ticket makes a live sweep *look* alive; it does not make it survive a reload. A `beforeunload`
+warning remains an open, separate decision.
