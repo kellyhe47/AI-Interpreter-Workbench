@@ -1,11 +1,17 @@
 // Manual OpenAI smoke test — makes REAL API calls (not part of vitest).
-// Run: npx tsx scripts/smoke-openai.mjs   (needs OPENAI_API_KEY in env)
+// Run: npm run smoke:openai   (reads OPENAI_API_KEY from .env, like the server)
 import { writeFileSync } from 'node:fs';
+import { loadServerEnv } from '../src/server/env.ts';
 import { OpenAiMt } from '../src/server/providers/openai-mt.ts';
 import { OpenAiTts } from '../src/server/providers/openai-tts.ts';
 
+// See the note in smoke-elevenlabs.mjs — same defect, same fix. Ticket 037
+// routed every server-side key read through `loadServerEnv`; these two scripts
+// were written before it and were never brought along.
+loadServerEnv();
+
 if (!process.env.OPENAI_API_KEY) {
-  console.error('OPENAI_API_KEY not set');
+  console.error('OPENAI_API_KEY not set — not in the environment and not in .env');
   process.exit(1);
 }
 

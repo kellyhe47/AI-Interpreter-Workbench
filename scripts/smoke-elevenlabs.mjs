@@ -1,10 +1,19 @@
 // Manual ElevenLabs smoke test — makes a REAL WS call (not part of vitest).
-// Run: npx tsx scripts/smoke-elevenlabs.mjs   (needs ELEVENLABS_API_KEY in env)
+// Run: npm run smoke:elevenlabs   (reads ELEVENLABS_API_KEY from .env, like the server)
 import { writeFileSync } from 'node:fs';
+import { loadServerEnv } from '../src/server/env.ts';
 import { ElevenLabsTts } from '../src/server/providers/elevenlabs-tts.ts';
 
+// TICKET 037's FIX APPLIES HERE TOO. This script predates it and read
+// `process.env` directly, so it reported "not set" against a .env that had the
+// key — the server has loaded it through `loadServerEnv` since 037, and nothing
+// else in the repo reads a provider key without going through that call.
+// A smoke test that cannot run is not evidence for PRD §13's "one real-provider
+// smoke test per path"; it is a claim with a broken script behind it.
+loadServerEnv();
+
 if (!process.env.ELEVENLABS_API_KEY) {
-  console.error('ELEVENLABS_API_KEY not set');
+  console.error('ELEVENLABS_API_KEY not set — not in the environment and not in .env');
   process.exit(1);
 }
 
