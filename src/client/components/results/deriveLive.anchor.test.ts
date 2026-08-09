@@ -28,7 +28,18 @@ import { describe, expect, it } from 'vitest';
 import { REALTIME_MODEL } from '../../../core/arms';
 import { RunLedger } from '../../state/ledger';
 import { deriveLiveModel } from './derive';
-import { ARM_B_TRIPLE, makeLiveSessionEntity } from './testRecords';
+import {
+  ARM_B_TRIPLE,
+  LIVE_A_COST,
+  LIVE_A_DEFAULT_ONLY_P50_MS,
+  LIVE_A_POOLED_P50_MS,
+  LIVE_A_TRIMMED_COST,
+  LIVE_A_TRIMMED_P50_MS,
+  LIVE_A_TRIMMED_P95_MS,
+  makeLiveSessionEntity,
+  seedLiveSessions,
+  seedTrimmedLiveSession,
+} from './testRecords';
 
 type Marks = Record<string, number | null>;
 
@@ -170,5 +181,177 @@ describe('deriveLiveModel — the statistic', () => {
     );
 
     expect(columnFor(ledger, 'B').p50Ms).toBe(1_053);
+  });
+});
+
+/* ======================================================= TICKET 064 — policy */
+
+/**
+ * TICKET 064 — THE COLUMN IS A PAIR, NOT AN ARM.
+ *
+ * `deriveLiveModel` grouped on `liveArmTag(session)` alone and never read
+ * `contextPolicy` — the string did not appear in derive.ts at all. The two
+ * trimmed sessions on disk are `architecture: realtime` with
+ * `modelSnapshots.realtime = 'gpt-realtime'`, so they derive arm A, and every
+ * one of their utterances carries `server_speech_stopped` + `audio_queued`, so
+ * every one produces a latency sample. They were therefore not MISSING from the
+ * card: they were SILENTLY POOLED INTO `realtime · default`, whose p50 was
+ * really "realtime, all policies". That is a WRONG NUMBER, not a blank one, and
+ * it is the number §7's controllability claim rests on.
+ *
+ * The dominant assertion in this block is the DEFAULT column's p50, not the
+ * trimmed one's: a test that only checks that `realtime · trimmed` stopped
+ * showing '—' is satisfied by a fix that leaves the contamination in place.
+ *
+ * The fixture numbers are hand-derived in `testRecords.ts` beside
+ * `LIVE_A_TRIMMED_LATENCIES`; nearest rank, sorted[⌈p·n⌉−1]:
+ *
+ *   default only  [1000, 1100, 1200]              -> p50 1100
+ *   trimmed only  [4000, 4100]                    -> p50 4000
+ *   POOLED        [1000, 1100, 1200, 4000, 4100]  -> p50 1200
+ */
+
+/**
+ * `contextPolicy` is not on `LiveArmColumn` yet. Read it narrowly HERE rather
+ * than widening the production type to make a red test compile.
+ */
+function policyOf(column: unknown): string | undefined {
+  return (column as { contextPolicy?: string }).contextPolicy;
+}
+
+/** Arm A · default (3 utterances) + arm B · n/a, plus arm A · trimmed (2). */
+function policyLedger(): RunLedger {
+  const ledger = new RunLedger();
+  seedLiveSessions(ledger);
+  seedTrimmedLiveSession(ledger);
+  return ledger;
+}
+
+/** A pre-012 session: real, measured, arm A — and declaring NO policy at all. */
+function prePolicySession() {
+  return makeLiveSessionEntity({
+    id: 'live-pre-012',
+    architecture: 'realtime',
+    providerTriple: undefined,
+    // The field is optional on LiveSession precisely so these still parse.
+    contextPolicy: undefined,
+    modelSnapshots: { realtime: REALTIME_MODEL },
+    utterances: [9_000, 9_100].map((ms, i) => utterance(`lu-pre-${i + 1}`, realtimeMarks(ms))),
+    latency: { p50: 9_000, p95: 9_100, driftMinute1ToEnd: 700 },
+    cost: { totalUsd: 2, perMinuteMinute1: 0.9, perMinuteFinalMinute: 0.9 },
+    stability: { utterancesCompleted: 2, disconnects: 0, heapStart: null, heapEnd: null },
+  });
+}
+
+describe('deriveLiveModel — the context-policy axis (TICKET 064)', () => {
+  it('groups by the PAIR (arm, contextPolicy): two policies on one arm are two columns', () => {
+    const model = deriveLiveModel(policyLedger());
+
+    const armA = model.columns.filter((c) => c.arm === 'A');
+    expect(armA).toHaveLength(2);
+    // Both are arm A. The column identity therefore CANNOT be the arm, and no
+    // `column.arm as ArmTag` coercion in the view can recover this distinction
+    // — a coerced arm finds one of the two and shows it under both labels.
+    expect(armA.map(policyOf).sort()).toEqual(['default', 'trimmed']);
+  });
+
+  it('DOMINANT — realtime · default is computed from DEFAULT-policy samples only', () => {
+    const model = deriveLiveModel(policyLedger());
+    const dflt = model.columns.find((c) => c.arm === 'A' && policyOf(c) === 'default');
+    expect(dflt, 'expected a realtime · default column').toBeDefined();
+
+    // Hand-derived from [1000, 1100, 1200] alone.
+    expect(dflt!.p50Ms).toBe(LIVE_A_DEFAULT_ONLY_P50_MS);
+    // ...and NOT the figure the pool produces. This is the defect: the number
+    // was wrong, not missing.
+    expect(dflt!.p50Ms).not.toBe(LIVE_A_POOLED_P50_MS);
+    // The trimmed session's turns are not counted here either.
+    expect(dflt!.sessions).toBe(1);
+    expect(dflt!.utterancesCompleted).toBe(3);
+    expect(dflt!.disconnects).toBe(1);
+  });
+
+  it('realtime · trimmed is a real column carrying its own p50 / p95 / turns / disconnects', () => {
+    const model = deriveLiveModel(policyLedger());
+    const trimmed = model.columns.find((c) => c.arm === 'A' && policyOf(c) === 'trimmed');
+    expect(trimmed, 'expected a realtime · trimmed column').toBeDefined();
+
+    // Hand-derived from [4000, 4100]: n=2, ⌈0.5·2⌉−1 = 0 and ⌈0.95·2⌉−1 = 1.
+    expect(trimmed!.p50Ms).toBe(LIVE_A_TRIMMED_P50_MS);
+    expect(trimmed!.p95Ms).toBe(LIVE_A_TRIMMED_P95_MS);
+    expect(trimmed!.sessions).toBe(1);
+    expect(trimmed!.utterancesCompleted).toBe(2);
+    expect(trimmed!.disconnects).toBe(2);
+  });
+
+  it('the COST SLOPES split with the pair too — they are not read from a pooled column', () => {
+    const model = deriveLiveModel(policyLedger());
+    const dflt = model.columns.find((c) => c.arm === 'A' && policyOf(c) === 'default');
+    const trimmed = model.columns.find((c) => c.arm === 'A' && policyOf(c) === 'trimmed');
+    expect(dflt, 'expected a realtime · default column').toBeDefined();
+    expect(trimmed, 'expected a realtime · trimmed column').toBeDefined();
+
+    expect(dflt!.costPerMinuteMinute1).toBe(LIVE_A_COST.perMinuteMinute1);
+    expect(dflt!.costPerMinuteFinalMinute).toBe(LIVE_A_COST.perMinuteFinalMinute);
+    expect(trimmed!.costPerMinuteMinute1).toBe(LIVE_A_TRIMMED_COST.perMinuteMinute1);
+    expect(trimmed!.costPerMinuteFinalMinute).toBe(LIVE_A_TRIMMED_COST.perMinuteFinalMinute);
+
+    // Pooled, the slope rows are the MEAN of the two policies — 0.31 / 0.55.
+    // The slope IS the finding for Arm A, so this is the row that carries it.
+    expect(dflt!.costPerMinuteMinute1).not.toBeCloseTo(0.31, 6);
+    expect(dflt!.costPerMinuteFinalMinute).not.toBeCloseTo(0.55, 6);
+  });
+
+  it("'n/a' does not fragment cascade — arm B keeps exactly ONE column", () => {
+    const ledger = policyLedger();
+    // A second cascade take. 'n/a' says "this arm has no policy axis", so it
+    // joins the existing cascade column rather than opening a `cascade · n/a`.
+    ledger.appendLiveSession(
+      makeLiveSessionEntity({
+        id: 'live-arm-b2',
+        architecture: 'cascade',
+        providerTriple: { ...ARM_B_TRIPLE },
+        contextPolicy: 'n/a',
+        modelSnapshots: { ...ARM_B_TRIPLE },
+        utterances: [utterance('lu-b2-1', cascadeMarks(700))],
+        latency: { p50: 700, p95: 700, driftMinute1ToEnd: null },
+        stability: { utterancesCompleted: 1, disconnects: 0, heapStart: null, heapEnd: null },
+      }),
+    );
+
+    const model = deriveLiveModel(ledger);
+    expect(model.columns.filter((c) => c.arm === 'B')).toHaveLength(1);
+    expect(model.columns.find((c) => c.arm === 'B')!.sessions).toBe(2);
+    // Three columns in total: A·default, A·trimmed, B. Never a fourth.
+    expect(model.columns).toHaveLength(3);
+  });
+
+  it('a session declaring NO policy opens no column and is counted in NEITHER', () => {
+    const ledger = new RunLedger();
+    seedLiveSessions(ledger);
+    ledger.appendLiveSession(prePolicySession());
+
+    const model = deriveLiveModel(ledger);
+    const armA = model.columns.filter((c) => c.arm === 'A');
+    expect(armA).toHaveLength(1);
+    expect(policyOf(armA[0])).toBe('default');
+    // `undefined` is an EXCLUSION, not a synonym for 'default'. Folded in, the
+    // pool [1000, 1100, 1200, 9000, 9100] would answer 1200 and the session
+    // would add 2 to the turn count.
+    expect(armA[0]!.p50Ms).toBe(LIVE_A_DEFAULT_ONLY_P50_MS);
+    expect(armA[0]!.sessions).toBe(1);
+    expect(armA[0]!.utterancesCompleted).toBe(3);
+    // ...and it opens no column of its own either.
+    expect(model.columns.every((c) => policyOf(c) !== undefined)).toBe(true);
+    expect(model.columns).toHaveLength(2);
+  });
+
+  it('a ledger of nothing but policy-less sessions derives no column at all', () => {
+    const ledger = new RunLedger();
+    ledger.appendLiveSession(prePolicySession());
+
+    const model = deriveLiveModel(ledger);
+    expect(model.columns).toHaveLength(0);
+    expect(model.empty).toBe(true);
   });
 });

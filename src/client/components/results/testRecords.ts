@@ -124,7 +124,7 @@ export function runWithLatency(ms: number, overrides: Partial<AnnotatedRun> = {}
 
 export function makeLiveSessionEntity(overrides: Partial<LiveSession> = {}): LiveSession {
   entitySeq += 1;
-  return {
+  const session: LiveSession = {
     id: `live-${entitySeq}`,
     startedAt: T0,
     endedAt: T0 + 300_000,
@@ -141,6 +141,19 @@ export function makeLiveSessionEntity(overrides: Partial<LiveSession> = {}): Liv
     quality: { wer: null },
     ...overrides,
   };
+  // TICKET 064 — CONTEXT POLICY IS PART OF A SESSION'S IDENTITY, not decoration.
+  // The conversation-length card groups by the PAIR (arm, contextPolicy), and a
+  // session declaring NO policy is excluded from it rather than defaulted into
+  // `default` — so a fixture that merely FORGOT the field would silently drop
+  // out of every column and take its assertions with it. A fixture that does
+  // not care therefore gets the policy its architecture implies: 'n/a' for
+  // cascade, which has no context knob at all, and 'default' for realtime.
+  // A fixture that DOES care states it — including the pre-012 case, which is
+  // written as an explicit `contextPolicy: undefined` and is honoured here.
+  if (!('contextPolicy' in overrides)) {
+    session.contextPolicy = session.architecture === 'realtime' ? 'default' : 'n/a';
+  }
+  return session;
 }
 
 /* ---------------------------------------------------------------- sweeps -- */
@@ -823,6 +836,8 @@ export function seedLiveSessions(ledger: RunLedger): void {
       id: 'live-arm-a',
       architecture: 'realtime',
       providerTriple: undefined,
+      // TICKET 064 — stated, not implied. Arm A ran the DEFAULT context policy.
+      contextPolicy: 'default',
       modelSnapshots: { realtime: REALTIME_MODEL },
       utterances: liveUtterances(LIVE_A_LATENCIES, 0.3),
       latency: { p50: 1100, p95: 1200, driftMinute1ToEnd: LIVE_A_DRIFT_MS },
@@ -836,11 +851,78 @@ export function seedLiveSessions(ledger: RunLedger): void {
       id: 'live-arm-b',
       architecture: 'cascade',
       providerTriple: { ...ARM_B_TRIPLE },
+      // TICKET 064 — 'n/a' is not 'default': cascade is context-free BY DESIGN,
+      // so the knob does not exist for it (ledger.ts's LiveContextPolicy doc).
+      contextPolicy: 'n/a',
       modelSnapshots: { ...ARM_B_TRIPLE },
       utterances: liveUtterances(LIVE_B_LATENCIES, 0.06),
       latency: { p50: 700, p95: 800, driftMinute1ToEnd: LIVE_B_DRIFT_MS },
       cost: { ...LIVE_B_COST },
       stability: { utterancesCompleted: 3, disconnects: 0, heapStart: 18, heapEnd: 21 },
+      quality: { wer: null },
+    }),
+  );
+}
+
+/* TICKET 064 ------------------------------------------------- context policy -- */
+
+/**
+ * The SECOND arm-A session: same arm, TRIMMED context policy. Its latencies sit
+ * far enough from `LIVE_A_LATENCIES` that the pooled p50 and the default-only
+ * p50 are DIFFERENT NUMBERS — without that the two answers coincide and any
+ * assertion about pooling is vacuous. Nearest rank, sorted[⌈p·n⌉−1]:
+ *
+ *   default only  [1000, 1100, 1200]              n=3  ⌈1.5⌉−1 = 1  -> p50 1100
+ *   trimmed only  [4000, 4100]                    n=2  ⌈1.0⌉−1 = 0  -> p50 4000
+ *   POOLED        [1000, 1100, 1200, 4000, 4100]  n=5  ⌈2.5⌉−1 = 2  -> p50 1200
+ *
+ * The cost slopes are separated the same way: pooling them means their MEAN.
+ *   default only  $0.120 / $0.300   (LIVE_A_COST)
+ *   trimmed only  $0.500 / $0.800
+ *   POOLED (mean) $0.310 / $0.550
+ */
+export const LIVE_A_TRIMMED_LATENCIES = [4000, 4100] as const;
+/** p50 of the default-policy session alone — what `realtime · default` must show. */
+export const LIVE_A_DEFAULT_ONLY_P50_MS = 1100;
+/** p50 of both sessions pooled — what a column blind to context policy shows. */
+export const LIVE_A_POOLED_P50_MS = 1200;
+/** p50 of the trimmed-policy session alone — what `realtime · trimmed` must show. */
+export const LIVE_A_TRIMMED_P50_MS = 4000;
+export const LIVE_A_TRIMMED_P95_MS = 4100;
+export const LIVE_A_TRIMMED_COST = {
+  totalUsd: 1.6,
+  perMinuteMinute1: 0.5,
+  perMinuteFinalMinute: 0.8,
+};
+export const LIVE_A_TRIMMED_DRIFT_MS = 40;
+
+/**
+ * Appends ONE arm-A session under the trimmed context policy. Deliberately a
+ * separate seed from `seedLiveSessions`: every existing caller of that helper
+ * keeps the ledger it was written against, and only a test that is about the
+ * context-policy axis opts in.
+ */
+export function seedTrimmedLiveSession(ledger: RunLedger): void {
+  ledger.appendLiveSession(
+    makeLiveSessionEntity({
+      id: 'live-arm-a-trimmed',
+      architecture: 'realtime',
+      providerTriple: undefined,
+      contextPolicy: 'trimmed',
+      modelSnapshots: { realtime: REALTIME_MODEL },
+      utterances: LIVE_A_TRIMMED_LATENCIES.map((ms, i) => ({
+        id: `lu-trimmed-${i + 1}`,
+        // Live's own anchor: the endpointer's decision, then the first audio.
+        timings: { server_speech_stopped: 0, audio_queued: ms },
+        costUsd: 0.4,
+      })),
+      latency: {
+        p50: LIVE_A_TRIMMED_P50_MS,
+        p95: LIVE_A_TRIMMED_P95_MS,
+        driftMinute1ToEnd: LIVE_A_TRIMMED_DRIFT_MS,
+      },
+      cost: { ...LIVE_A_TRIMMED_COST },
+      stability: { utterancesCompleted: 2, disconnects: 2, heapStart: 20, heapEnd: 30 },
       quality: { wer: null },
     }),
   );

@@ -40,6 +40,9 @@ import {
   EXCLUDED_LATENCY_MS,
   FAILED_RECORDING_ID,
   FIXTURE_RECORDING_ID,
+  LIVE_A_DEFAULT_ONLY_P50_MS,
+  LIVE_A_POOLED_P50_MS,
+  LIVE_A_TRIMMED_P50_MS,
   MANUAL_RECORDING_ID,
   SHORT_RECORDING_ID,
   SHORT_SWEEP_ALL_FIVE_P50_MS,
@@ -54,6 +57,7 @@ import {
   seedExclusionCases,
   seedLiveSessions,
   seedShortRepSweep,
+  seedTrimmedLiveSession,
 } from '../components/results/testRecords';
 import ResultsView from './ResultsView';
 
@@ -488,11 +492,32 @@ describe('ResultsView — conversation-length card is sourced from LiveSessions'
     expect(within(card('live')).getByText('cascade')).toBeInTheDocument();
   });
 
-  it('fills the columns from deriveLiveModel, and leaves the un-recorded column blank', () => {
+  it('fills the columns from deriveLiveModel, per context policy and not pooled', () => {
     const ledger = new RunLedger();
     seedLiveSessions(ledger);
+    // TICKET 064 — THE ONE RE-POINTED ASSERTION IN THIS LOCKED FILE.
+    //
+    // This test used to seed a default-policy arm-A session ONLY and assert
+    // `p50/realtime-default === formatMs(armA.p50Ms)` with
+    // `armA = columns.find(c => c.arm === 'A')`. Both sides came from the same
+    // derivation, so it stayed green whatever that column pooled: it WAS the
+    // pooling bug expressed as a test. Two things change, and nothing else in
+    // this file does.
+    //
+    //  1. A TRIMMED arm-A session is seeded, so the default-only p50 (1100) and
+    //     the pooled p50 (1200) are different numbers by construction.
+    //  2. The expected p50s are LITERALS. A render compared against a model
+    //     that moved with it proves nothing.
+    seedTrimmedLiveSession(ledger);
     const model = deriveLiveModel(ledger);
-    const armA = model.columns.find((c) => c.arm === 'A')!;
+    // `arm === 'A'` no longer identifies a column on its own — a trimmed
+    // session derives arm A too. `contextPolicy` is not on LiveArmColumn yet,
+    // so it is read through a narrow cast at the site rather than widened.
+    const armA = model.columns.find(
+      (c) =>
+        c.arm === 'A' &&
+        ((c as { contextPolicy?: string }).contextPolicy ?? 'default') === 'default',
+    )!;
     const armB = model.columns.find((c) => c.arm === 'B')!;
     renderView(ledger);
 
@@ -505,6 +530,10 @@ describe('ResultsView — conversation-length card is sourced from LiveSessions'
     };
 
     expect(liveCell('p50', 'realtime-default')).toBe(formatMs(armA.p50Ms));
+    // The literal, hand-derived from [1000, 1100, 1200] alone.
+    expect(liveCell('p50', 'realtime-default')).toBe(formatMs(LIVE_A_DEFAULT_ONLY_P50_MS));
+    // ...and never the figure the trimmed session's turns drag it to.
+    expect(liveCell('p50', 'realtime-default')).not.toBe(formatMs(LIVE_A_POOLED_P50_MS));
     expect(liveCell('p50', 'cascade')).toBe(formatMs(armB.p50Ms));
     expect(liveCell('disconnects', 'realtime-default')).toBe(String(armA.disconnects));
     expect(liveCell('disconnects', 'cascade')).toBe(String(armB.disconnects));
@@ -513,8 +542,12 @@ describe('ResultsView — conversation-length card is sourced from LiveSessions'
       formatUsd(armA.costPerMinuteFinalMinute),
     );
 
-    // No LiveSession declares a trimmed-context policy, so that column is '—'.
-    expect(liveCell('p50', 'realtime-trimmed')).toBe(formatMs(null));
+    // TICKET 064 — a LiveSession DOES declare a trimmed-context policy (since
+    // ticket 012), and one is seeded above, so this column carries its own
+    // samples. It used to read '—' unconditionally: `LIVE_COLUMNS` gave it
+    // `arm: null` and `columnFor` returns undefined for a null arm, so the
+    // blank was never about the data.
+    expect(liveCell('p50', 'realtime-trimmed')).toBe(formatMs(LIVE_A_TRIMMED_P50_MS));
   });
 
   it('renders its OWN empty state when Runs exist but no LiveSession does', () => {
