@@ -2119,3 +2119,93 @@ describe('TICKET 055b — the envelope quotes the LAST RECORD, not the Recording
     expect(pairedDelta(run.timings)).toBe(50);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 059 — THE RUN RECORDS THE PRICE SOURCE IT WAS WRITTEN UNDER.
+//
+// `LiveSession` has carried `pricingVersion` since 052 R2, and `liveCostOf`
+// uses it as the discriminator: a session with no stamp priced NOTHING, whatever
+// zeros its utterances carry. That stamp is the only reason the Live footer
+// reads `session not measured` instead of `$0.00`.
+//
+// `Run` carries no such stamp, so the three Runs in `data/runs/` — every one of
+// them `"cost": 0` on the Run AND on all four of its utterance records, written
+// by a build with no cost model at all — read forward as MEASUREMENTS, and
+// Results › By Recording renders `$0.000` while Replay's cards render
+// `$0.000/min`. Two takes asserting the configuration was free.
+//
+// THE FIX IS THE STAMP, NOT THE FORMATTER (`formatCostUsd` is correct and
+// pinned), and a stamp nothing writes changes no screen: this is where the
+// PRODUCTION construction site is pinned. Adding the field to the type and to
+// the fixture builders satisfies every derivation test while `runner.ts` still
+// writes nothing and the operator still sees `$0.000`.
+//
+// AND IT IS STAMPED WHATEVER THE FIGURE IS. The stamp reports which price
+// source was in force, never what it came to; gating it on `cost !== null`
+// would make it a restatement of the cost and leave a Run that measured a real
+// zero indistinguishable from a Run nobody could price — the exact collapse
+// this ticket exists to prevent, reintroduced at the write path.
+// ---------------------------------------------------------------------------
+
+import { PRICING_VERSION } from '../../core/pricing';
+
+/** TICKET 059 — the `Run` shape with the stamp, as a widening of today's. */
+type StampedRun = Run & { pricingVersion?: string };
+
+describe('TICKET 059 — runOnce stamps the price source onto the Run it writes', () => {
+  it('stamps PRICING_VERSION on the produced Run and on the record it POSTs', async () => {
+    const h = makeHarness();
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+    // Not a display-time decoration: the stamp has to be ON THE RECORD, because
+    // the ledger is append-only and a Run written without one can never be
+    // retro-fixed — the same reason `corpusVersion` is copied onto the row.
+    expect(h.posted).toHaveLength(1);
+    expect((h.posted[0] as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+  });
+
+  it('stamps it even when the transport declares no rate and the cost is null', async () => {
+    // The fixture transport meters nothing, so this run's cost is UNMEASURED.
+    // The stamp still says which price source was in force — it reports the
+    // SOURCE, never the figure, and a stamp conditioned on the figure would be
+    // no discriminator at all.
+    const h = makeHarness();
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    expect(run.cost).toBeNull();
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+  });
+
+  it('stamps a manifest-backed run, whose utterance records carry the money', async () => {
+    // The shape of 7acb0cc9 and dbeb6d94: the Run is a container and the split
+    // costs live on the records. One stamp on the container covers all four —
+    // a per-record stamp would be a second vocabulary for one fact.
+    const h = corpusHarness();
+    const { run } = await runCorpus(h);
+
+    expect(utterancesOf(run)).toHaveLength(4);
+    expect(run.cost).toBeCloseTo(1, 10);
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+    expect((h.posted[0] as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+  });
+
+  it('stamps a FAILED run too — the price source is not a status report', async () => {
+    // 2ba6332b is `status: 'failed'` with `cost: 0`. A stamp withheld from
+    // failed runs would leave that record indistinguishable from a pre-059 one
+    // for a reason that has nothing to do with pricing.
+    const h = makeHarness({
+      script: [{ at: 30, type: 'error', message: 'STT provider 503', opaque: false, stage: 'stt' }],
+    });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(1000);
+    const { run } = await done;
+
+    expect(run.status).toBe('failed');
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+  });
+});

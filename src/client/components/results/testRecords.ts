@@ -95,7 +95,7 @@ export function makeRecordingEntity(overrides: Partial<Recording> = {}): Recordi
  */
 export function makeRunEntity(overrides: Partial<AnnotatedRun> = {}): AnnotatedRun {
   entitySeq += 1;
-  return {
+  const run: AnnotatedRun = {
     id: `run-${entitySeq}`,
     recordingId: 'rec-1',
     architecture: 'cascade',
@@ -115,6 +115,42 @@ export function makeRunEntity(overrides: Partial<AnnotatedRun> = {}): AnnotatedR
     annotations: { utteranceId: 'u1', repIndex: 1, corpusVersion: CORPUS_VERSION },
     ...overrides,
   };
+  // TICKET 059 — A RUN BUILT BY TODAY'S CODE CARRIES TODAY'S PRICE SOURCE,
+  // exactly as `makeLiveSessionEntity` already does (052 R2). The stamp is the
+  // discriminator between "measured, and it came to 0" and "written before a
+  // cost model existed"; a fixture builder that omitted it would make every
+  // stamped-cost test vacuous, because a `cost: 0` fixture would be
+  // indistinguishable from the three pre-059 Runs on disk.
+  //
+  // A fixture standing in for one of THOSE says so through
+  // `makeUnstampedRunEntity` below — never by forgetting the field.
+  (run as StampedRun).pricingVersion = PRICING_VERSION;
+  return run;
+}
+
+/**
+ * TICKET 059 — the `Run` shape with the price-source stamp, as a widening of
+ * today's declaration. Reading through this keeps these fixtures type-checking
+ * against the pre-059 `Run` while the assertions over them fail at runtime,
+ * which is exactly what a red test should do.
+ */
+export type StampedRun = AnnotatedRun & { pricingVersion?: string };
+
+/**
+ * TICKET 059 — a Run AS THE THREE IN `data/runs/` ARE: `cost: 0` on the Run and
+ * on every utterance record, and NO price source declared anywhere.
+ *
+ * Those zeros are not measurements. The build that wrote them had no cost model
+ * at all, so reading them forward publishes two takes asserting the
+ * configuration was free — the `$0.000` this ticket exists to delete. The
+ * absence of the stamp is the only thing on the record that says so, which is
+ * why it is expressed by DELETING the key rather than by writing a zero-ish
+ * value: `pricingVersion: ''` would be a claim, and absence is not a claim.
+ */
+export function makeUnstampedRunEntity(overrides: Partial<AnnotatedRun> = {}): AnnotatedRun {
+  const run = makeRunEntity(overrides);
+  delete (run as StampedRun).pricingVersion;
+  return run;
 }
 
 /** Gate-passing Run whose perceived latency (audio_queued − speech_end) is `ms`. */

@@ -197,3 +197,104 @@ describe('RunsList — rendering the gate constructs no AudioContext', () => {
     expect(document.querySelectorAll('audio[autoplay], video[autoplay]')).toHaveLength(0);
   });
 });
+
+/* =========================================================================
+ * TICKET 059 — THE REPLAY RUN CARD, THE SECOND SURFACE THAT STILL SAYS $0.000.
+ *
+ * `formatPerMinute` already carries 052's guard:
+ *
+ *     if (cost === null) return COST_NOT_MEASURED_CELL;
+ *
+ * The guard is real and it NEVER FIRES, because every stored `run.cost` is `0`,
+ * not `null` — the three Runs in `data/runs/` were written by a build with no
+ * cost model at all, and `0` was what it hardcoded. So both complete cards
+ * render `$0.000/min`: two takes reporting the configuration as free.
+ *
+ * `LiveSession` solved this with a `pricingVersion` stamp that `liveCostOf`
+ * reads as the discriminator. The Run gets the same stamp, and the card reads
+ * it — never a per-surface special case, and never a rule that says "0 means
+ * absent", which would delete the distinction from the other side.
+ * ====================================================================== */
+
+import { COST_NOT_MEASURED_CELL, PRICING_VERSION } from '../../../core/pricing';
+
+/** What a cost cell says when nobody could price it. Never `$0.00`. */
+const NOT_MEASURED = COST_NOT_MEASURED_CELL;
+
+/** TICKET 059 — the `Run` shape with the stamp, as a widening of today's. */
+type StampedRun = Run & { pricingVersion?: string };
+
+/** A run written by TODAY's code: it declares the price source it ran under. */
+function stampedRun(overrides: Partial<Run> & { id: string }): Run {
+  const run = makeRun(overrides);
+  (run as StampedRun).pricingVersion = PRICING_VERSION;
+  return run;
+}
+
+/** A run as the three in `data/runs/` are: `cost: 0`, no price source at all. */
+function unstampedRun(overrides: Partial<Run> & { id: string }): Run {
+  return makeRun(overrides);
+}
+
+/** The `$/min` cell of a run card. */
+function costOf(runId: string): string {
+  const cell = card(runId).querySelector('[data-run-cost]');
+  expect(cell, `run ${runId} has no [data-run-cost]`).not.toBeNull();
+  return (cell!.textContent ?? '').trim();
+}
+
+describe('TICKET 059 — a run card prices from the STAMP, never from the zero', () => {
+  it('a run written TODAY whose measured cost really is 0 still reads $0.000/min', () => {
+    // THE HALF THAT KEEPS THE FIX FROM DEGENERATING INTO "0 MEANS ABSENT". A
+    // configuration that really did cost nothing has to be able to say so, and
+    // a fix that reads every zero as an absence fails here — as it must.
+    mount([stampedRun({ id: 'run-real-zero', cost: 0 })]);
+
+    // RECORDING.durationMs is 60_000, so $/min is the Run cost verbatim.
+    expect(costOf('run-real-zero')).toBe('$0.000/min');
+    expect(costOf('run-real-zero')).not.toContain(NOT_MEASURED);
+  });
+
+  it('a stored, UNSTAMPED run reads not measured — never $0.000/min', () => {
+    mount([unstampedRun({ id: 'run-stored-zero', cost: 0 })]);
+
+    expect(costOf('run-stored-zero')).toBe(NOT_MEASURED);
+    expect(costOf('run-stored-zero')).not.toContain('$0.000');
+    expect(costOf('run-stored-zero')).not.toContain('/min');
+  });
+
+  it('an unstamped run with a NON-zero stored cost is unpriced too', () => {
+    // The stamp is the discriminator, not the value — in both directions. A
+    // figure written by a build that declared no rate source is not a
+    // measurement just because it happens to be non-zero.
+    mount([unstampedRun({ id: 'run-stored-nonzero', cost: 0.021 })]);
+
+    expect(costOf('run-stored-nonzero')).toBe(NOT_MEASURED);
+    expect(costOf('run-stored-nonzero')).not.toContain('$0.021');
+  });
+
+  it('still normalizes a stamped, priced run per audio minute', () => {
+    // The regression guard: the gate must not swallow a real figure, and $/min
+    // is still NORMALIZED rather than copied off the Run.
+    mount([stampedRun({ id: 'run-priced', cost: 0.021 })]);
+    expect(costOf('run-priced')).toBe('$0.021/min');
+  });
+
+  it('an unmeasured cost is still not a cheap run — the 052 guard survives', () => {
+    mount([stampedRun({ id: 'run-null-cost', cost: null as unknown as number })]);
+    expect(costOf('run-null-cost')).toBe(NOT_MEASURED);
+  });
+
+  it('renders no $0.00 anywhere in a list of unstamped cards', () => {
+    // The eval's own check at the surface it names: `must_not_contain`
+    // ["$0.000", "$0.00", "0.000/min"], `must_include` "not measured".
+    mount([
+      unstampedRun({ id: 'run-u1', cost: 0 }),
+      unstampedRun({ id: 'run-u2', cost: 0, architecture: 'realtime', armTag: 'A' }),
+    ]);
+
+    expect(document.body.textContent).toContain(NOT_MEASURED);
+    expect(document.body.textContent).not.toContain('$0.00');
+    expect(document.body.textContent).not.toContain('0.000/min');
+  });
+});

@@ -122,3 +122,167 @@ describe('R2-1b · a partially priced arm discloses its denominator', () => {
     expect(agg.measuredCostRecords).toBe(1);
   });
 });
+
+/* -------------------------------------------------------------------------
+ * TICKET 059 — THE RUN SIDE OF THE SAME RULE, AND THE HALF THAT KEEPS IT HONEST.
+ *
+ * 052 R2 gave `LiveSession` a `pricingVersion` stamp and made `liveCostOf` read
+ * it as THE DISCRIMINATOR: a session with no stamp priced nothing, whatever
+ * zeros its utterances carry. That is the only reason the Live footer reads
+ * `session not measured` today.
+ *
+ * `Run` has no stamp, so the three Runs in `data/runs/` — `"cost": 0` on the Run
+ * and on all four utterance records of each complete one, written by a build
+ * with no cost model at all — come back through `costFromStored(0)` as
+ * MEASUREMENTS, and every Run-fed surface renders `$0.000`.
+ *
+ * THE POINT OF THIS BLOCK IS THE PAIR, NOT THE ZERO. A fix that reads every `0`
+ * as "unmeasured" deletes the distinction from the other side: zero IS a
+ * measurement, and a configuration that really did cost nothing has to be able
+ * to say so. The two fixtures below are IDENTICAL IN EVERY STORED FIELD BUT
+ * ONE, and they must produce OPPOSITE answers — that is the whole assertion.
+ * ---------------------------------------------------------------------- */
+
+import { PRICING_VERSION } from '../../core/pricing';
+import { runSamples, type Run, type RunUtterance } from './ledger';
+import {
+  makeRunEntity,
+  makeUnstampedRunEntity,
+  resetEntitySeq,
+} from '../components/results/testRecords';
+
+/** TICKET 059 — the `Run` shape with the stamp, as a widening of today's. */
+type StampedRun = Run & { pricingVersion?: string };
+
+/** Four `complete` records each carrying a stored `0` — 7acb0cc9's shape. */
+function zeroCostRecords(): RunUtterance[] {
+  return [1, 2, 3, 4].map((i) => ({
+    utteranceId: `u${i}`,
+    index: i,
+    category: 'short-reply' as const,
+    timings: { speech_end: 0, audio_queued: 700 + i },
+    transcripts: {},
+    cost: 0,
+    status: 'complete' as const,
+    errors: [],
+  }));
+}
+
+/** The pair, built from the same seq so every other field is byte-identical. */
+function costZeroPair(overrides: Parameters<typeof makeRunEntity>[0] = {}): {
+  stamped: Run;
+  unstamped: Run;
+} {
+  resetEntitySeq();
+  const stamped = makeRunEntity({ cost: 0, ...overrides });
+  resetEntitySeq();
+  const unstamped = makeUnstampedRunEntity({ cost: 0, ...overrides });
+  return { stamped, unstamped };
+}
+
+describe('TICKET 059 · the STAMP is the discriminator, and the VALUE is not', () => {
+  it('the two fixtures differ in exactly one field: the price source', () => {
+    // THE PREMISE, ASSERTED. Without this the opposite outcomes below could be
+    // coming from any other difference the builder happened to introduce.
+    const { stamped, unstamped } = costZeroPair();
+
+    expect((stamped as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+    expect(Object.keys(unstamped)).not.toContain('pricingVersion');
+    expect(stamped.cost).toBe(0);
+    expect(unstamped.cost).toBe(0);
+    expect({ ...stamped, pricingVersion: undefined }).toEqual({
+      ...unstamped,
+      pricingVersion: undefined,
+    });
+  });
+
+  it('a STAMPED run whose measured cost really is 0 still reports a measurement', () => {
+    // THE MOST IMPORTANT ASSERTION IN THE TICKET. A fix that maps every `0` to
+    // "not measured" fails here, and it must: `0` and `null` are different
+    // facts in BOTH directions.
+    const { stamped } = costZeroPair();
+    const samples = runSamples(stamped);
+
+    expect(samples).toHaveLength(1);
+    expect(samples[0]!.cost).toBe(0);
+    expect(samples[0]!.cost).not.toBeNull();
+  });
+
+  it('an UNSTAMPED run priced nothing, whatever zero it stored', () => {
+    const { unstamped } = costZeroPair();
+    const samples = runSamples(unstamped);
+
+    expect(samples).toHaveLength(1);
+    expect(samples[0]!.cost).toBeNull();
+  });
+
+  it('carries the same verdict down to the utterance records — the measured atom', () => {
+    // 7acb0cc9 and dbeb6d94 store `"cost": 0` on the RECORDS as well as on the
+    // Run, and the records are what every aggregate actually sums. A stamp
+    // honoured only at Run level leaves both screens exactly where they were.
+    const { stamped, unstamped } = costZeroPair({ utterances: zeroCostRecords() });
+
+    expect(runSamples(stamped).map((s) => s.cost)).toEqual([0, 0, 0, 0]);
+    expect(runSamples(unstamped).map((s) => s.cost)).toEqual([null, null, null, null]);
+  });
+
+  it('leaves latency, status and the sample count alone on both sides', () => {
+    // A cost hole is one axis of three (PRD §8) and must not evict the other
+    // two — the same rule 052 already holds for a null cost.
+    const { stamped, unstamped } = costZeroPair({ utterances: zeroCostRecords() });
+
+    for (const run of [stamped, unstamped]) {
+      const samples = runSamples(run);
+      expect(samples).toHaveLength(4);
+      expect(samples.every((s) => s.status === 'complete')).toBe(true);
+      expect(samples.map((s) => s.latencyMs)).toEqual([701, 702, 703, 704]);
+    }
+  });
+});
+
+describe('TICKET 059 · runAggregates reads the stamp, not the zero', () => {
+  it('an unstamped arm reports costUsd null and a 0 denominator, with n untouched', () => {
+    const { unstamped } = costZeroPair();
+    const agg = new RunLedger();
+    agg.appendRun(unstamped);
+    const armB = agg.runAggregates().perArm['B']!;
+
+    expect(armB.costUsd).toBeNull();
+    // THE ASSERTION THE DOLLARS CANNOT MAKE: `null` and `0` are the same total
+    // as far as a reader of the money is concerned, and `0 of 1` is not.
+    expect(armB.measuredCostSamples).toBe(0);
+    expect(armB.n).toBe(1);
+  });
+
+  it('a stamped arm whose spend really is 0 reports 0 over a FULL denominator', () => {
+    const { stamped } = costZeroPair();
+    const agg = new RunLedger();
+    agg.appendRun(stamped);
+    const armB = agg.runAggregates().perArm['B']!;
+
+    expect(armB.costUsd).toBe(0);
+    expect(armB.costUsd).not.toBeNull();
+    expect(armB.measuredCostSamples).toBe(1);
+    expect(armB.n).toBe(1);
+  });
+
+  it('does not let an unstamped run drag a stamped arm total to null', () => {
+    // The mixed case. An unmeasured cost contributes NOTHING — it does not
+    // contribute a zero, and it does not veto the figures it sits beside.
+    resetEntitySeq();
+    const agg = new RunLedger();
+    agg.appendRun(makeRunEntity({ id: 'run-priced', cost: 0.02 }));
+    agg.appendRun(
+      makeUnstampedRunEntity({
+        id: 'run-unstamped',
+        cost: 0,
+        annotations: { utteranceId: 'u2', repIndex: 2 },
+      }),
+    );
+    const armB = agg.runAggregates().perArm['B']!;
+
+    expect(armB.costUsd).toBeCloseTo(0.02, 10);
+    expect(armB.measuredCostSamples).toBe(1);
+    expect(armB.n).toBe(2);
+  });
+});

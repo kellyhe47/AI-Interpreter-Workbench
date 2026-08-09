@@ -281,3 +281,214 @@ describe('AC5 · the reported cost is the STORED one, read back verbatim', () =>
     expect(agg.provenance.measuredCostSamples).toBe(1);
   });
 });
+
+/* -------------------------------------------------------------------------
+ * TICKET 059 — THE CONSUMERS OF A STORED ZERO.
+ *
+ * 052's own round-2 review named the pattern: "the module is solid, its
+ * consumers are untested." `pricing.ts` is correct and heavily pinned; the
+ * derivation that reads a STORED figure forward is not. The three Runs in
+ * `data/runs/` carry `"cost": 0` on the Run and on every utterance record, from
+ * a build with no cost model at all, and `costFromStored(0)` hands the By
+ * Recording table a MEASUREMENT — which is why the COST column renders `$0.000`
+ * on both complete rows today.
+ *
+ * `LiveSession` already solves exactly this with a `pricingVersion` stamp that
+ * `liveCostOf` reads as the discriminator. `Run` gets the same stamp, and these
+ * assertions are about what the DERIVATION does with it — including, first, what
+ * it must NOT do: collapse a measured zero into an absence.
+ * ---------------------------------------------------------------------- */
+
+import { PRICING_VERSION, formatCostUsd } from '../../../core/pricing';
+import { groupByCategory, type CategoryGroupRow } from './derive';
+import { makeUnstampedRunEntity, type StampedRun } from './testRecords';
+
+/**
+ * TICKET 059 — the By Recording row with its cost DENOMINATOR attached, as a
+ * widening of today's shape. `$0.06 over 2 of 3 samples` and `$0.06 over 3 of 3`
+ * are different claims and the dollars cannot tell them apart — the same
+ * disclosure the experiment card's provenance line and the Live footer carry.
+ */
+type CostDenominatorRow = CostGroupRow & { measuredCostSamples?: number };
+
+const REC_STAMPED = 'rec-stamped-zero';
+const REC_UNSTAMPED = 'rec-unstamped-zero';
+
+/** Four `complete` records each storing a `0` — the shape of 7acb0cc9. */
+function zeroCostRecords() {
+  return [1, 2, 3, 4].map((i) => ({
+    utteranceId: `u${i}`,
+    index: i,
+    category: 'short-reply' as const,
+    timings: { speech_end: 0, audio_queued: 700 + i },
+    transcripts: {},
+    cost: 0,
+    status: 'complete' as const,
+    errors: [],
+  }));
+}
+
+/** Two rows differing ONLY in whether their Run declared a price source. */
+function seedStampedAndUnstampedZeroRuns(): void {
+  ledger.appendRecording(makeRecordingEntity({ id: REC_STAMPED, label: 'stamped clip' }));
+  ledger.appendRecording(makeRecordingEntity({ id: REC_UNSTAMPED, label: 'unstamped clip' }));
+  ledger.appendRun(
+    makeRunEntity({
+      id: 'run-stamped-zero',
+      recordingId: REC_STAMPED,
+      cost: 0,
+      utterances: zeroCostRecords(),
+    }),
+  );
+  ledger.appendRun(
+    makeUnstampedRunEntity({
+      id: 'run-unstamped-zero',
+      recordingId: REC_UNSTAMPED,
+      cost: 0,
+      utterances: zeroCostRecords(),
+    }),
+  );
+}
+
+function rowFor(recordingId: string): CostDenominatorRow {
+  const row = (groupByRecording(ledger) as unknown as CostDenominatorRow[]).find(
+    (r) => r.recordingId === recordingId,
+  );
+  expect(row, `no By Recording row for ${recordingId}`).toBeDefined();
+  return row!;
+}
+
+describe('TICKET 059 · a measured 0 and an unpriced 0 are different rows', () => {
+  it('the two fixtures differ only in the price-source stamp', () => {
+    // THE PREMISE, ASSERTED — otherwise the opposite verdicts below could be
+    // coming from any other difference between the two fixtures.
+    seedStampedAndUnstampedZeroRuns();
+    const runs = ledger.getRuns() as StampedRun[];
+    const stamped = runs.find((r) => r.id === 'run-stamped-zero')!;
+    const unstamped = runs.find((r) => r.id === 'run-unstamped-zero')!;
+
+    expect(stamped.pricingVersion).toBe(PRICING_VERSION);
+    expect(Object.keys(unstamped)).not.toContain('pricingVersion');
+    expect(stamped.cost).toBe(0);
+    expect(unstamped.cost).toBe(0);
+  });
+
+  it('a Run written TODAY whose measured cost really is 0 still reports $0.000', () => {
+    // THE HALF THAT KEEPS THE FIX FROM DEGENERATING INTO "0 MEANS ABSENT".
+    // Mapping every zero to `not measured` passes every other assertion in this
+    // ticket and fails here — a configuration that really did cost nothing has
+    // to be able to say so.
+    seedStampedAndUnstampedZeroRuns();
+    const row = rowFor(REC_STAMPED);
+
+    expect(row.n).toBe(4);
+    expect(row.costUsd).toBe(0);
+    expect(row.costUsd).not.toBeNull();
+    expect(row.costCell).toBe('$0.000');
+    expect(row.costCell).not.toBe(COST_NOT_MEASURED_CELL);
+    // Through the ONE formatter, never a second one invented for this row.
+    expect(row.costCell).toBe(formatCostUsd(row.costUsd));
+  });
+
+  it('a Run with NO price source reports not measured, never $0.000', () => {
+    seedStampedAndUnstampedZeroRuns();
+    const row = rowFor(REC_UNSTAMPED);
+
+    expect(row.n).toBe(4);
+    expect(row.costUsd).toBeNull();
+    expect(row.costCell).toBe(COST_NOT_MEASURED_CELL);
+    expect(row.costCell).not.toContain('$0.000');
+  });
+
+  it('the by-category rows follow the same rule — one vocabulary, both tables', () => {
+    // `groupByCategory` reads the same records through the same `costOf`. A gate
+    // applied per-surface would leave one of these two tables saying the run was
+    // free while the other says nobody priced it.
+    // Keyed on (category × arm × direction), so the two must sit on DIFFERENT
+    // arms to be two rows at all — the stamp is the only difference that bears
+    // on the cost.
+    ledger.appendRecording(makeRecordingEntity({ id: REC_STAMPED, label: 'stamped clip' }));
+    ledger.appendRecording(makeRecordingEntity({ id: REC_UNSTAMPED, label: 'unstamped clip' }));
+    ledger.appendRun(
+      makeRunEntity({ id: 'run-cat-b', recordingId: REC_STAMPED, cost: 0, utterances: zeroCostRecords() }),
+    );
+    ledger.appendRun(
+      makeUnstampedRunEntity({
+        id: 'run-cat-c',
+        recordingId: REC_UNSTAMPED,
+        providerTriple: { ...ARM_C_TRIPLE },
+        modelSnapshots: { ...ARM_C_TRIPLE },
+        armTag: 'C',
+        cost: 0,
+        utterances: zeroCostRecords(),
+      }),
+    );
+
+    const rows = groupByCategory(ledger) as unknown as Array<CategoryGroupRow & { costCell: string }>;
+    const cellByArm = new Map(rows.map((r) => [r.arm, r.costCell]));
+
+    expect(cellByArm.get('B')).toBe('$0.000');
+    expect(cellByArm.get('C')).toBe(COST_NOT_MEASURED_CELL);
+  });
+});
+
+describe('TICKET 059 · the By Recording row discloses its cost denominator', () => {
+  it('reports 0 measured of its samples when the Run declared no price source', () => {
+    // The experiment card's provenance line and the Live footer both carry
+    // `measured of total`; this row is the one place on the screen that does
+    // not, and the money alone cannot supply it — summing a missing cost as 0
+    // and skipping it produce the SAME total.
+    seedStampedAndUnstampedZeroRuns();
+    const row = rowFor(REC_UNSTAMPED);
+
+    expect(row.measuredCostSamples).toBe(0);
+    expect(row.n).toBe(4);
+  });
+
+  it('reports a full denominator for the stamped row', () => {
+    seedStampedAndUnstampedZeroRuns();
+    const row = rowFor(REC_STAMPED);
+
+    expect(row.measuredCostSamples).toBe(4);
+    expect(row.measuredCostSamples).toBe(row.n);
+  });
+
+  it('reports the honest denominator on a PARTIALLY priced row', () => {
+    // The case both a `null` total and a full denominator would misreport.
+    ledger.appendRecording(makeRecordingEntity({ id: 'rec-mixed', label: 'mixed clip' }));
+    ledger.appendRun(
+      makeRunEntity({
+        id: 'run-mixed',
+        recordingId: 'rec-mixed',
+        cost: MEASURED_A,
+        utterances: [
+          {
+            utteranceId: 'u1',
+            index: 1,
+            category: 'short-reply',
+            timings: { speech_end: 0, audio_queued: 700 },
+            transcripts: {},
+            cost: MEASURED_A,
+            status: 'complete',
+            errors: [],
+          },
+          {
+            utteranceId: 'u2',
+            index: 2,
+            category: 'short-reply',
+            timings: { speech_end: 0, audio_queued: 900 },
+            transcripts: {},
+            cost: UNMEASURED,
+            status: 'complete',
+            errors: [],
+          },
+        ],
+      }),
+    );
+    const row = rowFor('rec-mixed');
+
+    expect(row.n).toBe(2);
+    expect(row.measuredCostSamples).toBe(1);
+    expect(row.costUsd).toBeCloseTo(MEASURED_A, 10);
+  });
+});

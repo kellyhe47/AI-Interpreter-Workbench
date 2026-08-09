@@ -8,6 +8,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+import { PRICING_VERSION } from '../../core/pricing';
 import { WER_NORMALIZATION_VERSION } from '../../core/wer';
 import type { BlindComparison, LiveSession, NewRecording, Run, WerScore } from './types';
 
@@ -174,8 +175,15 @@ export function makeNotApplicableWerScore(overrides: Partial<WerScore> = {}): We
   });
 }
 
+/**
+ * TICKET 059 — the stored `Run` shape with the price-source stamp, as a
+ * widening of today's declaration. It keeps this module type-checking against
+ * the pre-059 mirror while the assertions over it fail at runtime.
+ */
+export type StampedRun = Run & { pricingVersion?: string };
+
 export function makeRun(overrides: Partial<Run> = {}): Run {
-  return {
+  const run: Run = {
     id: 'run-1',
     recordingId: 'rec-1',
     architecture: 'cascade',
@@ -192,4 +200,21 @@ export function makeRun(overrides: Partial<Run> = {}): Run {
     createdAt: 1_700_000_000_000,
     ...overrides,
   };
+  // TICKET 059 — a Run built by TODAY's code carries today's price source, the
+  // client mirror's rule field-for-field (see `makeRunEntity`). Absence is what
+  // marks the three pre-059 Runs in `data/runs/`, and it is expressed by
+  // `makeUnstampedRun` below rather than by a builder that forgets the field.
+  (run as StampedRun).pricingVersion = PRICING_VERSION;
+  return run;
+}
+
+/**
+ * TICKET 059 — a stored Run as the three in `data/runs/` are: `cost: 0` and no
+ * price source declared. That zero is not a measurement, and the missing stamp
+ * is the only thing on the record that says so.
+ */
+export function makeUnstampedRun(overrides: Partial<Run> = {}): Run {
+  const run = makeRun(overrides);
+  delete (run as StampedRun).pricingVersion;
+  return run;
 }

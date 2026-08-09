@@ -149,3 +149,82 @@ describe('R2-8b · the exported latency sample keeps its REPLAY anchor', () => {
     expect(config.measuredCostRuns).toBe(1);
   });
 });
+
+/* =========================================================================
+ * TICKET 059 — THE BUNDLE MUST AGREE WITH THE SCREEN.
+ *
+ * The bundle is the artifact the write-up cites, and it is where a misreading
+ * becomes permanent. `exportResults` reads `run.cost` through the same
+ * `costFromStored`, so the three Runs in `data/runs/` — `"cost": 0`, written by
+ * a build with no cost model at all — export as MEASURED zeros while the screen
+ * this ticket fixes says `not measured`. One of the two is lying, and the
+ * bundle is the copy that outlives the session.
+ *
+ * `pricingVersion` is already stamped on the BUNDLE (`summariseArm`), which is a
+ * statement about the rate table the EXPORT ran under — it says nothing about
+ * the rate table the RUN ran under, and it is precisely the pre-059 Runs that
+ * ran under none.
+ * ====================================================================== */
+
+import { makeUnstampedRun } from '../server/storage/test-support';
+
+/** A gate-passing Arm B run as the three in `data/runs/` are: no price source. */
+function unstampedArmBRun(id: string, cost: number | null, overrides: Partial<Run> = {}): Run {
+  return makeUnstampedRun({
+    id,
+    recordingId: 'rec-1',
+    architecture: 'cascade',
+    providerTriple: B_TRIPLE,
+    modelSnapshots: { ...B_TRIPLE },
+    origin: 'sweep',
+    status: 'complete',
+    timings: { speech_end: 1_000, audio_queued: 1_500 },
+    cost: cost as unknown as number,
+    ...overrides,
+  });
+}
+
+describe('TICKET 059 · the exported bundle prices from the stamp, not from the zero', () => {
+  it('a run written TODAY whose measured cost really is 0 exports as a MEASURED 0', async () => {
+    // THE HALF THAT KEEPS THE FIX FROM DEGENERATING INTO "0 MEANS ABSENT",
+    // asserted in the artifact as well as on the screen.
+    const config = await summaryFor([armBRun('run-real-zero', 0)]);
+
+    expect(config.costUsd).toBe(0);
+    expect(config.costUsd).not.toBeNull();
+    expect(config.measuredCostRuns).toBe(1);
+    expect(config.costCell).toBe('$0.000');
+  });
+
+  it('an UNSTAMPED run exports costUsd null and a not-measured cell', async () => {
+    const config = await summaryFor([unstampedArmBRun('run-stored-zero', 0)]);
+
+    expect(config.costUsd).toBeNull();
+    expect(config.measuredCostRuns).toBe(0);
+    expect(config.costCell).toBe(COST_NOT_MEASURED_CELL);
+    expect(config.costCell).not.toContain('$0.00');
+    // An unpriced run is not an unrun run — ticket 027's rule, one axis over.
+    expect(config.n).toBe(1);
+  });
+
+  it('does not let an unstamped run enter a stamped arm total', async () => {
+    const config = await summaryFor([
+      armBRun('run-priced', 0.02),
+      unstampedArmBRun('run-stored-zero', 0),
+    ]);
+
+    expect(config.costUsd).toBeCloseTo(0.02, 10);
+    // THE ASSERTION THE DOLLARS CANNOT MAKE: a `0` folded in silently gives the
+    // SAME total. `1` against `n: 2` is what separates them.
+    expect(config.measuredCostRuns).toBe(1);
+    expect(config.n).toBe(2);
+  });
+
+  it('keeps the bundle-level rate stamp, which answers a different question', async () => {
+    // `pricingVersion` on the CONFIGURATION says which rate table the export ran
+    // under. It is not, and must not become, a claim about the runs.
+    const config = await summaryFor([unstampedArmBRun('run-stored-zero', 0)]);
+    expect(config.pricingVersion).toBe(PRICING_VERSION);
+    expect(config.costCell).toBe(COST_NOT_MEASURED_CELL);
+  });
+});
