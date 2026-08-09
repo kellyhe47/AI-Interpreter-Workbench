@@ -88,3 +88,58 @@ runs is in flight.
 `02-clock-inversion-is-per-utterance-and-progressive.json`,
 `03-experiment-card-requires-real-sweep-samples.json`,
 `04-provenance-reports-actual-n.json`
+
+---
+
+## CORRECTION — verified 2026-08-09, supersedes the framing above
+
+Independent verification refined two things in this ticket. **Read this before implementing.**
+
+### The `-13973 ms` has TWO distinct causes, not one
+
+1. **A run-envelope mark-aggregation bug — the direct cause of the headline number.** The Run record
+   pairs **utterance 4's `speech_end` (…899148)** with **utterance 1's `audio_queued` (…885175)**.
+   `speech_end` keeps the LAST utterance's value; `audio_queued` keeps the FIRST's. `885175 − 899148
+   = −13973`. **This is a last-wins-vs-first-wins bug at the Run envelope, not a clock problem** —
+   both marks are on the same clock, so the audit's "two clocks" diagnosis is wrong and a same-clock
+   assertion would not have caught it.
+2. **Genuine per-utterance drift — a separate defect.** +3424 / +1231 / **−1435** / **−2364** ms.
+   Utterances 2 and 3 are inverted on their own marks, independent of the envelope bug.
+
+**Fix both.** Fixing only the envelope makes the headline number plausible while two of four
+utterances remain physically impossible.
+
+### The negative run is NOT aggregate-eligible — the audit's claim is false
+
+`7acb0cc9` is `origin: 'manual'`, and `isAggregatableRun` (`ledger.ts:574`) requires
+`origin === 'sweep'`. It contributes **zero** samples to any aggregate. The audit's follow-on —
+*"a single negative sample silently drags a p50 below the 1.5 s benchmark"* — **is false today**, and
+it contradicts the audit's own P0-3 evidence that all 3 runs are manual.
+**The gate is working.** This ticket is about a wrong number being *displayed*, not aggregated.
+Do not add a second gate to fix a leak that does not exist.
+
+### The experiment-card gate needs no fix — and the reported symptom is structurally impossible
+
+`exp1` and `exp2` are built by the SAME call under the SAME `empty` flag (`ResultsView.tsx:1091`),
+and `deriveComparison` returns `null` unless both arms have an aggregate. Exp 2 (B vs C) is strictly
+*harder* to populate than Exp 1 (A vs B). **Exp 1 empty ⟹ Exp 2 empty. There is no path producing
+the reported Exp1-empty/Exp2-full asymmetry.** Locally-appended `records` never reach
+`runAggregates()` (which reads `this.runs` only); LiveSessions reach only `deriveLiveModel`;
+`?fixture=1` hands back a fresh in-memory ledger with no runs, making the cards *more* empty.
+
+**Keep the gate as a pinned invariant** (golden eval `03` encodes the observed-correct behaviour),
+but do not go looking for a leak. One residual risk is real and worth a guard: `hydrateLedger` is
+**add-only and never replaces** (`:116-132`), so a stale `localStorage` blob containing sweep runs
+would survive indefinitely against an empty server. No current code path can create one — but the
+add-only merge is the mechanism that would let it persist.
+
+### P1-5 is FALSE — the Live card's figures are honest
+
+The audit claimed the Live card's p50s come from `localStorage` while the persisted record is null.
+`deriveLiveModel` **never reads `session.latency.p50`** — it recomputes from utterance timings
+(`derive.ts:1223-1228`). Recomputing from `data/live-sessions.jsonl` **alone** gives realtime p50
+**399 ms** and cascade p50 **1487 ms** → the exact `0.40 s` / `1.50 s` on screen. The stored
+`p50: null` is dead data nothing reads.
+This does not weaken the ledger-divergence defect above, whose mechanism is pinned independently —
+but it removes the supporting narrative, and **the honest cascade figures (p50 1487 ms, p95 2858 ms
+over 16 samples) partially meet the rubric's "under 3s, target under 2s" on real data.**
