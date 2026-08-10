@@ -102,3 +102,59 @@ A **Cantonese voice id** from their ElevenLabs voice library. Voice ids are acco
 library-specific, so this cannot be chosen from the repo. Until it exists, Part 1 cannot be
 implemented honestly — and shipping `language_code: 'zh'` as a stand-in would request Mandarin,
 which is the defect, not the fix.
+
+---
+
+## CORRECTION (2026-08-10) — supersedes Part 1's diagnosis above
+
+Two corrections from the operator, who is a native Cantonese speaker, plus two vendor facts I
+verified afterwards. **Read this instead of Part 1's "written Cantonese" framing.**
+
+### 1. The written-form framing was wrong
+
+I proposed distinguishing "written Cantonese" from "standard written Chinese" at the MT stage.
+The operator's correction: **the characters are shared.** For anything clinical the text is standard
+characters either way, and Mandarin and Cantonese speakers read *the same characters* with different
+pronunciation — 你好 is *nǐ hǎo* or *néih hóu* depending on the reader.
+
+So this was never a text-form problem. **It is a pronunciation-selection problem at the TTS**, and
+the MT prompt needs no change.
+
+### 2. There is no Chinese voice in the account, and it would not matter
+
+Queried the operator's ElevenLabs library: **32 voices, all English, Hindi or Spanish.** No `zh`.
+
+It is moot regardless — `eleven_flash_v2_5` is multilingual, so the **model** decides pronunciation
+from the text and the **voice** supplies only timbre. Swapping voice ids changes how it sounds, not
+what language it speaks.
+
+### 3. THE FINDING — the two TTS vendors differ structurally, and only one can do this
+
+| | mechanism | Cantonese |
+|---|---|---|
+| **Arm B — `gpt-4o-mini-tts`** | natural-language **`instructions`** field, documented to steer *accent*, intonation, tone | **reachable** — it can be told to read the characters with Cantonese pronunciation |
+| **Arm C — `eleven_flash_v2_5`** | fixed language list: v2's 29 languages **+ Hungarian, Norwegian, Vietnamese** | **NOT reachable at any price** — "Chinese" means Mandarin; Cantonese is absent, and ISO 639-1 has no code for it either |
+
+**This is the best result Experiment 2 could have produced.** Its question is *"what does swapping
+providers buy?"* — and the answer is not a latency delta. It is that one vendor's steerability
+reaches a language the other cannot reach **at all**, which is exactly PRD §7's *provider
+flexibility* Key Impact Metric with evidence rather than assertion.
+
+It also gives the coverage card an honest EN→Cantonese cascade row for the first time: **reached on
+Arm B, not reached on Arm C** — replacing a claim that was never true of either.
+
+### Revised acceptance criteria for Part 1
+
+- [ ] `openai-tts` accepts a pronunciation instruction and sends it as the API's `instructions`
+      field, routed through `resolveTriple` exactly as `targetLanguage` (062) and `languageCode`
+      (069) already are
+- [ ] For `en→yue` the instruction names Cantonese pronunciation explicitly; for `en→es` and any
+      direction with no special requirement **no `instructions` field is sent at all** — absent, never
+      a guessed default
+- [ ] Falsifiable on the wire, per direction: the `instructions` value for `en→yue` differs from
+      `en→es`, and `en→es` sends none
+- [ ] **`elevenlabs-tts` is NOT given a Cantonese `language_code`.** ISO 639-1 cannot express it and
+      `zh` would request Mandarin — the defect, shipped as the fix. Arm C's inability is a **finding
+      to report**, not a gap to paper over.
+- [ ] The coverage card records Arm B reached / Arm C not reached for EN→Cantonese on cascade, and
+      `FINDINGS.md` carries the vendor asymmetry as Experiment 2's real result
