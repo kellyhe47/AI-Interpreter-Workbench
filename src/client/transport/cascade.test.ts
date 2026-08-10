@@ -215,6 +215,35 @@ describe('CascadeTransport inbound mapping', () => {
     expect(h.completes[0]).toMatchObject(record);
   });
 
+  /**
+   * TICKET 053 — `utt` RIDES THE ENVELOPE AND MUST REACH THE HANDLER.
+   *
+   * An UtteranceRecord has no `utt` field — its identity is `id: "utt-3"` —
+   * and the wire message carries the number beside it. This transport forwarded
+   * `msg.record` alone, so every consumer that files by `utt` got `undefined`
+   * and filed nothing. The server-priced cascade cost was the casualty: it sat
+   * on the socket, in `record.costUnits`, while the stored Run read
+   * `cost: null`.
+   *
+   * IT SURVIVED A TEST SUITE because the runner's fixture transport puts `utt`
+   * INSIDE the record it emits — a shape the real server never sends. Testing
+   * against that fixture proved the runner reads a field the wire does not
+   * deliver. Hence this assertion, at the seam where the two shapes meet.
+   */
+  it('carries the envelope’s utt onto the completion — the record has none of its own', async () => {
+    const h = makeHarness();
+    const ws = await startConnected(h);
+    const record = { id: 'utt-3', costUnits: 0.00042 } as unknown as UtteranceRecord;
+
+    ws.emitJson({ type: 'utterance.complete', utt: 3, record });
+
+    expect(h.completes[0]!.utt).toBe(3);
+    // ...and the priced figure rides along with it, keyed to the right turn.
+    expect(h.completes[0]!.costUnits).toBe(0.00042);
+    // The record genuinely has no utt of its own: this is not a tautology.
+    expect((record as { utt?: number }).utt).toBeUndefined();
+  });
+
   it('passes cascade error copy through VERBATIM with opaque:false and the stage', async () => {
     const h = makeHarness();
     const ws = await startConnected(h);

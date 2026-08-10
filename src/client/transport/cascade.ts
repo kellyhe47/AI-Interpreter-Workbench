@@ -219,7 +219,13 @@ export class CascadeTransport implements InterpreterTransport {
         });
         break;
       case 'utterance.complete':
-        h.onUtteranceComplete?.(msg.record as UtteranceCompletion);
+        // TICKET 053 — `utt` RIDES THE ENVELOPE, NOT THE RECORD. An
+        // UtteranceRecord has no `utt` field (its identity is `id: "utt-3"`),
+        // and the wire message carries the number alongside it. Forwarding only
+        // `msg.record` dropped it, so every consumer keyed by `utt` — the
+        // server-priced cost among them — filed nothing at all for cascade and
+        // the run stored `cost: null` with the number sitting on the socket.
+        h.onUtteranceComplete?.({ ...(msg.record as object), utt: msg.utt } as UtteranceCompletion);
         break;
       case 'error':
         h.onError?.({
