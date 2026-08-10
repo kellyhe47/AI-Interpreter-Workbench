@@ -1,13 +1,13 @@
 ---
 id: 068
 title: "A hallucinated leading utterance shifts every real one, and the runner truncates instead of noticing"
-status: pending
+status: done
 source: operator sweep, 2026-08-09 (verified against stored runs)
 depends_on: []
 touches: [src/client/replay/runner.ts]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — from the operator's first real sweep, verified on disk
@@ -113,3 +113,55 @@ A wrong number is worse than a missing one.
 - This is the second time this project's own guard surfaced a defect nobody was looking for. 055b
   built the detector on one stored run; the sweep proved it systematic. The lesson is the same one
   the repo keeps relearning: the honest failure is the one that tells you it happened.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2453 passing / 0 failing. `npm run check` exits 0.
+
+### A premise in this ticket was FALSE and was corrected while writing the tests
+
+"There is no too-many check" is wrong. `runner.ts` already compared `observed !== expected` in
+**both** directions, and `runner.test.ts:862` already pinned
+`segmentation: expected 4 utterances, observed 5`.
+
+**The real hole was narrower.** `observed` counted `onUtteranceComplete` events *that arrived before
+the run stopped listening*. The 4th completion arms the 250 ms settle window; it expires, `finished`
+resolves, the transport is torn down — so in run `8aba8e2e` the 5th segment's completion landed
+~1.6–2.5 s later into nothing, **while its transcript had already been delivered into bucket 4**,
+which `attributeUtterances` never reads. A segment the transport demonstrably produced was not
+counted as a segment at all.
+
+### The fix
+
+`segmentsProduced()` derives the count from the **buckets** — `source`, `targetFinal`, `targetDelta`,
+`audioAt`, `timings` — because no count of completions can ever see a segment that completes after
+teardown. Two properties carry the design:
+
+- **Only keys `>= expected` are consulted**, which is what leaves the too-few direction alone.
+  `runner.test.ts:1275` (`expected 1, observed 0`) and `replayArmA.test.ts:537` (`expected 4,
+  observed 0`) both have content on `utt 0` with no completions; a global "distinct utts seen"
+  redefinition would report `observed 1` and stop them being mismatches.
+- **It is a `max`, not a sum.** The in-time control emits 5 completions *and* has a bucket at 4;
+  summing would report `observed 6` and break the locked `observed 5` assertion.
+
+Ticket 031's message is byte-for-byte unchanged — the same template, a different value substituted.
+
+### How the tests pin it
+
+The index mapping is pinned three independent ways rather than the sign of the deltas: stored sources
+must equal the manifest reference texts **in order**; each record walks back to its own manifest entry
+by `utteranceId`; and the shifted fixture's deltas are deliberately **all positive**, so 055b's clock
+guard never fires and a sign-only fix would see nothing wrong. Four of the nine tests are controls
+that passed before the fix, including a well-formed run pinned record-for-record so the fix could not
+degenerate into "fail more often".
+
+Mutation-verified by the orchestrator: ignoring the buckets → 5 red; dropping the `>= expected`
+filter → the too-few case goes red exactly as predicted; summing instead of `max` → 4 red.
+
+### What this does NOT do
+
+It makes the corruption **loud** — a misaligned run is now stored `failed` with both counts named,
+and is excluded by `isAggregatableRun`'s existing `status` clause. **It does not stop the STT
+hallucinating.** That is a provider/config matter — silence trimming, VAD prefix padding, a language
+hint or an STT prompt — and needs its own ticket before the sweep is re-run, or roughly 7 runs in 17
+will now fail loudly instead of lying quietly.

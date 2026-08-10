@@ -86,8 +86,11 @@
  * TWO DEADLINES GOVERN A MANIFEST-BACKED RUN, AND ONLY A MANIFEST-BACKED ONE.
  * SEGMENTATION_SETTLE_MS is armed by the Nth (last expected) completion and
  * catches the "too many" direction: without it the run would stop the transport
- * the instant the Nth completion landed and the (N+1)th — the only evidence of
- * an extra split — would never be delivered. SEGMENTATION_IDLE_MS is armed ONCE,
+ * the instant the Nth completion landed and the (N+1)th completion would never
+ * be delivered. It is a window, not a guarantee — TICKET 068: an extra
+ * completion can and does arrive after it expires, which is why the count is
+ * taken from the BUCKETS as well (see segmentsProduced) and not from the
+ * completions alone. SEGMENTATION_IDLE_MS is armed ONCE,
  * WHEN PACING COMPLETES, and catches "too few": a VAD that MERGED two utterances
  * simply delivers N-1 completions and goes quiet, so the settle window never
  * arms and the run would otherwise never resolve. Arming it at pacing end rather
@@ -803,6 +806,57 @@ function emptyBuckets(): UtteranceBuckets {
 }
 
 /**
+ * TICKET 068 — HOW MANY SEGMENTS THE TRANSPORT ACTUALLY PRODUCED.
+ *
+ * `completions` is the count of `onUtteranceComplete` events that arrived
+ * BEFORE THE RUN STOPPED LISTENING, which is not the same fact. When the STT
+ * hallucinates a leading utterance on the clip's opening silence (7 of the
+ * operator's 17 runs: "Turn right.", "그러나.", "Hallo.", "żeśmy.", …) every
+ * real utterance lands one bucket late and manifest entry N's answer lands in
+ * bucket N — past everything `attributeUtterances` reads. In run 8aba8e2e the
+ * Nth completion armed the 250 ms settle window, it expired, the transport was
+ * torn down, and the (N+1)th completion arrived ~2.5 s later into nothing. No
+ * count of completions can ever see that segment: it is announced after the
+ * run has stopped listening.
+ *
+ * THE ONLY IN-RUN EVIDENCE IS THE BUCKET ITSELF. That segment's transcript WAS
+ * delivered in time — it sits in `buckets`, keyed at `expected`, carrying
+ * content nobody reads. So a bucket keyed AT OR BEYOND `manifest.length` is a
+ * segment the transport demonstrably produced, whether or not it was ever
+ * announced, and the highest such key names how many segments there were.
+ *
+ * IT IS DELIBERATELY ONE-DIRECTIONAL. Only keys `>= expected` are consulted, so
+ * this cannot touch the "too few" direction: a run that delivered content on
+ * `utt` 0 and never completed it still reports `observed 0` (ticket 031's own
+ * message and behaviour, byte-for-byte — see runner.test.ts and
+ * replayArmA.test.ts). Redefining `observed` globally as "distinct buckets
+ * seen" would turn those two into `observed 1` and silently retire 031's rule.
+ *
+ * And it is a MAX, not a sum: a transport whose extra completion DID arrive in
+ * time is already counted by 031, and adding the bucket to it would report N+2
+ * segments where there were N+1.
+ */
+function segmentsProduced(args: {
+  buckets: UtteranceBuckets;
+  expected: number;
+  completions: number;
+}): number {
+  const { buckets, expected, completions } = args;
+  let highest = -1;
+  const note = (utt: number): void => {
+    if (utt >= expected && utt > highest) highest = utt;
+  };
+  // Every way a segment can leave a trace: a transcript (partial or final), its
+  // output audio, or any mark it carried.
+  for (const utt of buckets.source.keys()) note(utt);
+  for (const utt of buckets.targetFinal.keys()) note(utt);
+  for (const utt of buckets.targetDelta.keys()) note(utt);
+  for (const utt of buckets.audioAt.keys()) note(utt);
+  for (const utt of buckets.timings.keys()) note(utt);
+  return highest < 0 ? completions : Math.max(completions, highest + 1);
+}
+
+/**
  * TICKET 031 — turns the manifest plus what the transport delivered into the
  * per-utterance records, IN MANIFEST INDEX ORDER.
  *
@@ -1214,9 +1268,19 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // is a run-level failure with NO partial attribution: a run whose segmentation
   // disagrees with the manifest is not evidence. A cancelled run is exempt —
   // its completions were cut short by the operator, not by the pipeline.
-  const mismatched = !cancelled && expected !== undefined && observed !== expected;
+  //
+  // TICKET 068 — AND THE COUNT IS OF SEGMENTS THE TRANSPORT PRODUCED, not of
+  // the completions that happened to arrive before the run stopped listening.
+  // See segmentsProduced: an extra segment announced too late to be counted is
+  // still sitting in its own bucket, and that bucket is the only evidence of it
+  // that exists inside the run. The "too few" direction is untouched.
+  const segments =
+    expected === undefined
+      ? observed
+      : segmentsProduced({ buckets, expected, completions: observed });
+  const mismatched = !cancelled && expected !== undefined && segments !== expected;
   if (mismatched) {
-    errors.push(`segmentation: expected ${expected} utterances, observed ${observed}`);
+    errors.push(`segmentation: expected ${expected} utterances, observed ${segments}`);
   }
 
   const utterances =
