@@ -43,8 +43,9 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkTurnFinalMapping, collect } from '../../core/contracts/index';
+import { resolveTriple } from '../../core/models';
 import { ProviderError } from '../../core/types';
-import { ElevenLabsStt } from './elevenlabs-stt';
+import { ElevenLabsStt, type ElevenLabsSttConfig } from './elevenlabs-stt';
 import {
   FakeWsBase,
   asyncIterableOf,
@@ -471,5 +472,165 @@ describe('ElevenLabsStt failure and lifecycle', () => {
     const events = await collect(stt.transcribe(openMicAudio()));
     expect(events.map((e) => e.type)).toEqual(['partial']);
     expect(created[0]!.closed).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TICKET 069 — the language hint, ON THE WIRE.
+//
+// `languageCode` has existed on `ElevenLabsSttConfig` since ticket 004, has
+// appended `&language_code=` to the URL and put `language_code` on the config
+// frame since ticket 004 — and NOTHING has ever set it. `resolveTriple` builds
+// the adapter from `{ model }` alone, so every real run so far opened Scribe
+// with no language at all. Handed no language and a moment of leading silence,
+// a Whisper-family model invents a sentence in one.
+//
+// The knob is pinned HERE, on the wire, per direction, because that is the only
+// place a populated config and an ignored one look different. Ticket 069 wires
+// `resolveTriple` up to it; this file states what "wired up" has to produce.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 069 — the source-language hint reaches Scribe (AC2, AC3, AC4)', () => {
+  /** The config frame is frame 0; the audio frames follow. */
+  function configFrame(ws: FakeWsBase): Record<string, unknown> {
+    return ws.sentJson[0]!;
+  }
+
+  const directions = [
+    { name: 'en→es', sourceCode: 'en' },
+    { name: 'es→en', sourceCode: 'es' },
+    { name: 'en→yue', sourceCode: 'yue' },
+  ] as const;
+
+  it.each(directions)(
+    'a $name session sends language_code=$sourceCode in the URL AND on the config frame',
+    async ({ sourceCode }) => {
+      const { created, wsFactory } = makeSetup();
+      const stt = new ElevenLabsStt(
+        { apiKey: 'k', languageCode: sourceCode },
+        { wsFactory },
+      );
+      await collect(stt.transcribe(twoChunkAudio()));
+
+      const ws = created[0]!;
+      // THE URL QUERY — exact, so a partial substring of another code cannot
+      // satisfy it.
+      expect(ws.url).toContain(`language_code=${encodeURIComponent(sourceCode)}`);
+      expect(new URL(ws.url.replace(/^wss:/, 'https:')).searchParams.get('language_code')).toBe(
+        sourceCode,
+      );
+      // THE CONFIG FRAME — the second half of the same fact. Both, because the
+      // adapter already writes both and a fix that populates only one is half
+      // a fix.
+      expect(deepFind(configFrame(ws), 'language_code')).toBe(sourceCode);
+      // The model is still the only thing in the URL besides it.
+      expect(ws.url).toContain('model_id=scribe_v2_realtime');
+    },
+  );
+
+  it('the two directions of a pair are DISTINGUISHABLE on the wire', async () => {
+    const forwardSetup = makeSetup();
+    await collect(
+      new ElevenLabsStt({ apiKey: 'k', languageCode: 'en' }, forwardSetup).transcribe(
+        twoChunkAudio(),
+      ),
+    );
+    const reverseSetup = makeSetup();
+    await collect(
+      new ElevenLabsStt({ apiKey: 'k', languageCode: 'es' }, reverseSetup).transcribe(
+        twoChunkAudio(),
+      ),
+    );
+    expect(forwardSetup.created[0]!.url).not.toBe(reverseSetup.created[0]!.url);
+    expect(deepFind(configFrame(forwardSetup.created[0]!), 'language_code')).toBe('en');
+    expect(deepFind(configFrame(reverseSetup.created[0]!), 'language_code')).toBe('es');
+  });
+
+  it('NO configured language sends NO hint — not in the URL, not on the frame, never a guessed "en"', async () => {
+    const { created, wsFactory } = makeSetup();
+    const stt = new ElevenLabsStt({ apiKey: 'k' }, { wsFactory });
+    await collect(stt.transcribe(twoChunkAudio()));
+
+    const ws = created[0]!;
+    expect(ws.url).not.toContain('language_code');
+    expect(new URL(ws.url.replace(/^wss:/, 'https:')).searchParams.has('language_code')).toBe(
+      false,
+    );
+    expect(deepFind(configFrame(ws), 'language_code')).toBeUndefined();
+    // The rest of the frame is untouched: 24 kHz and 500 ms endpointing.
+    expect(deepFind(configFrame(ws), 'sample_rate')).toBe(24000);
+    expect(deepFind(configFrame(ws), 'silence_duration_ms')).toBe(500);
+  });
+
+  it('the hint changes NOTHING else about the frame — rate, encoding and endpointing are unmoved', async () => {
+    const { created, wsFactory } = makeSetup();
+    const stt = new ElevenLabsStt({ apiKey: 'k', languageCode: 'es' }, { wsFactory });
+    const chunk = new Int16Array([1, -1, 256, -32768]);
+    await collect(stt.transcribe(asyncIterableOf([chunk])));
+
+    const ws = created[0]!;
+    expect(deepFind(configFrame(ws), 'sample_rate')).toBe(24000);
+    expect(deepFind(configFrame(ws), 'encoding')).toBe('pcm_s16le');
+    expect(deepFind(configFrame(ws), 'silence_duration_ms')).toBe(500);
+    // ...and the audio still goes out one frame per chunk, base64 LE PCM16.
+    const audioFrames = ws.sentJson.filter((m) => m.type === 'audio');
+    expect(audioFrames).toHaveLength(1);
+    expect(audioFrames[0]!.audio).toBe(int16ToBase64(chunk));
+  });
+});
+
+/**
+ * TICKET 069 — THE MISSING LINK ITSELF, end to end.
+ *
+ * Everything above pins what the adapter does with a `languageCode` it is
+ * given. This pins the only thing that has ever been wrong: that `resolveTriple`
+ * — the ONE place a model id becomes adapter options — hands it one at all. The
+ * adapter is built from the resolver's own output, so a resolver that drops the
+ * hint produces a socket with no `language_code`, exactly as production does
+ * today.
+ */
+describe('TICKET 069 — resolveTriple’s options are what actually reach the socket', () => {
+  type TripleOptions = { sourceLanguage?: string };
+  const resolveTripleWithSource = resolveTriple as unknown as (
+    triple: { stt: string; mt: string; tts: string },
+    opts?: TripleOptions,
+  ) => ReturnType<typeof resolveTriple>;
+
+  it.each([
+    { direction: 'en→es', sourceCode: 'en' },
+    { direction: 'es→en', sourceCode: 'es' },
+  ])('a $direction run resolves to a socket carrying language_code=$sourceCode', async ({ sourceCode }) => {
+    const resolved = resolveTripleWithSource(
+      { stt: 'scribe_v2_realtime', mt: 'gpt-4o-mini', tts: 'gpt-4o-mini-tts' },
+      { sourceLanguage: sourceCode },
+    );
+    const { created, wsFactory } = makeSetup();
+    const stt = new ElevenLabsStt(
+      { ...(resolved.stt.options as ElevenLabsSttConfig), apiKey: 'k' },
+      { wsFactory },
+    );
+    await collect(stt.transcribe(twoChunkAudio()));
+
+    const ws = created[0]!;
+    expect(new URL(ws.url.replace(/^wss:/, 'https:')).searchParams.get('language_code')).toBe(
+      sourceCode,
+    );
+    expect(deepFind(ws.sentJson[0]!, 'language_code')).toBe(sourceCode);
+  });
+
+  it('a run whose session named no direction resolves to a socket with no hint', async () => {
+    const resolved = resolveTripleWithSource({
+      stt: 'scribe_v2_realtime',
+      mt: 'gpt-4o-mini',
+      tts: 'gpt-4o-mini-tts',
+    });
+    const { created, wsFactory } = makeSetup();
+    const stt = new ElevenLabsStt(
+      { ...(resolved.stt.options as ElevenLabsSttConfig), apiKey: 'k' },
+      { wsFactory },
+    );
+    await collect(stt.transcribe(twoChunkAudio()));
+    expect(created[0]!.url).not.toContain('language_code');
+    expect(deepFind(created[0]!.sentJson[0]!, 'language_code')).toBeUndefined();
   });
 });

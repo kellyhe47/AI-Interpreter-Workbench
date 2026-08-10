@@ -374,3 +374,144 @@ describe('TICKET 062 — the requested target language reaches the pipeline', ()
     });
   });
 });
+
+/**
+ * TICKET 069 — the SOURCE language has to survive the socket too.
+ *
+ * 062 fixed the target and left the source: `resolveTriple` still builds the STT
+ * adapter from `{ model }` alone, so `OpenAiStt` opens a transcription session
+ * with no language field at all and `ElevenLabsStt.languageCode` — a knob that
+ * already reaches both the URL query and the config frame — is populated by
+ * nothing. Handed no language and a moment of leading silence, a Whisper-family
+ * model invents a sentence in one: 7 of the operator's 17 sweep runs opened with
+ * "Turn right." / "그러나." / "Hallo." / "żeśmy." / "Yardımımın" / "Telephone" /
+ * "Ok.", each one consuming segment 0 and shifting every real utterance late.
+ *
+ * The session already knows: `direction` IS the answer, and `en→es` means the
+ * source is English. Nothing new is declared on the frame — a second field could
+ * disagree with the direction, and disagreeing silently is the whole defect.
+ */
+describe('TICKET 069 — the source language is derived from `direction` and reaches the STT', () => {
+  interface SeenProviders {
+    stt?: { config?: Record<string, unknown> };
+  }
+
+  function capturingProviders(seen: SeenProviders): AttachCascadeWsOptions {
+    const fake: OrchestratorFactory = (_source, providers) =>
+      (async function* () {
+        seen.stt = providers.stt as unknown as { config?: Record<string, unknown> };
+      })();
+    return { createOrchestrator: fake };
+  }
+
+  async function sttConfigFor(frame: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const seen: SeenProviders = {};
+    const { port } = await startServer(capturingProviders(seen));
+    const { ws } = await connect(port);
+    ws.send(JSON.stringify({ type: 'session.start', mode: 'cascade', ...frame }));
+    await waitFor(() => seen.stt !== undefined, 'constructed STT provider');
+    return seen.stt!.config ?? {};
+  }
+
+  const cases = [
+    { direction: 'en→es', stt: 'scribe_v2_realtime', sourceCode: 'en' },
+    { direction: 'es→en', stt: 'scribe_v2_realtime', sourceCode: 'es' },
+    { direction: 'en→yue', stt: 'gpt-4o-transcribe', sourceCode: 'en' },
+    { direction: 'yue→en', stt: 'gpt-4o-transcribe', sourceCode: 'yue' },
+  ] as const;
+
+  it.each(cases)(
+    '$direction builds the $stt adapter with the SOURCE language $sourceCode',
+    async (c) => {
+      const config = await sttConfigFor({
+        languagePair: 'EN↔ES',
+        direction: c.direction,
+        targetLanguage: 'Spanish',
+        providers: { stt: c.stt, mt: 'fixture', tts: 'fixture' },
+      });
+      expect(config.languageCode).toBe(c.sourceCode);
+      // The model is still carried — the hint is added beside it, never instead.
+      expect(config.model).toBe(c.stt);
+    },
+  );
+
+  it('the two directions of ONE pair do NOT collapse — es→en is Spanish, not English', async () => {
+    const forward = await sttConfigFor({
+      languagePair: 'EN↔ES',
+      direction: 'en→es',
+      targetLanguage: 'Spanish',
+      providers: { stt: 'scribe_v2_realtime', mt: 'fixture', tts: 'fixture' },
+    });
+    const reverse = await sttConfigFor({
+      languagePair: 'EN↔ES',
+      direction: 'es→en',
+      targetLanguage: 'English',
+      providers: { stt: 'scribe_v2_realtime', mt: 'fixture', tts: 'fixture' },
+    });
+    expect(forward.languageCode).toBe('en');
+    expect(reverse.languageCode).toBe('es');
+    expect(forward.languageCode).not.toBe(reverse.languageCode);
+    // ...and neither of them is the TARGET. Sending the target language to the
+    // STT would be the same class of defect wearing the fix's clothes.
+    expect(forward.languageCode).not.toBe('es');
+    expect(reverse.languageCode).not.toBe('en');
+  });
+
+  it('DERIVED, never declared: a frame that names its own source language is ignored in favour of `direction`', async () => {
+    const config = await sttConfigFor({
+      languagePair: 'EN↔ES',
+      direction: 'en→es',
+      targetLanguage: 'Spanish',
+      // A field the protocol does not have. If one is ever added it must not be
+      // able to disagree with the direction — that is the 062 defect's shape.
+      sourceLanguage: 'de',
+      providers: { stt: 'scribe_v2_realtime', mt: 'fixture', tts: 'fixture' },
+    });
+    expect(config.languageCode).toBe('en');
+  });
+
+  it('a session that names NO direction sends NO hint — absent, never a guessed "en"', async () => {
+    const config = await sttConfigFor({
+      languagePair: '',
+      direction: '',
+      targetLanguage: 'Spanish',
+      providers: { stt: 'scribe_v2_realtime', mt: 'fixture', tts: 'fixture' },
+    });
+    expect(config.languageCode).toBeUndefined();
+    expect(config.model).toBe('scribe_v2_realtime');
+  });
+
+  it('an UNPARSEABLE direction sends no hint either — a guess is worse than silence', async () => {
+    const config = await sttConfigFor({
+      languagePair: 'EN↔ES',
+      direction: 'gibberish',
+      targetLanguage: 'Spanish',
+      providers: { stt: 'gpt-4o-transcribe', mt: 'fixture', tts: 'fixture' },
+    });
+    expect(config.languageCode).toBeUndefined();
+  });
+
+  it('the MT and TTS stages are untouched — the hint is an STT concern', async () => {
+    const seen: { mt?: { config?: Record<string, unknown> }; tts?: { config?: Record<string, unknown> } } = {};
+    const fake: OrchestratorFactory = (_source, providers) =>
+      (async function* () {
+        seen.mt = providers.mt as unknown as { config?: Record<string, unknown> };
+        seen.tts = providers.tts as unknown as { config?: Record<string, unknown> };
+      })();
+    const { port } = await startServer({ createOrchestrator: fake });
+    const { ws } = await connect(port);
+    ws.send(
+      JSON.stringify({
+        type: 'session.start',
+        mode: 'cascade',
+        languagePair: 'EN↔ES',
+        direction: 'es→en',
+        targetLanguage: 'English',
+        providers: { stt: 'scribe_v2_realtime', mt: 'gpt-4o-mini', tts: 'gpt-4o-mini-tts' },
+      }),
+    );
+    await waitFor(() => seen.mt !== undefined, 'constructed MT provider');
+    expect(seen.mt!.config?.languageCode).toBeUndefined();
+    expect(seen.tts!.config?.languageCode).toBeUndefined();
+  });
+});

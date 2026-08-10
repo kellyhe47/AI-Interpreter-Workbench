@@ -189,3 +189,110 @@ describe('resolveTriple resolves each stage with its own kind', () => {
     ).toThrow(/bogus-mt/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 069 — THE SOURCE-LANGUAGE HINT, ROUTED EXACTLY AS 062 ROUTED THE
+// TARGET.
+//
+// `resolveTriple` builds every provider from `{ model }` alone, so both STT
+// adapters open their session with no language at all: `OpenAiSttConfig` has no
+// language field, and `ElevenLabsSttConfig.languageCode` — which already
+// reaches the URL query AND the config frame — is never populated by anything.
+// A Whisper-family model handed no language and a moment of non-speech invents
+// one: "그러나.", "żeśmy.", "Yardımımın", "Hallo." in 7 of 17 real sweep runs.
+//
+// This is ticket 062's defect one stage upstream: the adapter has the knob, the
+// session has the answer, and nothing connects them. `resolveTriple` is the
+// connection, and the hint lands on the STT stage ONLY.
+// ---------------------------------------------------------------------------
+
+/** The second argument `resolveTriple` gains — not yet declared in production. */
+type TripleOptions = { sourceLanguage?: string };
+type ResolveTripleWithSource = (
+  triple: ProviderTriple,
+  opts?: TripleOptions,
+) => ReturnType<typeof resolveTriple>;
+const resolveTripleWithSource = resolveTriple as ResolveTripleWithSource;
+
+describe('TICKET 069 — the source language reaches the STT stage, and only it', () => {
+  const REAL_TRIPLE: ProviderTriple = {
+    stt: 'gpt-4o-transcribe',
+    mt: 'gpt-4o-mini',
+    tts: 'eleven_flash_v2_5',
+  };
+
+  it('carries the source language onto the STT options, beside the model', () => {
+    const r = resolveTripleWithSource(REAL_TRIPLE, { sourceLanguage: 'en' });
+    // Deep-equal: the KEY is pinned and nothing else leaks onto the stage.
+    expect(r.stt).toEqual({
+      vendor: 'openai',
+      options: { model: 'gpt-4o-transcribe', languageCode: 'en' },
+    });
+  });
+
+  it('carries it for the ElevenLabs STT too — the SAME option key, so the mapping stays uniform', () => {
+    const r = resolveTripleWithSource(
+      { ...REAL_TRIPLE, stt: 'scribe_v2_realtime' },
+      { sourceLanguage: 'es' },
+    );
+    expect(r.stt).toEqual({
+      vendor: 'elevenlabs',
+      options: { model: 'scribe_v2_realtime', languageCode: 'es' },
+    });
+  });
+
+  it('leaves MT and TTS EXACTLY as they were — the hint is an STT concern', () => {
+    const plain = resolveTriple(REAL_TRIPLE);
+    const hinted = resolveTripleWithSource(REAL_TRIPLE, { sourceLanguage: 'es' });
+    expect(hinted.mt).toEqual(plain.mt);
+    expect(hinted.tts).toEqual(plain.tts);
+    // Said absolutely, so a future change to `plain` cannot make this vacuous.
+    expect(hinted.mt).toEqual({ vendor: 'openai', options: { model: 'gpt-4o-mini' } });
+    expect(hinted.tts).toEqual({
+      vendor: 'elevenlabs',
+      options: { modelId: 'eleven_flash_v2_5' },
+    });
+  });
+
+  it('NO source language means NO key — absent, never a guessed default', () => {
+    expect(resolveTripleWithSource(REAL_TRIPLE)).toEqual(resolveTriple(REAL_TRIPLE));
+    expect(resolveTripleWithSource(REAL_TRIPLE, {}).stt.options).toEqual({
+      model: 'gpt-4o-transcribe',
+    });
+    // An EMPTY source language is the same absence, not the string ''. A run
+    // that could not name its own language must not claim one on the wire.
+    expect(resolveTripleWithSource(REAL_TRIPLE, { sourceLanguage: '' }).stt.options).toEqual({
+      model: 'gpt-4o-transcribe',
+    });
+    expect(
+      'languageCode' in resolveTripleWithSource(REAL_TRIPLE, { sourceLanguage: '' }).stt.options,
+    ).toBe(false);
+  });
+
+  it('the hint lands on the ADAPTER, not just on the options bag', () => {
+    const r = resolveTripleWithSource(
+      { ...REAL_TRIPLE, stt: 'scribe_v2_realtime' },
+      { sourceLanguage: 'yue' },
+    );
+    const stt = createStt(r.stt.vendor, r.stt.options) as unknown as {
+      config: Record<string, unknown>;
+    };
+    expect(stt.config.languageCode).toBe('yue');
+    expect(stt.config.model).toBe('scribe_v2_realtime');
+
+    const openai = resolveTripleWithSource(REAL_TRIPLE, { sourceLanguage: 'es' });
+    const openaiStt = createStt(openai.stt.vendor, openai.stt.options) as unknown as {
+      config: Record<string, unknown>;
+    };
+    // TICKET 069 — `OpenAiSttConfig` gains the field it never had.
+    expect(openaiStt.config.languageCode).toBe('es');
+  });
+
+  it('FIXTURE STT is untouched — it is an escape, not a table entry, and has no language knob', () => {
+    const r = resolveTripleWithSource(
+      { stt: 'fixture', mt: 'fixture', tts: 'fixture' },
+      { sourceLanguage: 'es' },
+    );
+    expect(r.stt).toEqual({ vendor: 'fixture', options: {} });
+  });
+});

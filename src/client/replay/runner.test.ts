@@ -2724,3 +2724,247 @@ describe('TICKET 068 — a WELL-FORMED run is UNTOUCHED (the control that matter
     expect(aggregated).toEqual([...ALIGNED_LATENCY_MS]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 069 — THE TRANSMISSION TRIM.
+//
+// The Whisper-family STT hallucinates on non-speech: across 17 real sweep runs
+// the FIRST stored source text was a foreign-language invention ("그러나.",
+// "żeśmy.", "Yardımımın") in 7 of them, fired by the clip's opening silence.
+// Each occurrence consumed segment 0 and shifted every real utterance one slot
+// later — the corruption ticket 068 now detects.
+//
+// ⚠️ THE DANGEROUS FIX IS THE OBVIOUS ONE. Trimming the CLIP would shift the
+// audio against the manifest anchors and silently invalidate every latency
+// number in the project — and it would look like a small, consistent
+// IMPROVEMENT rather than an error, which is exactly why nobody would catch it.
+// `t0` is frame 0 of the paced audio and every anchor is `t0 +
+// trueSpeechEndMs`; neither may move.
+//
+// So the contract is TRIM TRANSMISSION, NOT TIME: the pacer keeps pacing the
+// whole clip at 1x off an untouched `t0`, and leading frames below the silence
+// threshold are simply never handed to the transport. Frame k still LEAVES at
+// `t0 + k * FRAME_MS` — it just does not leave at all until speech onset.
+//
+// THE FIXTURE'S PREMISE: 200 ms of DIGITAL silence (exact zeros) followed by
+// 800 ms in which EVERY sample is at |amplitude| >= 20000. No threshold rule —
+// peak, mean or RMS, per frame or per sample — can disagree about where onset
+// is, so these tests pin the BEHAVIOUR and not one particular threshold.
+// ---------------------------------------------------------------------------
+
+/** Leading digital silence, in 20 ms frames (200 ms). */
+const TRIM_SILENCE_FRAMES = 10;
+/** Speech frames after the silence (800 ms). */
+const TRIM_SPEECH_FRAMES = 40;
+/** The whole clip: 50 frames == 1000 ms == CORPUS_RECORDING.durationMs. */
+const TRIM_TOTAL_FRAMES = TRIM_SILENCE_FRAMES + TRIM_SPEECH_FRAMES;
+/** First sample of speech in the leading-silence clip. */
+const TRIM_ONSET_SAMPLE = TRIM_SILENCE_FRAMES * FRAME_SAMPLES;
+
+/**
+ * Unambiguous speech: every sample sits at |amplitude| in [20000, 27999], and
+ * the value depends on the sample's ABSOLUTE position in the clip, so a frame
+ * delivered from the wrong offset reads back as different content.
+ */
+const loud = (n: number, offset = 0): Int16Array =>
+  Int16Array.from({ length: n }, (_, i) => {
+    const k = i + offset;
+    return (k % 2 === 0 ? 1 : -1) * (20000 + ((k * 7919) % 8000));
+  });
+
+/** THE FAILURE SHAPE: 200 ms of exact zeros, then 800 ms of speech. */
+function clipWithLeadingSilence(): Int16Array {
+  const clip = new Int16Array(TRIM_TOTAL_FRAMES * FRAME_SAMPLES);
+  clip.set(loud(TRIM_SPEECH_FRAMES * FRAME_SAMPLES, TRIM_ONSET_SAMPLE), TRIM_ONSET_SAMPLE);
+  return clip;
+}
+
+/**
+ * The 031 corpus harness over an ARBITRARY clip, with the trim optionally
+ * disabled through the runner's seam.
+ *
+ * `trimLeadingSilence` is the disable switch AC6 is stated in terms of: a run
+ * with it `false` transmits the clip exactly as the runner does today, and is
+ * the control every trimmed run is compared against. It is cast on rather than
+ * declared here — the field belongs on `RunnerDeps`, which is production's job.
+ */
+function trimHarness(opts: { samples: Int16Array; trimLeadingSilence?: boolean }): Harness {
+  const h = makeHarness({
+    samples: opts.samples,
+    recording: CORPUS_RECORDING,
+    transportFactory: () =>
+      new FixtureTransport({
+        armId: 'fx',
+        kind: 'cascade',
+        script: corpusScript(),
+        costPerMinUsd: CORPUS_COST_PER_MIN,
+      }),
+  });
+  if (opts.trimLeadingSilence !== undefined) {
+    (h.deps as RunnerDeps & { trimLeadingSilence?: boolean }).trimLeadingSilence =
+      opts.trimLeadingSilence;
+  }
+  return h;
+}
+
+/** Every frame the transport actually received, flattened in arrival order. */
+function transmitted(h: Harness): number[] {
+  return h.transports[0]!.received.flatMap((f) => Array.from(f));
+}
+
+/**
+ * THE SHARPEST ASSERTION IN THIS TICKET (AC6).
+ *
+ * A clip-trim and a transmission-trim are indistinguishable by transcript, by
+ * status, and by anything the operator would look at. They are distinguishable
+ * HERE: the anchors are manifest ground truth and must be bit-identical to the
+ * same clip run with the trim off, while the audio that reached the provider
+ * must NOT be. Asserting only the first half is satisfied by shipping nothing;
+ * asserting only the second is satisfied by the fix that destroys the study.
+ */
+describe('TICKET 069 — the trim removes TRANSMISSION, never time (AC6)', () => {
+  it('per-utterance speech_end is identical with the trim ON and OFF, while the transmitted audio is not', async () => {
+    const clip = clipWithLeadingSilence();
+
+    const trimmed = trimHarness({ samples: clip });
+    const withTrim = await runCorpus(trimmed);
+
+    const control = trimHarness({ samples: clip, trimLeadingSilence: false });
+    const noTrim = await runCorpus(control);
+
+    // Manifest ground truth, absolutely, in BOTH runs. Hand-derived from
+    // MANIFEST — not recomputed from either run.
+    const anchorsWith = utterancesOf(withTrim.run).map((u) => u.timings.speech_end!);
+    const anchorsWithout = utterancesOf(noTrim.run).map((u) => u.timings.speech_end!);
+    expect(anchorsWith).toEqual([100, 200, 300, 400].map((ms) => withTrim.t0 + ms));
+    expect(anchorsWithout).toEqual([100, 200, 300, 400].map((ms) => noTrim.t0 + ms));
+    // ...and identical to each other once each run's own t0 is removed.
+    expect(anchorsWith.map((t) => t - withTrim.t0)).toEqual(
+      anchorsWithout.map((t) => t - noTrim.t0),
+    );
+    // The run envelope's anchor did not move either (055b: the LAST record's).
+    expect(withTrim.run.timings.speech_end! - withTrim.t0).toBe(
+      noTrim.run.timings.speech_end! - noTrim.t0,
+    );
+
+    // AND THE TRIM ACTUALLY HAPPENED. Without this line the equalities above
+    // are satisfied by an implementation that does nothing at all.
+    expect(control.transports[0]!.received).toHaveLength(TRIM_TOTAL_FRAMES);
+    expect(trimmed.transports[0]!.received).toHaveLength(TRIM_SPEECH_FRAMES);
+    expect(transmitted(control)).toEqual(Array.from(clip));
+    expect(transmitted(trimmed)).toEqual(Array.from(clip.subarray(TRIM_ONSET_SAMPLE)));
+
+    // Neither run's verdict changed: the trim is not allowed to buy its
+    // silence by losing an utterance.
+    expect(withTrim.run.status).toBe('complete');
+    expect(noTrim.run.status).toBe('complete');
+    expect(utterancesOf(withTrim.run).map((u) => u.transcripts.source)).toEqual(
+      utterancesOf(noTrim.run).map((u) => u.transcripts.source),
+    );
+  });
+});
+
+/**
+ * AC5 + AC7 — and the assertion that CATCHES A CLIP-TRIM.
+ *
+ * A clip-trim would put the first transmitted frame at `t0 + 0` and the last at
+ * `t0 + 39 * 20 ms`: the run would finish 200 ms early and every measurement
+ * would improve by exactly the silence it removed. A transmission-trim leaves
+ * frame k where the clock put it — the first transmitted frame leaves 200 ms
+ * into the run and the last still leaves at `t0 + 980 ms`, one clip-length in.
+ */
+describe('TICKET 069 — transmission starts at onset; the pacing clock does not (AC5, AC7)', () => {
+  it('frame k still leaves at t0 + k * FRAME_MS of the ORIGINAL clip — the silent frames are skipped, not shifted', async () => {
+    const h = trimHarness({ samples: clipWithLeadingSilence() });
+    const { t0 } = await runCorpus(h);
+
+    expect(h.sendTimes).toHaveLength(TRIM_SPEECH_FRAMES);
+    for (let j = 0; j < h.sendTimes.length; j += 1) {
+      expect(
+        Math.abs(h.sendTimes[j]! - t0 - (TRIM_SILENCE_FRAMES + j) * FRAME_MS),
+      ).toBeLessThanOrEqual(1);
+    }
+    // Stated as the two endpoints, because those are the two a clip-trim moves.
+    expect(Math.abs(h.sendTimes[0]! - t0 - TRIM_SILENCE_FRAMES * FRAME_MS)).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(h.sendTimes.at(-1)! - t0 - (TRIM_TOTAL_FRAMES - 1) * FRAME_MS),
+    ).toBeLessThanOrEqual(1);
+    // 1x, over the WHOLE clip: the run still spans a clip-length of wall clock
+    // even though 200 ms of it went nowhere.
+    expect(h.sendTimes.at(-1)! - t0).toBeGreaterThanOrEqual(
+      (TRIM_TOTAL_FRAMES - 1) * FRAME_MS - 1,
+    );
+  });
+});
+
+/**
+ * AC10 — THE PROOF, stated as an INPUT.
+ *
+ * The hallucination fired in 7 of 17 real runs, so a test that runs the
+ * pipeline once and reads a clean transcript proves nothing at all. What is
+ * pinned here is what the provider was HANDED: not one sample of the opening
+ * silence, so there is nothing left for it to invent a Korean sentence from.
+ */
+describe('TICKET 069 — the STT is handed nothing from before onset (AC10)', () => {
+  it('the transmitted audio is the clip FROM ONSET, byte-for-byte, and contains no silent frame', async () => {
+    const clip = clipWithLeadingSilence();
+    const h = trimHarness({ samples: clip });
+    await runCorpus(h);
+
+    const received = h.transports[0]!.received;
+    expect(received).toHaveLength(TRIM_SPEECH_FRAMES);
+    for (const frame of received) expect(frame.length).toBe(FRAME_SAMPLES);
+    // Byte-for-byte: no silence transmitted, and no speech sample lost either.
+    expect(transmitted(h)).toEqual(Array.from(clip.subarray(TRIM_ONSET_SAMPLE)));
+    // The same fact from the other side, so a partial trim cannot pass: every
+    // transmitted frame carries signal.
+    for (const frame of received) {
+      expect(Array.from(frame).every((s) => s === 0)).toBe(false);
+    }
+  });
+});
+
+/**
+ * AC8 + AC9 — the two controls. A clip that starts speaking immediately is
+ * transmitted from frame 0 exactly as the runner transmits it today, and an
+ * INTERIOR silence is never touched: only LEADING frames may be withheld, and a
+ * trim that scanned the whole clip would swallow a pause mid-sentence.
+ */
+describe('TICKET 069 — a clip with no leading silence is untouched (AC8, AC9)', () => {
+  it('speech at sample 0 transmits from frame 0, byte-for-byte and on today’s schedule', async () => {
+    const clip = loud(TRIM_TOTAL_FRAMES * FRAME_SAMPLES);
+    const h = trimHarness({ samples: clip });
+    const { t0 } = await runCorpus(h);
+
+    expect(h.transports[0]!.received).toHaveLength(TRIM_TOTAL_FRAMES);
+    expect(transmitted(h)).toEqual(Array.from(clip));
+    for (let k = 0; k < h.sendTimes.length; k += 1) {
+      expect(Math.abs(h.sendTimes[k]! - t0 - k * FRAME_MS)).toBeLessThanOrEqual(1);
+    }
+
+    // ...and identical, frame for frame, to the same clip with the trim off.
+    const control = trimHarness({ samples: clip, trimLeadingSilence: false });
+    await runCorpus(control);
+    expect(h.transports[0]!.received.map((f) => Array.from(f))).toEqual(
+      control.transports[0]!.received.map((f) => Array.from(f)),
+    );
+  });
+
+  it('an INTERIOR silence is transmitted in full — the trim is LEADING-only', async () => {
+    // Loud from sample 0, silent for frames 10..19, loud again to the end.
+    const clip = new Int16Array(TRIM_TOTAL_FRAMES * FRAME_SAMPLES);
+    clip.set(loud(10 * FRAME_SAMPLES, 0), 0);
+    clip.set(loud(30 * FRAME_SAMPLES, 20 * FRAME_SAMPLES), 20 * FRAME_SAMPLES);
+
+    const h = trimHarness({ samples: clip });
+    const { t0, run } = await runCorpus(h);
+
+    expect(h.transports[0]!.received).toHaveLength(TRIM_TOTAL_FRAMES);
+    expect(transmitted(h)).toEqual(Array.from(clip));
+    expect(Math.abs(h.sendTimes[0]! - t0)).toBeLessThanOrEqual(1);
+    // The anchors are still the manifest's, gap or no gap.
+    expect(utterancesOf(run).map((u) => u.timings.speech_end!)).toEqual(
+      [100, 200, 300, 400].map((ms) => t0 + ms),
+    );
+  });
+});
