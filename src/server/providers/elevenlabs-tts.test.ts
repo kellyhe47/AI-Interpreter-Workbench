@@ -265,3 +265,27 @@ describe('ElevenLabsTts adapter specifics', () => {
     expect(Array.from(all)).toEqual(Array.from(samples));
   });
 });
+
+/**
+ * TICKET 074 — Arm C cannot reach Cantonese, and must not pretend to.
+ *
+ * `eleven_flash_v2_5`'s language list has no Cantonese, and ElevenLabs'
+ * `language_code` is ISO 639-1, which has no code for it either: `zh` is the
+ * Chinese macrolanguage and conventionally resolves to MANDARIN. Sending it
+ * would request the exact wrong variety — the defect shipped as the fix. So
+ * nothing this adapter puts on the wire ever names a Chinese language code.
+ */
+describe('TICKET 074 — no Cantonese/`zh` language code ever reaches ElevenLabs', () => {
+  it('neither the URL nor any frame carries a language_code, even for Cantonese text', async () => {
+    const { created, wsFactory } = makeSetup();
+    const tts = new ElevenLabsTts({ apiKey: 'k' }, { wsFactory });
+    await collect(tts.synthesize(asyncIterableOf(['你好，', '請坐。'])));
+
+    const ws = created[0]!;
+    const wire = [ws.url, ...ws.sent].join('\n');
+    expect(wire).not.toMatch(/language_code/);
+    expect(wire).not.toMatch(/"zh"/);
+    expect(wire).not.toMatch(/yue/i);
+    expect(wire).not.toMatch(/cantonese/i);
+  });
+});

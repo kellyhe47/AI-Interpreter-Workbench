@@ -238,9 +238,19 @@ const COVERAGE_EYEBROW = 'Exploratory case study · never pooled with experiment
 const COVERAGE_TITLE = 'What does provider choice let us reach?';
 const COVERAGE_PROVENANCE =
   'one operator · one pass per direction · listened to, not scored · no sweep behind it';
+/**
+ * TICKET 073/074 — REWRITTEN. This note used to say Realtime returned Mandarin
+ * "on every attempt". Those attempts ran before ticket 062 put a target
+ * language on the wire, so the model was asked to translate into nothing; the
+ * operator has since run EN→YUE on Realtime and heard Cantonese. What is left
+ * is the finding that survives: the two cascade TTS vendors are not
+ * interchangeable for this language.
+ */
 const COVERAGE_OBSERVATION =
-  'Observation · English → Cantonese on Realtime returned Mandarin, not Cantonese, ' +
-  'on every attempt — the direction is not reachable on the speech-to-speech path.';
+  'Observation · English → Cantonese is a pronunciation choice, not a text choice — the ' +
+  'characters are shared with Mandarin. gpt-4o-mini-tts can be told which to use through its ' +
+  'instructions field; eleven_flash_v2_5 lists no Cantonese and its ISO 639-1 language_code ' +
+  'cannot name one, so Arm C cannot reach it at any price.';
 
 const CATEGORY_EYEBROW = 'By utterance category — where the heterogeneity lives';
 const RECORDING_EYEBROW = 'By Recording — includes ad-hoc runs, excluded from experiments';
@@ -710,7 +720,15 @@ type CoverageStage = (typeof COVERAGE_STAGES)[number];
 
 const REACHED = 'reached';
 const NOT_REACHED = 'not reached';
-const WRONG_VARIETY = 'wrong variety';
+/**
+ * TICKET 074 — the EN→Cantonese TTS cell is the one cell that must name an ARM.
+ * Arms B and C differ in exactly this stage, and for this language they differ
+ * in KIND: `gpt-4o-mini-tts` takes a natural-language `instructions` field that
+ * can specify Cantonese pronunciation, while `eleven_flash_v2_5`'s language
+ * list has no Cantonese and ISO 639-1 has no code for it (`zh` is Mandarin).
+ * A single 'reached' here was true of neither arm.
+ */
+const REACHED_ARM_B_ONLY = 'reached on Arm B · not reached on Arm C';
 
 /**
  * Rows are DIRECTIONS, not pairs: English → Cantonese and Cantonese → English
@@ -736,7 +754,9 @@ const COVERAGE_ROWS: ReadonlyArray<{
   {
     direction: 'en-yue',
     label: 'English → Cantonese',
-    cells: { realtime: WRONG_VARIETY, stt: REACHED, mt: REACHED, tts: REACHED },
+    // Realtime: observed by the operator on 2026-08-10 (ticket 073). The
+    // earlier 'wrong variety' predates ticket 062 and named no target language.
+    cells: { realtime: REACHED, stt: REACHED, mt: REACHED, tts: REACHED_ARM_B_ONLY },
   },
   {
     direction: 'yue-en',

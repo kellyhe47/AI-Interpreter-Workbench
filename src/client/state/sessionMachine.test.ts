@@ -521,9 +521,15 @@ describe('rule 7 — language pair helpers', () => {
     ]);
   });
 
-  it('supportPill: EN↔ES supports both modes, EN↔YUE is cascade only', () => {
+  // TICKET 074 — the 'cascade only' claim is RETIRED. It encoded
+  // `gpt-realtime-translate`'s 13-output-language list; this project runs
+  // `gpt-realtime`, which takes a free-text `instructions` field with no
+  // output-language enum (ticket 073). The operator has run EN→YUE on Realtime
+  // and observed Cantonese output.
+  it('supportPill: BOTH pairs are both-modes — no pair is cascade only', () => {
     expect(supportPill(0)).toBe('both modes');
-    expect(supportPill(1)).toBe('cascade only');
+    expect(supportPill(1)).toBe('both modes');
+    expect(supportPill(1)).not.toBe('cascade only');
   });
 
   const cases: Array<{
@@ -531,55 +537,61 @@ describe('rule 7 — language pair helpers', () => {
     langIdx: number;
     reversed: boolean;
     mode: Parameters<typeof warnings>[2];
-    expected: { targetCantoOnRealtime: boolean; inputCantoOnRealtime: boolean };
+    expected: { inputCantoOnRealtime: boolean };
   }> = [
     {
-      name: 'target Cantonese on realtime fires the target warning only',
+      // TICKET 074 — the FORWARD warning is gone: it told the operator that a
+      // configuration they have now run successfully was unsupported.
+      name: 'target Cantonese on realtime fires nothing — the forward warning is retired',
       langIdx: 1,
       reversed: false,
       mode: 'realtime',
-      expected: { targetCantoOnRealtime: true, inputCantoOnRealtime: false },
+      expected: { inputCantoOnRealtime: false },
     },
     {
-      name: 'source Cantonese on realtime fires the input warning only',
+      // ...and the REVERSE warning stays, untouched. YUE→EN is a different
+      // claim, it was never tested, and the operator has not cleared it.
+      name: 'source Cantonese on realtime STILL fires the input warning',
       langIdx: 1,
       reversed: true,
       mode: 'realtime',
-      expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: true },
+      expected: { inputCantoOnRealtime: true },
     },
     {
       name: 'Cantonese pair on cascade fires nothing',
       langIdx: 1,
       reversed: false,
       mode: 'cascade',
-      expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
+      expected: { inputCantoOnRealtime: false },
     },
     {
       name: 'reversed Cantonese pair on cascade fires nothing',
       langIdx: 1,
       reversed: true,
       mode: 'cascade',
-      expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
+      expected: { inputCantoOnRealtime: false },
     },
     {
       name: 'Spanish pair on realtime fires nothing',
       langIdx: 0,
       reversed: false,
       mode: 'realtime',
-      expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
+      expected: { inputCantoOnRealtime: false },
     },
     {
       name: 'reversed Spanish pair on realtime fires nothing',
       langIdx: 0,
       reversed: true,
       mode: 'realtime',
-      expected: { targetCantoOnRealtime: false, inputCantoOnRealtime: false },
+      expected: { inputCantoOnRealtime: false },
     },
   ];
 
   for (const c of cases) {
     it(c.name, () => {
+      // Deep-equal: `targetCantoOnRealtime` is not merely false, it is GONE.
       expect(warnings(c.langIdx, c.reversed, c.mode)).toEqual(c.expected);
+      expect('targetCantoOnRealtime' in warnings(c.langIdx, c.reversed, c.mode)).toBe(false);
     });
   }
 });

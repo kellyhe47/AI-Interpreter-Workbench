@@ -700,12 +700,48 @@ describe('ResultsView — coverage card rows are DIRECTIONS with per-stage cells
     renderView(comparisonLedger());
     const observation = card('coverage').querySelector('[data-observation]');
     expect(observation).not.toBeNull();
-    expect(observation!.textContent).toContain('Observation · English → Cantonese on Realtime');
-    expect(observation!.textContent).toMatch(/Mandarin, not Cantonese/);
+    // TICKET 074 — the note no longer says Realtime "returned Mandarin on every
+    // attempt". That result was produced by ticket 062's bug, under an
+    // instruction that named NO target language at all; the operator has since
+    // run EN→YUE on Realtime and heard Cantonese. What the note carries now is
+    // the vendor asymmetry inside the cascade.
+    expect(observation!.textContent).toMatch(/Observation · English → Cantonese/);
+    expect(observation!.textContent).not.toMatch(/Mandarin, not Cantonese/);
+    expect(observation!.textContent).not.toMatch(/on every attempt/);
+    expect(observation!.textContent).toMatch(/gpt-4o-mini-tts/);
+    expect(observation!.textContent).toMatch(/eleven_flash_v2_5/);
 
     const citations = await loadCitations();
     expect(citations.length).toBeGreaterThan(0);
     expect(timeToAddTiles()).toHaveLength(citations.length);
+  });
+
+  /**
+   * TICKET 074 — the EN→Cantonese cascade row is per-ARM, because the two TTS
+   * vendors differ structurally. `gpt-4o-mini-tts` takes a natural-language
+   * `instructions` field that can name Cantonese pronunciation; ElevenLabs'
+   * `eleven_flash_v2_5` has a fixed language list with no Cantonese in it and an
+   * ISO 639-1 `language_code` that cannot express it. One vendor reaches a
+   * language the other cannot reach at any price — Experiment 2's real result.
+   */
+  it('EN→Cantonese: the tts cell is reached on Arm B and NOT reached on Arm C', () => {
+    renderView(comparisonLedger());
+    const row = card('coverage').querySelector('[data-direction="en-yue"]')!;
+    const tts = row.querySelector('[data-stage="tts"]')!;
+    expect(tts.textContent).toMatch(/Arm B/);
+    expect(tts.textContent).toMatch(/Arm C/);
+    expect(tts.textContent).toMatch(/not reached/);
+    // The bare 'reached' it used to claim was true of neither arm.
+    expect(tts.textContent).not.toBe('reached');
+  });
+
+  it('EN→Cantonese on Realtime is no longer recorded as the wrong variety', () => {
+    renderView(comparisonLedger());
+    const row = card('coverage').querySelector('[data-direction="en-yue"]')!;
+    expect(row.querySelector('[data-stage="realtime"]')!.textContent).toBe('reached');
+    // ...while the REVERSE direction keeps its own unexercised claim.
+    const reverse = card('coverage').querySelector('[data-direction="yue-en"]')!;
+    expect(reverse.querySelector('[data-stage="realtime"]')!.textContent).toBe('not reached');
   });
 });
 

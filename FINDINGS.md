@@ -81,18 +81,16 @@ against Replay Runs, and never pooled with them.
 
 ### The Cantonese case, and why a text-only evaluation would score it as a pass
 
-Written Cantonese shares most of its characters with Mandarin. A TTS that does not distinguish the
-two spoken languages will read Cantonese text aloud **in Mandarin** — a transcript that reads
-perfectly and audio that is wrong. **A text-only evaluation scores this as a success.** It is
-detectable only by ear, and only by a speaker, which is why blind scoring is playback-only.
+Cantonese and Mandarin **share their written characters**, pronounced differently. So a TTS given no
+delivery instruction reads correct Cantonese text aloud **in Mandarin**: a transcript that reads perfectly and audio that is wrong. **A text-only evaluation
+scores this as a success.** It is audible only, and only to a speaker — hence playback-only blind
+scoring. It is also a **pronunciation choice at the TTS**, which is where the two cascade TTS
+vendors stop being interchangeable (§4.3). Clinical *adequacy* stays **`not yet measured`**.
 
-This is the project's most distinctive expected finding, and it is **`not yet measured`** — filled
-by running an EN→YUE clip through Arms A/B/C and *listening* to the retained output audio. Output
-audio retention is built and verified (ticket 056), but **no run has exercised it**. Nothing in this
-document claims the trap was observed.
-
-Realtime does not list Cantonese among its output languages. It is run anyway, because "unsupported"
-is a documentation lookup and *how* it fails is the finding.
+Realtime was long recorded here as unable to produce Cantonese. Wrong twice over: the
+13-output-language list belongs to `gpt-realtime-translate`, not the `gpt-realtime` this project
+runs, and the runs behind the claim predate ticket 062, i.e. any target language on the wire. The
+operator has since run EN→YUE on Realtime and heard Cantonese.
 
 ### Corpus
 
@@ -177,9 +175,14 @@ describes.
 makes any B→C delta cleanly attributable to the swap. That containment is the assembly line's actual
 product: the sealed box has no seam to swap at, so a vendor-level problem with Realtime is a
 migration, not a configuration change. Two cautions: this proves a **TTS** swap only, not "swapping
-any provider" — STT and MT provider variation is untested — and **flexibility is not coverage**. If
-neither OpenAI STT nor ElevenLabs TTS covers Cantonese, the cascade's advantage is that it localizes
-the gap to one stage while Realtime fails opaquely; it is not that the cascade delivers the language.
+any provider" — STT and MT provider variation is untested — and **flexibility is not coverage**.
+
+**And the swap's real payoff is language reach, not a latency delta.** `gpt-4o-mini-tts` takes a
+free-text `instructions` field documented to steer accent and tone, so Arm B can be told to read the
+shared characters with Cantonese pronunciation. `eleven_flash_v2_5` lists no Cantonese, and
+ElevenLabs' `language_code` is ISO 639-1, which has no code for it (`zh` is the macrolanguage, i.e.
+Mandarin — sending it requests the wrong variety). **Arm C cannot reach this language at any price;
+Arm B can, through a swap touching one stage** — provider flexibility with evidence, not assertion.
 
 **4 · Cost metering is asymmetric, and that is a controllability finding.** One provider tells you
 what you spent and the others do not. Arm A returns usage you can price; Arms B and C do not, so the
@@ -206,10 +209,9 @@ stage. Lacks: nothing measurable — this argument does not become truer with mo
 latency cost knowingly; at p95 it is 2858 ms, which is not the sub-2s target.
 
 **An uncommon language pair, or a vendor you may need to leave → the cascade.** Rests on: the
-one-stage containment of the B→C swap, and on onboarding costing 1351 insertions once and one
-`pairs` entry thereafter. Lacks: any evidence that the vendors actually cover Cantonese well.
-Flexibility bounded by coverage is still bounded. If EN→YUE audio comes back as Mandarin, that is a
-finding *against* the cascade's current vendor set, not for it.
+one-stage containment of the B→C swap, on onboarding costing 1351 insertions once and one `pairs`
+entry thereafter, and on §4.3's asymmetry: the swap seam is what lets EN→Cantonese be reached on Arm
+B when Arm C cannot reach it. Lacks: scored evidence of Cantonese *quality*. Reach is not adequacy.
 
 **Cost predictability → no recommendation is available.** This is the uncomfortable one. The
 theoretical story favours the cascade (flat per-minute cost against a sealed box that re-reads
@@ -217,9 +219,8 @@ history), but the only arm that can currently tell you what it spent is the seal
 needs a sweep, the 5-minute Live sessions, and ticket 053. Until then, anyone quoting a per-minute
 figure for Arm B or C is quoting nothing.
 
-**The single most consequential unknown** is not on this list: whether Realtime's Cantonese output
-is fluent Mandarin. If it is, it is decisive evidence for the auditability argument — and it is
-audible only. Nobody has listened yet.
+**The most consequential remaining unknown** is not on this list: whether the Cantonese any arm
+produces is *good enough to interpret with*. Capability holds on Arms A and B; adequacy is unheard.
 
 ---
 

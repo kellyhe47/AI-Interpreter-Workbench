@@ -96,12 +96,10 @@
  *
  * Language/direction helpers (rule group 7) live in this file:
  * - `pairs`: [{src:'English', tgt:'Spanish'}, {src:'English', tgt:'Cantonese'}]
- * - `supportPill(langIdx)`: 'both modes' for EN↔ES, 'cascade only' for the
- *   Cantonese pair.
- * - `warnings(langIdx, reversed, mode)`: `targetCantoOnRealtime` fires ONLY
- *   when the target language is Cantonese (langIdx 1, not reversed) and the
- *   mode is realtime; `inputCantoOnRealtime` fires ONLY when the source is
- *   Cantonese (langIdx 1, reversed) and the mode is realtime.
+ * - `supportPill(langIdx)`: 'both modes' for EVERY pair (ticket 074).
+ * - `warnings(langIdx, reversed, mode)`: `inputCantoOnRealtime` fires ONLY when
+ *   the SOURCE is Cantonese (langIdx 1, reversed) and the mode is realtime.
+ *   The forward-direction warning was retired by ticket 074.
  */
 
 import { DEFAULT_CASCADE_TRIPLE, type ProviderTriple } from '../../core/arms';
@@ -525,8 +523,23 @@ export function reduce(state: SessionState, event: SessionEvent): SessionState {
   }
 }
 
-export function supportPill(langIdx: number): 'both modes' | 'cascade only' {
-  return langIdx === 1 ? 'cascade only' : 'both modes';
+/**
+ * TICKET 074 — 'cascade only' is RETIRED, not re-scoped.
+ *
+ * It encoded a real 13-output-language list, but that list belongs to
+ * `gpt-realtime-translate`. This project runs `gpt-realtime` (`core/arms.ts`),
+ * a general speech-to-speech model steered by a free-text `instructions` field
+ * with no output-language enum — nothing for a language pair to violate. The
+ * claim was also made on 2026-08-05, four days before ticket 062 first put a
+ * target language on the wire at all, so it described a run that was never
+ * asked for Cantonese (ticket 073). The operator has since run EN→YUE on
+ * Realtime and heard Cantonese.
+ *
+ * The signature keeps its union so a future pair can be labelled honestly; no
+ * pair we support earns the warning label today.
+ */
+export function supportPill(_langIdx: number): 'both modes' | 'cascade only' {
+  return 'both modes';
 }
 
 /**
@@ -540,7 +553,16 @@ export function stateLabel(state: SessionState): string {
 }
 
 export interface LanguageWarnings {
-  targetCantoOnRealtime: boolean;
+  /**
+   * TICKET 074 — the FORWARD warning (`targetCantoOnRealtime`) is gone. It told
+   * the operator that EN→YUE on Realtime was unsupported; they have run it and
+   * heard Cantonese, so the banner named a working configuration as broken.
+   *
+   * This one STAYS, deliberately and separately. YUE→EN is a different claim:
+   * Cantonese speech INPUT on Realtime has never been tested by anyone here,
+   * and it must not be swept along with its sibling. Absence of evidence in the
+   * reverse direction is not the evidence the forward direction now has.
+   */
   inputCantoOnRealtime: boolean;
 }
 
@@ -548,7 +570,6 @@ export function warnings(langIdx: number, reversed: boolean, mode: Mode): Langua
   const realtimeInvolved = mode === 'realtime';
   const cantoPair = langIdx === 1;
   return {
-    targetCantoOnRealtime: cantoPair && !reversed && realtimeInvolved,
     inputCantoOnRealtime: cantoPair && reversed && realtimeInvolved,
   };
 }

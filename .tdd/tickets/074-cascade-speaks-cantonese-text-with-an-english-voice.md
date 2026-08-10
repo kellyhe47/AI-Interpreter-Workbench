@@ -1,13 +1,13 @@
 ---
 id: 074
 title: "The cascade produces correct Cantonese TEXT and reads it with an English voice — PRD §10's trap is in Arm B/C, not Realtime"
-status: pending
+status: done-except-yue-to-en
 source: operator (2026-08-10) — "make sure we are outputting to Cantonese specifically"
 depends_on: [062, 073]
 touches: [src/server/providers/elevenlabs-tts.ts, src/server/providers/openai-tts.ts, src/core/models.ts, src/server/ws.ts, src/client/state/sessionMachine.ts, src/client/views/ResultsView.tsx]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Part 1 — the cascade's EN→YUE output is not steered to Cantonese
@@ -158,3 +158,47 @@ Arm B, not reached on Arm C** — replacing a claim that was never true of eithe
       to report**, not a gap to paper over.
 - [ ] The coverage card records Arm B reached / Arm C not reached for EN→Cantonese on cascade, and
       `FINDINGS.md` carries the vendor asymmetry as Experiment 2's real result
+
+---
+
+## RESOLUTION (2026-08-10) — DONE except one item, see "REMAINING" below
+
+Suite 2545 passing / 0 failing. `npm run check` exits 0. FINDINGS.md is 250 lines (at budget).
+
+**Arm B now speaks Cantonese.** `openai-tts` accepts `config.instructions` and sends it as the API's
+`instructions` field; `resolveTriple` gains `opts.targetLanguage` and lands the instruction on the
+TTS stage **for the openai vendor only**, through the same single config path that already carries
+`sourceLanguage`. The string sent for `en→yue`:
+
+> *Read the text aloud in Cantonese (Yue) — use Cantonese pronunciation and tones, as spoken in Hong
+> Kong. The characters are shared with Mandarin; do NOT read them in Mandarin.*
+
+`en→es` sends **no `instructions` key at all**, pinned three ways: `resolveTriple`'s output
+deep-equals the bare `{ model }` shape, the constructed adapter carries no `instructions`, and
+`OpenAiTts` omits the JSON key entirely (`'instructions' in body === false`).
+
+**Arm C fails honestly.** No `zh` or Cantonese code reaches ElevenLabs — asserted at three levels
+including the actual wire (URL + every sent frame matches none of `/language_code/`, `/"zh"/`,
+`/yue/i`, `/cantonese/i` while synthesizing Cantonese text). Its inability is **reported** in the
+coverage card, the observation note and FINDINGS §4.3, not papered over.
+
+**The pill is gone.** `supportPill` returns `'both modes'` for every pair; `targetCantoOnRealtime`
+and its banner are removed.
+
+### REMAINING — one item, unblocked, ready for the next agent
+
+**The operator confirmed on 2026-08-10: *"I've spoken Cantonese into real time and gotten English
+back."*** So `inputCantoOnRealtime` (**YUE→EN**, the reverse direction) is now stale for the same
+reason `targetCantoOnRealtime` was, and should be removed the same way.
+
+It was deliberately left standing during this ticket because at implementation time the operator had
+only confirmed the forward direction, and a test now asserts it still fires. To finish:
+
+- [ ] Remove `inputCantoOnRealtime` from `LanguageWarnings` (`sessionMachine.ts`) and its banner in
+      `LiveView.tsx`, mirroring exactly what was done for `targetCantoOnRealtime`
+- [ ] Update the test added by this ticket — *"swapping to Cantonese INPUT on Realtime still fires
+      the input warning"* — which will go red **for the right reason**. Re-point it, do not delete it.
+- [ ] `COPY.cantoInputWarn` / the `sessionTestKit` entry follow the same retired-copy treatment
+      `cantoTargetWarn` received
+- [ ] The coverage card's **Cantonese → English** row on Realtime currently reads `not reached`.
+      That is now contradicted by observation — correct it, and check whether FINDINGS.md repeats it.

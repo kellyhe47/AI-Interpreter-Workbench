@@ -31,7 +31,8 @@
  *   is a READOUT: a span with no interactive descendant, because membership
  *   is derived from the recipe and never declared by a control.
  *   Language button labelled '{src} → {tgt}'; direction button aria-label
- *   'Swap direction'; support pill 'both modes' | 'cascade only';
+ *   'Swap direction'; support pill 'both modes' (ticket 074: no pair is
+ *   'cascade only');
  *   'Stop session' while stoppable, 'Start new session' when stopped.
  * Controls card row 2:
  *   cascade → three [data-stage-select="stt|mt|tts"] buttons, text = the
@@ -894,9 +895,10 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
               font: '400 10.5px var(--font-sans)',
               borderRadius: 'var(--radius-pill)',
               padding: '3px 9px',
-              background:
-                pill === 'cascade only' ? 'var(--warning-soft)' : 'var(--surface-selected)',
-              color: pill === 'cascade only' ? 'var(--warning)' : 'var(--text-secondary)',
+              // Every supported pair runs on both modes (ticket 074), so the
+              // pill is informational — it no longer wears the warning tone.
+              background: 'var(--surface-selected)',
+              color: 'var(--text-secondary)',
             }}
           >
             {pill}
@@ -1044,13 +1046,13 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
           {`switching to ${state.pending.label} after this sentence finishes`}
         </Banner>
       )}
-      {!stopped && warn.targetCantoOnRealtime && (
-        <Banner tone="warning">
-          <WarnIcon />
-          Realtime does not list Cantonese as a supported output language — the run proceeds to
-          observe the actual failure mode. Text may look correct while audio pronunciation is not.
-        </Banner>
-      )}
+      {/*
+        TICKET 074 — the forward-direction banner is GONE. It said Realtime does
+        not list Cantonese as an output language; that list belongs to
+        `gpt-realtime-translate`, not the `gpt-realtime` this app runs, and the
+        operator has since run EN→YUE on Realtime and heard Cantonese. The
+        reverse-direction banner below stays: YUE→EN was never tested.
+      */}
       {!stopped && warn.inputCantoOnRealtime && (
         <Banner tone="warning">
           <WarnIcon />

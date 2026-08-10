@@ -175,8 +175,18 @@ export function attachCascadeWs(
           // session already knows which way it is running, and a second field
           // could disagree with it. An unparseable or empty direction yields no
           // hint at all rather than a guessed 'en'.
+          //
+          // TICKET 074 — AND THE TARGET RIDES THE SAME CALL ONTO THE TTS.
+          // The TTS stage was the last one built from `{ model }` alone, so
+          // the cascade handed correct Cantonese characters to a model with no
+          // instruction about how to pronounce them — and Mandarin and
+          // Cantonese share those characters. `resolveTriple` decides whether
+          // the target needs a pronunciation instruction and which vendor can
+          // even take one; ElevenLabs gets nothing, because ISO 639-1 has no
+          // Cantonese and `zh` would request Mandarin.
           const resolved = resolveTriple(msg.providers, {
             sourceLanguage: sourceLanguageOfDirection(msg.direction),
+            targetLanguage: msg.targetLanguage,
           });
           providers = {
             stt: createStt(resolved.stt.vendor, resolved.stt.options),

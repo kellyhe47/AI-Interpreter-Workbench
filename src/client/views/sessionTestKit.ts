@@ -53,6 +53,11 @@ export const COPY = {
   deniedHeading: 'Microphone blocked',
   /** Exact re-prompt phrase chosen for the denied card. */
   noRePrompt: 'do not re-prompt',
+  /**
+   * TICKET 074 — RETIRED COPY, kept so tests can assert it is ABSENT. The
+   * forward-direction banner claimed a configuration the operator has since run
+   * successfully was unsupported.
+   */
   cantoTargetWarn:
     'Realtime does not list Cantonese as a supported output language — the run proceeds to observe the actual failure mode. Text may look correct while audio pronunciation is not.',
   cantoInputWarn:

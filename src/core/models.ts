@@ -51,6 +51,27 @@
  * all: `''` on the wire is a claim a run that could not name its own language
  * has no business making, and a defaulted `'en'` would be this project's
  * characteristic sin in a new place.
+ *
+ * TICKET 074 — AND THE TARGET LANGUAGE RIDES THROUGH HERE ONTO THE *TTS*.
+ * 062 gave the MT stage its target and 069 gave the STT stage its source; the
+ * TTS stage was still built from `{ model }` alone. Mandarin and Cantonese
+ * SHARE their written characters — the same characters are simply pronounced
+ * differently — so correct Cantonese text handed to a TTS with no delivery
+ * instruction is read in Mandarin. That is PRD §10's trap, and it lived in the
+ * cascade, not in Realtime (ticket 073).
+ *
+ * THE LEVER IS PRONUNCIATION, NOT THE VOICE AND NOT THE TEXT. The MT prompt is
+ * already correct, and voice ids supply timbre only. `gpt-4o-mini-tts` takes a
+ * natural-language `instructions` field documented to steer accent, intonation
+ * and tone; that is the whole mechanism.
+ *
+ * AND ONLY ONE VENDOR HAS IT — WHICH IS EXPERIMENT 2'S ACTUAL RESULT.
+ * `eleven_flash_v2_5` has a fixed language list with no Cantonese in it, and
+ * its `language_code` is ISO 639-1, which has no code for Cantonese at all
+ * (`zh` is the macrolanguage and conventionally resolves to MANDARIN). So Arm C
+ * gets NOTHING here: no instruction it cannot read, and above all no `zh` —
+ * requesting the wrong variety is worse than requesting none. Arm C's
+ * inability is a finding to report, not a gap to paper over.
  */
 import { MENUS, type ProviderTriple } from './arms';
 
@@ -138,13 +159,42 @@ export interface ResolveTripleOptions {
    * the session cannot name it, and then no key reaches the adapter at all.
    */
   sourceLanguage?: string;
+  /**
+   * TICKET 074 — the HUMAN NAME of the language being spoken TO, exactly as the
+   * MT stage receives it ('Cantonese', 'Spanish', 'English'). Used for one
+   * thing: choosing a TTS pronunciation instruction. A language with no special
+   * pronunciation requirement yields NO option at all.
+   */
+  targetLanguage?: string;
 }
+
+/**
+ * Target languages whose PRONUNCIATION must be named, and the instruction that
+ * names it. Keyed on the same human names the MT stage is given.
+ *
+ * Cantonese is the only entry, and deliberately so: every other supported
+ * target is unambiguous from its own characters, and an entry here is a claim
+ * about a real failure mode, not a stylistic preference.
+ */
+const TTS_PRONUNCIATION_INSTRUCTIONS: Readonly<Record<string, string>> = {
+  Cantonese:
+    'Read the text aloud in Cantonese (Yue) — use Cantonese pronunciation and tones, ' +
+    'as spoken in Hong Kong. The characters are shared with Mandarin; do NOT read them ' +
+    'in Mandarin.',
+};
+
+/** The one TTS vendor whose API takes a natural-language delivery instruction. */
+const INSTRUCTABLE_TTS_VENDOR = 'openai';
 
 /**
  * Resolve a whole cascade triple, each stage under its own kind.
  *
  * TICKET 069 — `opts.sourceLanguage` is added to the STT stage's options as
  * `languageCode`, for real vendors only. See the header: absent means absent.
+ *
+ * TICKET 074 — `opts.targetLanguage` may add `instructions` to the TTS stage,
+ * for the one vendor that has the field and only for a language whose
+ * pronunciation must be named. See the header: Arm C gets nothing.
  */
 export function resolveTriple(
   triple: ProviderTriple,
@@ -157,9 +207,14 @@ export function resolveTriple(
   if (sourceLanguage !== '' && stt.vendor !== FIXTURE_VENDOR) {
     stt.options.languageCode = sourceLanguage;
   }
+  const tts = resolveModel('tts', triple.tts);
+  const instruction = TTS_PRONUNCIATION_INSTRUCTIONS[opts.targetLanguage ?? ''];
+  if (instruction !== undefined && tts.vendor === INSTRUCTABLE_TTS_VENDOR) {
+    tts.options.instructions = instruction;
+  }
   return {
     stt,
     mt: resolveModel('mt', triple.mt),
-    tts: resolveModel('tts', triple.tts),
+    tts,
   };
 }

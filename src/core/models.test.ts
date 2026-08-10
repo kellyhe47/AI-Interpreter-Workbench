@@ -296,3 +296,95 @@ describe('TICKET 069 — the source language reaches the STT stage, and only it'
     expect(r.stt).toEqual({ vendor: 'fixture', options: {} });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 074 — AND THE TARGET LANGUAGE HAS TO REACH THE *TTS* STAGE.
+//
+// 062 gave the MT stage its target and 069 gave the STT stage its source. The
+// TTS stage was still built from `{ model }` alone, so the cascade handed
+// correct Cantonese characters to a model with no instruction about how to
+// pronounce them — and Mandarin and Cantonese share those characters. That is
+// PRD §10's trap: a transcript that reads perfectly and audio that is wrong.
+//
+// The lever is `gpt-4o-mini-tts`'s natural-language `instructions` field. It
+// exists on ONE of the two TTS vendors, which is the finding: ElevenLabs'
+// `eleven_flash_v2_5` has a fixed language list with no Cantonese in it and an
+// ISO 639-1 `language_code` that cannot express Cantonese at all. Arm C's
+// inability is reported, never papered over with `zh` — which would request
+// MANDARIN, the defect wearing the fix's clothes.
+// ---------------------------------------------------------------------------
+
+type TripleTargetOptions = { sourceLanguage?: string; targetLanguage?: string };
+type ResolveTripleWithTarget = (
+  triple: ProviderTriple,
+  opts?: TripleTargetOptions,
+) => ReturnType<typeof resolveTriple>;
+const resolveTripleWithTarget = resolveTriple as ResolveTripleWithTarget;
+
+describe('TICKET 074 — the Cantonese pronunciation instruction reaches the TTS stage', () => {
+  const ARM_B: ProviderTriple = {
+    stt: 'gpt-4o-transcribe',
+    mt: 'gpt-4o-mini',
+    tts: 'gpt-4o-mini-tts',
+  };
+  const ARM_C: ProviderTriple = { ...ARM_B, tts: 'eleven_flash_v2_5' };
+
+  it('en→yue: Arm B gets an instruction that NAMES Cantonese pronunciation', () => {
+    const r = resolveTripleWithTarget(ARM_B, { targetLanguage: 'Cantonese' });
+    expect(r.tts.vendor).toBe('openai');
+    const instructions = r.tts.options.instructions;
+    expect(typeof instructions).toBe('string');
+    expect(instructions as string).toMatch(/Cantonese/);
+    // The model is still carried — the instruction is added beside it.
+    expect(r.tts.options.model).toBe('gpt-4o-mini-tts');
+  });
+
+  it('en→es: NO instructions key at all — absence, never a guessed default', () => {
+    const r = resolveTripleWithTarget(ARM_B, { targetLanguage: 'Spanish' });
+    expect(r.tts).toEqual({ vendor: 'openai', options: { model: 'gpt-4o-mini-tts' } });
+    expect('instructions' in r.tts.options).toBe(false);
+  });
+
+  it('no target language named is the same absence', () => {
+    expect('instructions' in resolveTripleWithTarget(ARM_B).tts.options).toBe(false);
+    expect('instructions' in resolveTripleWithTarget(ARM_B, {}).tts.options).toBe(false);
+    expect(
+      'instructions' in resolveTripleWithTarget(ARM_B, { targetLanguage: '' }).tts.options,
+    ).toBe(false);
+  });
+
+  it('the two directions differ on the wire — that is what makes this falsifiable', () => {
+    const yue = resolveTripleWithTarget(ARM_B, { targetLanguage: 'Cantonese' }).tts.options
+      .instructions;
+    const es = resolveTripleWithTarget(ARM_B, { targetLanguage: 'Spanish' }).tts.options
+      .instructions;
+    expect(yue).not.toEqual(es);
+    expect(es).toBeUndefined();
+  });
+
+  it('ARM C IS NOT PAPERED OVER: ElevenLabs gets no instruction and NO Cantonese language code', () => {
+    const r = resolveTripleWithTarget(ARM_C, { targetLanguage: 'Cantonese' });
+    // Deep-equal: the model, and nothing else. No `instructions` it cannot
+    // read, and above all no `language_code` — ISO 639-1 has no Cantonese and
+    // `zh` would request Mandarin.
+    expect(r.tts).toEqual({ vendor: 'elevenlabs', options: { modelId: 'eleven_flash_v2_5' } });
+    expect(JSON.stringify(r.tts.options)).not.toMatch(/zh|language_code|Cantonese/i);
+  });
+
+  it('the instruction lands on the ADAPTER, and reaches the request body', () => {
+    const r = resolveTripleWithTarget(ARM_B, { targetLanguage: 'Cantonese' });
+    const tts = createTts(r.tts.vendor, r.tts.options) as unknown as {
+      config: Record<string, unknown>;
+    };
+    expect(tts.config.instructions).toMatch(/Cantonese/);
+    expect(tts.config.model).toBe('gpt-4o-mini-tts');
+  });
+
+  it('FIXTURE TTS is untouched — an escape, not a table entry', () => {
+    const r = resolveTripleWithTarget(
+      { stt: 'fixture', mt: 'fixture', tts: 'fixture' },
+      { targetLanguage: 'Cantonese' },
+    );
+    expect(r.tts).toEqual({ vendor: 'fixture', options: {} });
+  });
+});

@@ -149,3 +149,43 @@ describe('OpenAiTts adapter specifics', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+/**
+ * TICKET 074 — the pronunciation instruction.
+ *
+ * Mandarin and Cantonese share written characters; the same characters are
+ * read with different pronunciation. So the cascade's EN→YUE defect was never
+ * a text-form or voice-id problem — it is pronunciation selection at the TTS.
+ * `gpt-4o-mini-tts` takes a natural-language `instructions` field documented to
+ * steer accent, intonation and tone, and that is the ONE lever that reaches
+ * Cantonese. A direction needing nothing special sends NO field at all.
+ */
+describe('TICKET 074 — OpenAiTts sends `instructions` when, and only when, it has one', () => {
+  function bodyOf(config: ConstructorParameters<typeof OpenAiTts>[0]): Promise<
+    Record<string, unknown>
+  > {
+    const { calls, fetchImpl } = okPcmFetch();
+    const tts = new OpenAiTts({ apiKey: 'k', ...config }, { fetchImpl });
+    return collect(tts.synthesize(asyncIterableOf(['你好']))).then(
+      () => JSON.parse(String(calls[0]!.init?.body)) as Record<string, unknown>,
+    );
+  }
+
+  it('puts a configured instruction on the wire as the API `instructions` field', async () => {
+    const body = await bodyOf({ instructions: 'Read aloud with Cantonese pronunciation.' });
+    expect(body.instructions).toBe('Read aloud with Cantonese pronunciation.');
+    // Added beside the rest of the request, never instead of it.
+    expect(body.model).toBe('gpt-4o-mini-tts');
+    expect(body.input).toBe('你好');
+  });
+
+  it('sends NO `instructions` key at all when none is configured — absence, not a guess', async () => {
+    const body = await bodyOf({});
+    expect('instructions' in body).toBe(false);
+  });
+
+  it('an EMPTY instruction is the same absence as none', async () => {
+    const body = await bodyOf({ instructions: '' });
+    expect('instructions' in body).toBe(false);
+  });
+});

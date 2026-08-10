@@ -515,3 +515,82 @@ describe('TICKET 069 — the source language is derived from `direction` and rea
     expect(seen.tts!.config?.languageCode).toBeUndefined();
   });
 });
+
+/**
+ * TICKET 074 — and the TTS stage has to be told how to PRONOUNCE it.
+ *
+ * 062 routed the target to the MT and 069 the source to the STT; the TTS was
+ * still built from `{ model }` alone. Mandarin and Cantonese share written
+ * characters, so an EN→YUE cascade produced correct Cantonese text and read it
+ * in Mandarin — PRD §10's trap, in Arm B/C rather than in Realtime.
+ *
+ * Falsifiable per direction, on the wire: `en→yue` carries an instruction that
+ * names Cantonese, `en→es` carries none at all, and Arm C carries neither an
+ * instruction nor any Chinese language code.
+ */
+describe('TICKET 074 — the pronunciation instruction reaches the constructed TTS', () => {
+  interface SeenTts {
+    tts?: { config?: Record<string, unknown> };
+  }
+
+  function capturingTts(seen: SeenTts): AttachCascadeWsOptions {
+    const fake: OrchestratorFactory = (_source, providers) =>
+      (async function* () {
+        seen.tts = providers.tts as unknown as { config?: Record<string, unknown> };
+      })();
+    return { createOrchestrator: fake };
+  }
+
+  async function ttsConfigFor(frame: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const seen: SeenTts = {};
+    const { port } = await startServer(capturingTts(seen));
+    const { ws } = await connect(port);
+    ws.send(JSON.stringify({ type: 'session.start', mode: 'cascade', ...frame }));
+    await waitFor(() => seen.tts !== undefined, 'constructed TTS provider');
+    return seen.tts!.config ?? {};
+  }
+
+  const armB = { stt: 'fixture', mt: 'fixture', tts: 'gpt-4o-mini-tts' };
+  const armC = { stt: 'fixture', mt: 'fixture', tts: 'eleven_flash_v2_5' };
+
+  it('en→yue on Arm B builds the TTS with an instruction naming Cantonese', async () => {
+    const config = await ttsConfigFor({
+      languagePair: 'EN↔YUE',
+      direction: 'en→yue',
+      targetLanguage: 'Cantonese',
+      providers: armB,
+    });
+    expect(String(config.instructions)).toMatch(/Cantonese/);
+    expect(String(config.instructions)).toMatch(/Mandarin/); // names what it must NOT do
+    expect(config.model).toBe('gpt-4o-mini-tts');
+  });
+
+  it('en→es on Arm B builds the TTS with NO instruction — the two directions differ', async () => {
+    const es = await ttsConfigFor({
+      languagePair: 'EN↔ES',
+      direction: 'en→es',
+      targetLanguage: 'Spanish',
+      providers: armB,
+    });
+    const yue = await ttsConfigFor({
+      languagePair: 'EN↔YUE',
+      direction: 'en→yue',
+      targetLanguage: 'Cantonese',
+      providers: armB,
+    });
+    expect(es.instructions).toBeUndefined();
+    expect('instructions' in es).toBe(false);
+    expect(yue.instructions).not.toEqual(es.instructions);
+  });
+
+  it('en→yue on ARM C gets no instruction and NO Chinese language code — `zh` is Mandarin', async () => {
+    const config = await ttsConfigFor({
+      languagePair: 'EN↔YUE',
+      direction: 'en→yue',
+      targetLanguage: 'Cantonese',
+      providers: armC,
+    });
+    expect(config).toEqual({ modelId: 'eleven_flash_v2_5' });
+    expect(JSON.stringify(config)).not.toMatch(/zh|language_?[Cc]ode|Cantonese/);
+  });
+});

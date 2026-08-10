@@ -13,7 +13,8 @@
  * - API key resolved AT CONSTRUCTION: `config.apiKey ?? process.env.OPENAI_API_KEY`.
  * - Request body: {model:'gpt-4o-mini-tts' (config.model overrides),
  *   voice: config.voice ?? 'alloy', input: <concatenated text>,
- *   response_format: 'pcm'} -> chunked body of raw PCM16 LE @ 24kHz.
+ *   response_format: 'pcm', and `instructions` ONLY when config.instructions
+ *   is a non-empty string (ticket 074)} -> chunked body of raw PCM16 LE @ 24kHz.
  * - Streams the response body, yielding Int16Array chunks as bytes arrive.
  *   Body chunk boundaries are NOT sample-aligned: when a chunk has an odd
  *   byte length the trailing byte is CARRIED into the next chunk so Int16
@@ -38,6 +39,15 @@ export interface OpenAiTtsConfig {
   model?: string;
   /** Voice id. Default 'alloy'. */
   voice?: string;
+  /**
+   * TICKET 074 — natural-language delivery steering, sent as the API's
+   * `instructions` field. This is the ONE lever that reaches Cantonese:
+   * Mandarin and Cantonese share written characters, so the model decides
+   * pronunciation, and `gpt-4o-mini-tts` documents this field as steering
+   * accent, intonation and tone. Unset (or empty) means NO field on the wire —
+   * a guessed default delivery is a claim no run has earned.
+   */
+  instructions?: string;
 }
 
 export interface OpenAiTtsDeps {
@@ -77,6 +87,7 @@ export class OpenAiTts implements TtsProvider {
     if (input === '') return; // no fetch, no audio
     if (signal?.aborted) return;
 
+    const instructions = this.config.instructions ?? '';
     const res = await fetchImpl(SPEECH_URL, {
       method: 'POST',
       headers: {
@@ -88,6 +99,8 @@ export class OpenAiTts implements TtsProvider {
         voice: this.config.voice ?? 'alloy',
         input,
         response_format: 'pcm',
+        // Absence stays absence: no instruction, no key (ticket 074).
+        ...(instructions === '' ? {} : { instructions }),
       }),
       signal,
     });
