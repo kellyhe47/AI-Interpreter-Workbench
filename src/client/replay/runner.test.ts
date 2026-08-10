@@ -2276,3 +2276,451 @@ describe('059 follow-up — the abandoned-run stub declares the price source too
     expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 068 — A HALLUCINATED LEADING SEGMENT SHIFTS EVERY REAL UTTERANCE, AND
+// THE RUNNER TRUNCATES INSTEAD OF NOTICING.
+//
+// `attributeUtterances` maps manifest entry i onto transport bucket
+// `entry.index - 1` and reads EXACTLY `manifest.length` buckets. `observed` is
+// the count of `onUtteranceComplete` events that arrived BEFORE the run stopped
+// listening — never how many segments the transport actually produced. So when
+// the STT hallucinates a leading utterance on the clip's opening silence
+// (7 of the operator's 17 runs: "Turn right.", "그러나.", "Hallo.", "żeśmy.",
+// "Yardımımın", "Telephone", "Ok."):
+//
+//   bucket 0 <- the spurious segment        (in NO manifest entry)
+//   bucket 1 <- manifest utterance 1's answer
+//   bucket 2 <- manifest utterance 2's answer
+//   bucket 3 <- manifest utterance 3's answer
+//   bucket 4 <- manifest utterance 4's answer — READ BY NOBODY
+//
+// The 4th completion arms the settle window, it expires 250 ms later, and the
+// 5th segment lands ~2.5 s after that — by which time the run has stopped
+// listening. `observed` is 4, `expected` is 4, no segmentation reason is
+// recorded, and the Run is stored `complete` with every transcript one manifest
+// entry late. Run 8aba8e2e, verbatim:
+//
+//   slot 1 "No, none at all."          <- "Turn right."   (spurious)
+//   slot 2 "Take two hundred fifty…"   <- manifest 1
+//   slot 3 "It started— sorry…"        <- manifest 2
+//   slot 4 "Doctor Nguyen referred…"   <- manifest 3
+//   manifest 4 absent from the record entirely
+//
+// Anchors 2400 / 8598 / 14560 / 19797, audio at 5197 / 11134 / 17161: against
+// each utterance's OWN anchor that is −3401 / −3426 / −2636, and against the
+// PREVIOUS anchor +2797 / +2536 / +2601 — a tightly clustered cascade latency.
+// 055b's clock guard caught that run BY ACCIDENT. A shift whose deltas happen
+// to come out positive is caught by nothing at all, and those are exactly the
+// samples that survived into the graded screen.
+//
+// WHAT IS ALREADY TRUE, and is asserted below as a control rather than claimed:
+// ticket 031 ALREADY compares `observed !== expected` in both directions, and a
+// transport that emits 5 COMPLETIONS in time already fails with
+// `segmentation: expected 4 utterances, observed 5`. The hole is narrower and
+// meaner than "there is no too-many check": it is that a segment the transport
+// demonstrably produced — a distinct `utt` carrying a final transcript — is
+// never counted as a segment at all, and its bucket is silently dropped.
+//
+// THE CLOCK-INVERSION GUARD IS NOT TOUCHED BY ANY TEST BELOW. It is correct,
+// it is what surfaced this, and the primary fixture here is deliberately built
+// so that it never fires: every delta the shift produces is POSITIVE.
+// ---------------------------------------------------------------------------
+
+/**
+ * The manifest of `rec_msjjjc0m001_f1314d52` again — the SAME four anchors as
+ * DRIFT_MANIFEST, now carrying reference text, because the defect this block
+ * exists for is WHICH TRANSCRIPT LANDED ON WHICH ENTRY. A sign check on the
+ * deltas cannot see a shift; a pairing check can.
+ */
+const ALIGN_MANIFEST: CorpusUtterance[] = [
+  {
+    id: 'a-1',
+    index: 1,
+    category: 'short-reply',
+    trueSpeechEndMs: DRIFT_SPEECH_END_MS[0],
+    referenceText: 'No, none at all.',
+  },
+  {
+    id: 'a-2',
+    index: 2,
+    category: 'numbers-dates',
+    trueSpeechEndMs: DRIFT_SPEECH_END_MS[1],
+    referenceText: 'Take two hundred fifty milligrams twice a day.',
+  },
+  {
+    id: 'a-3',
+    index: 3,
+    category: 'disfluency',
+    trueSpeechEndMs: DRIFT_SPEECH_END_MS[2],
+    referenceText: 'It started, sorry, three days ago.',
+  },
+  {
+    id: 'a-4',
+    index: 4,
+    category: 'proper-nouns',
+    trueSpeechEndMs: DRIFT_SPEECH_END_MS[3],
+    referenceText: 'Doctor Nguyen referred you.',
+  },
+];
+
+/** What the STT put on the clip's opening silence in run 8aba8e2e. */
+const SPURIOUS_LEAD_TEXT = 'Turn right.';
+
+/** The reference text of each manifest entry, in index order. */
+const ALIGN_REFERENCES = ALIGN_MANIFEST.map((entry) => entry.referenceText!);
+
+/**
+ * One segment as the TRANSPORT numbered it — never as the manifest numbers it.
+ * The whole ticket is that the two are not the same sequence.
+ */
+interface SegmentSpec {
+  /** The transport's 0-based `utt`. */
+  utt: number;
+  /** The source transcript this segment carried, and when it was delivered. */
+  source: string;
+  sourceAt: number;
+  /** When this segment's answer began sounding. `null` => it never sounded. */
+  audioAt: number | null;
+  /**
+   * When the transport announced this segment complete. A value past the end of
+   * the run models the real thing: the segment WAS produced, the run had already
+   * stopped listening.
+   */
+  completeAt: number;
+}
+
+function segmentScript(segments: readonly SegmentSpec[]): FixtureScriptEvent[] {
+  return segments.flatMap((s): FixtureScriptEvent[] => [
+    { at: s.sourceAt, type: 'sourceText', kind: 'final', text: s.source, utt: s.utt },
+    ...(s.audioAt === null
+      ? []
+      : [
+          { at: s.audioAt, type: 'audio', pcm: ramp(240), utt: s.utt } as FixtureScriptEvent,
+          {
+            at: s.audioAt + 5,
+            type: 'targetText',
+            kind: 'final',
+            text: `tgt ${s.utt}`,
+            utt: s.utt,
+          } as FixtureScriptEvent,
+        ]),
+    { at: s.completeAt, type: 'utteranceComplete', record: { utt: s.utt } },
+  ]);
+}
+
+/**
+ * The real clip's length — 20940 ms is exactly 1047 frames at 1x, and it is
+ * load-bearing twice over: SEGMENTATION_IDLE_MS is armed when PACING ends, and
+ * the run tears the transport down the instant pacing finishes if the settle
+ * window has already expired. That teardown is precisely what hid the 5th
+ * segment in the sweep.
+ */
+const ALIGN_FRAMES = 1047;
+
+function alignHarness(script: FixtureScriptEvent[]) {
+  return makeHarness({
+    recording: { ...DRIFT_RECORDING, utterances: ALIGN_MANIFEST },
+    samples: ramp(FRAME_SAMPLES * ALIGN_FRAMES),
+    transportFactory: () =>
+      new FixtureTransport({
+        armId: 'fx',
+        kind: 'cascade',
+        script,
+        costPerMinUsd: CORPUS_COST_PER_MIN,
+      }),
+  });
+}
+
+/** Well past pacing (20.94 s) AND past the idle deadline armed at its end. */
+async function runAlign(h: Harness) {
+  const done = start(h);
+  await vi.advanceTimersByTimeAsync(40_000);
+  return done;
+}
+
+/**
+ * THE CONTROL TIMELINE — four segments, one per manifest entry, and FOUR
+ * DISTINCT latencies. Equal latencies cannot detect a shift: shifted by one
+ * they read back identically. These are the sweep's own measured intervals
+ * (+2797 / +2536 / +2601 against the previous anchor), with the fourth chosen
+ * distinct from all three.
+ */
+const ALIGNED_LATENCY_MS = [2797, 2536, 2601, 2455] as const;
+const ALIGNED_AUDIO_AT_MS = DRIFT_SPEECH_END_MS.map((ms, i) => ms + ALIGNED_LATENCY_MS[i]!);
+
+function alignedSegments(): SegmentSpec[] {
+  return ALIGNED_AUDIO_AT_MS.map((audioAt, utt) => ({
+    utt,
+    source: ALIGN_REFERENCES[utt]!,
+    sourceAt: audioAt - 20,
+    audioAt,
+    completeAt: audioAt + 10,
+  }));
+}
+
+/**
+ * THE SHIFTED TIMELINE — a spurious leading segment plus the four real ones,
+ * every delta POSITIVE so that 055b's clock guard never fires and this defect
+ * has to be caught on its own terms.
+ *
+ * `lastCompleteAt` is the whole point. In the sweep the 5th segment's
+ * completion arrived ~2.5 s after the 4th, i.e. after the settle window had
+ * expired and after the run had torn the transport down, so `observed` stopped
+ * at 4. Its transcript, though, had already been delivered: the segment is on
+ * the record, in a bucket nobody reads.
+ */
+const SHIFTED_LATENCY_MS = [300, 400, 500, 600] as const;
+const SHIFTED_AUDIO_AT_MS = DRIFT_SPEECH_END_MS.map((ms, i) => ms + SHIFTED_LATENCY_MS[i]!);
+/** Delivered while the run is still listening — pacing does not end until 20940. */
+const FIFTH_SEGMENT_SOURCE_AT = 18_500;
+/** After the run has stopped listening (settle expires ~20700, pacing ends ~20940). */
+const FIFTH_SEGMENT_LATE_COMPLETE_AT = 22_050;
+/** Inside the settle window — the case ticket 031 already catches. */
+const FIFTH_SEGMENT_INTIME_COMPLETE_AT = 20_500;
+
+function shiftedSegments(fifthCompleteAt: number): SegmentSpec[] {
+  return [
+    // utt 0 — the hallucination on the opening silence. It answers, so nothing
+    // about it looks broken from inside the run.
+    {
+      utt: 0,
+      source: SPURIOUS_LEAD_TEXT,
+      sourceAt: SHIFTED_AUDIO_AT_MS[0]! - 20,
+      audioAt: SHIFTED_AUDIO_AT_MS[0]!,
+      completeAt: SHIFTED_AUDIO_AT_MS[0]! + 60,
+    },
+    // utt 1..3 — manifest utterances 1..3, one slot late.
+    ...[1, 2, 3].map((utt) => ({
+      utt,
+      source: ALIGN_REFERENCES[utt - 1]!,
+      sourceAt: SHIFTED_AUDIO_AT_MS[utt]! - 20,
+      audioAt: SHIFTED_AUDIO_AT_MS[utt]!,
+      completeAt: SHIFTED_AUDIO_AT_MS[utt]! + 60,
+    })),
+    // utt 4 — manifest utterance 4. Its transcript IS delivered; its completion
+    // is not, and its bucket is past the end of everything the runner reads.
+    {
+      utt: 4,
+      source: ALIGN_REFERENCES[3]!,
+      sourceAt: FIFTH_SEGMENT_SOURCE_AT,
+      audioAt: null,
+      completeAt: fifthCompleteAt,
+    },
+  ];
+}
+
+/** The manifest entry a stored record claims to be. */
+function entryOf(utterance: RunUtterance): CorpusUtterance {
+  const entry = ALIGN_MANIFEST.find((e) => e.id === utterance.utteranceId);
+  expect(entry).toBeDefined();
+  return entry!;
+}
+
+describe('TICKET 068 — the runner counts the segments the transport PRODUCED, both directions', () => {
+  it('TOO MANY, and the 5th arrived late: 5 segments against a 4-entry manifest is a mismatch', async () => {
+    const h = alignHarness(segmentScript(shiftedSegments(FIFTH_SEGMENT_LATE_COMPLETE_AT)));
+    const { run } = await runAlign(h);
+
+    // THE PREMISE, asserted rather than assumed: the whole clip really was
+    // paced, so the transport had every chance to deliver what it produced.
+    expect(h.transports[0]!.received).toHaveLength(ALIGN_FRAMES);
+
+    // THE CLAIM. Today `observed` is the count of completions that arrived
+    // before the run stopped listening — 4 — so this run is stored `complete`
+    // with four confident, wrong records.
+    expect(run.status).toBe('failed');
+    const reason = run.errors.find((e) => e.startsWith('segmentation:'));
+    expect(reason).toBeDefined();
+    // BOTH counts are named, in 031's own words.
+    expect(reason).toMatch(/expected 4 utterances/);
+    expect(reason).toMatch(/observed 5/);
+  });
+
+  it('CONTROL: the SAME 5 segments with the 5th completing in time are already caught', async () => {
+    // The gap is only WHEN the 5th arrived, not whether it existed — this is
+    // ticket 031's existing rule, working, and it must keep working verbatim.
+    const h = alignHarness(segmentScript(shiftedSegments(FIFTH_SEGMENT_INTIME_COMPLETE_AT)));
+    const { run } = await runAlign(h);
+
+    expect(run.status).toBe('failed');
+    expect(run.errors).toContain('segmentation: expected 4 utterances, observed 5');
+    expect(run.utterances).toBeUndefined();
+  });
+
+  it("CONTROL: TOO FEW keeps ticket 031's message and behaviour byte-for-byte", async () => {
+    // 3 segments, 3 completions, nothing else wrong. The new direction must not
+    // change one character of the old one.
+    const h = alignHarness(segmentScript(alignedSegments().slice(0, 3)));
+    const { run } = await runAlign(h);
+
+    expect(run.status).toBe('failed');
+    expect(run.errors).toContain('segmentation: expected 4 utterances, observed 3');
+    expect(run.utterances).toBeUndefined();
+  });
+});
+
+describe('TICKET 068 — a misaligned run is stored failed and truncates NOTHING', () => {
+  it('does not silently truncate to manifest.length — no partial attribution survives', async () => {
+    const h = alignHarness(segmentScript(shiftedSegments(FIFTH_SEGMENT_LATE_COMPLETE_AT)));
+    const { run } = await runAlign(h);
+
+    // Stored, like every other failure (PRD §12) — a run that stored nothing is
+    // half of what made this invisible.
+    expect(h.posted).toHaveLength(1);
+    const stored = h.posted[0]!;
+    expect(stored).toEqual(run);
+    expect(stored.status).toBe('failed');
+    // 031's rule, one level up: a run whose segmentation disagrees is not
+    // evidence, so it carries no records rather than four truncated ones.
+    expect(stored.utterances).toBeUndefined();
+  });
+
+  it('no stored record is paired with ANOTHER manifest entry\'s transcript', async () => {
+    const h = alignHarness(segmentScript(shiftedSegments(FIFTH_SEGMENT_LATE_COMPLETE_AT)));
+    const { run } = await runAlign(h);
+
+    // THE INDEX MAPPING, pinned directly. Today record `a-1` carries
+    // "Turn right." (in no manifest entry at all), `a-2` carries manifest 1's
+    // text, `a-3` manifest 2's and `a-4` manifest 3's.
+    for (const utterance of run.utterances ?? []) {
+      expect(utterance.transcripts.source).toBe(entryOf(utterance).referenceText);
+    }
+    // The loop above is vacuous once the fix refuses to attribute at all, so
+    // the verdict carries the weight: this run may not read as a measurement.
+    expect(run.status).not.toBe('complete');
+    // Named explicitly, because this exact pairing IS the defect.
+    const shifted = (run.utterances ?? []).find((u) => u.utteranceId === 'a-2');
+    expect(shifted?.transcripts.source).not.toBe(ALIGN_REFERENCES[0]);
+    const spurious = (run.utterances ?? []).find((u) => u.utteranceId === 'a-1');
+    expect(spurious?.transcripts.source).not.toBe(SPURIOUS_LEAD_TEXT);
+  });
+
+  it("run 8aba8e2e's own timeline reaches the same verdict, with the clock guard untouched", async () => {
+    // The sweep's real shape: the spurious segment produced NO audio, and the
+    // three real answers land 5197 / 11134 / 17161 — −3401 / −3426 / −2636
+    // against the anchors they were misfiled under. 055b's guard fires here BY
+    // ACCIDENT; it is not what this run should be caught by, and the two
+    // verdicts are asserted separately so a fix to one cannot pass for the other.
+    const realAudioAt = [null, 5197, 11134, 17161] as const;
+    const segments: SegmentSpec[] = [
+      ...realAudioAt.map((audioAt, utt) => ({
+        utt,
+        source: utt === 0 ? SPURIOUS_LEAD_TEXT : ALIGN_REFERENCES[utt - 1]!,
+        sourceAt: (audioAt ?? 1200) - 20,
+        audioAt,
+        completeAt: (audioAt ?? 1200) + 60,
+      })),
+      {
+        utt: 4,
+        source: ALIGN_REFERENCES[3]!,
+        sourceAt: FIFTH_SEGMENT_SOURCE_AT,
+        audioAt: null,
+        completeAt: FIFTH_SEGMENT_LATE_COMPLETE_AT,
+      },
+    ];
+    const h = alignHarness(segmentScript(segments));
+    const { run } = await runAlign(h);
+
+    expect(run.status).toBe('failed');
+    const reason = run.errors.find((e) => e.startsWith('segmentation:'));
+    expect(reason).toMatch(/expected 4 utterances/);
+    expect(reason).toMatch(/observed 5/);
+    // NOT relaxed, not given a tolerance: this run must not come back as a
+    // clock-inversion-free `complete` either.
+    expect(run.status).not.toBe('complete');
+  });
+});
+
+describe('TICKET 068 — a misaligned run never reaches an aggregate (through isAggregatableRun)', () => {
+  it('its shifted figures are not aggregated — the ONE gate, no second one beside it', async () => {
+    const h = alignHarness(segmentScript(shiftedSegments(FIFTH_SEGMENT_LATE_COMPLETE_AT)));
+    await runAlign(h);
+
+    // The runner posts `origin: 'manual'`; re-homed as a sweep so the parent
+    // Run's own verdict is what is under test rather than its origin.
+    const asSweep: Run = { ...h.posted[0]!, origin: 'sweep' };
+    expect(isAggregatableRun(asSweep)).toBe(false);
+    // ...and it is excluded by the clause that already exists, `status`.
+    expect(asSweep.status).toBe('failed');
+
+    // What actually reaches a figure, expressed the way every aggregate does:
+    // expand into samples, admit them only through the gate.
+    const aggregated = isAggregatableRun(asSweep)
+      ? runSamples(asSweep)
+          .filter((s) => isAggregatableUtterance(asSweep, s.utterance))
+          .map((s) => s.latencyMs)
+      : [];
+    expect(aggregated).toEqual([]);
+    // Today those four samples are +300 / +400 / +500 / +600 — plausible,
+    // positive, and every one of them measured against the wrong anchor.
+    for (const ms of SHIFTED_LATENCY_MS) expect(aggregated).not.toContain(ms);
+  });
+});
+
+describe('TICKET 068 — a WELL-FORMED run is UNTOUCHED (the control that matters as much)', () => {
+  it('four segments, four records, each transcript on its OWN manifest entry', async () => {
+    const h = alignHarness(segmentScript(alignedSegments()));
+    const { run, t0 } = await runAlign(h);
+
+    // THE FIXTURE'S OWN PREMISE: four DISTINCT latencies. Equal ones read back
+    // identically under a shift and could not detect one.
+    expect(new Set(ALIGNED_LATENCY_MS).size).toBe(4);
+
+    expect(run.status).toBe('complete');
+    expect(run.errors).toEqual([]);
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(4);
+    expect(utterances.map((u) => u.utteranceId)).toEqual(['a-1', 'a-2', 'a-3', 'a-4']);
+    expect(utterances.map((u) => u.index)).toEqual([1, 2, 3, 4]);
+
+    // THE MAPPING: entry i's own reference text, on entry i's own record.
+    expect(utterances.map((u) => u.transcripts.source)).toEqual([...ALIGN_REFERENCES]);
+    // Anchors and answers are both hand-derived, so a shift in EITHER direction
+    // moves this list — it is not a sign check.
+    expect(utterances.map((u) => u.timings.speech_end)).toEqual(
+      DRIFT_SPEECH_END_MS.map((ms) => t0 + ms),
+    );
+    expect(utterances.map((u) => u.timings.audio_queued)).toEqual(
+      ALIGNED_AUDIO_AT_MS.map((ms) => t0 + ms),
+    );
+    expect(utterances.map((u) => pairedDelta(u.timings))).toEqual([...ALIGNED_LATENCY_MS]);
+    expect(utterances.map((u) => u.status)).toEqual([
+      'complete',
+      'complete',
+      'complete',
+      'complete',
+    ]);
+    for (const u of utterances) expect(u.errors).toEqual([]);
+
+    // The figures, unchanged: the envelope quotes the LAST record (055b), and
+    // the cost split still sums back to the Run's whole-clip cost (031).
+    expect({
+      speech_end: run.timings.speech_end,
+      audio_queued: run.timings.audio_queued,
+    }).toEqual({
+      speech_end: utterances[3]!.timings.speech_end,
+      audio_queued: utterances[3]!.timings.audio_queued,
+    });
+    expect(run.cost).toBeCloseTo(CORPUS_COST_PER_MIN * (20_940 / 60_000), 10);
+    const total = utterances.reduce((sum, u) => sum + (u.cost ?? 0), 0);
+    expect(total).toBeCloseTo(run.cost!, 10);
+
+    // It is the same record that was stored.
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]).toEqual(run);
+  });
+
+  it('...and it still aggregates: the gate rejects the misaligned run and only that one', async () => {
+    const h = alignHarness(segmentScript(alignedSegments()));
+    await runAlign(h);
+
+    const asSweep: Run = { ...h.posted[0]!, origin: 'sweep' };
+    expect(isAggregatableRun(asSweep)).toBe(true);
+
+    const aggregated = runSamples(asSweep)
+      .filter((s) => isAggregatableUtterance(asSweep, s.utterance))
+      .map((s) => s.latencyMs);
+    expect(aggregated).toEqual([...ALIGNED_LATENCY_MS]);
+  });
+});
