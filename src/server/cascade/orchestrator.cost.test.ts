@@ -225,14 +225,15 @@ describe('R2-2 · the ElevenLabs meter is PER REQUEST, end to end', () => {
     expect(usdOf(cost!.perStage.tts!)).toBeCloseTo(2 * FLOOR_USD, 10);
   });
 
-  it('does not meter a TOKEN-billed TTS model on the character meter', async () => {
-    // Dropping the `rateFor(models.tts)?.shape === 'per-character'` gate hands
-    // gpt-4o-mini-tts a character count it does not bill on. That is a
-    // shape-mismatch, which is a DIFFERENT and less informative statement than
-    // "this stage was not metered".
+  it('meters a TOKEN-billed TTS model on the TOKEN meter, never the character one', async () => {
+    // The shapes are still not interchangeable: handing gpt-4o-mini-tts a
+    // character count it does not bill on would be a shape-mismatch. What
+    // changed in ticket 053 is that the token meter now HAS a quantity — the
+    // audio it produced — rather than nothing at all.
     const { cost } = await runOneTurn({ models: ARM_B_TRIPLE, text: 'x'.repeat(200), deltas: 2 });
-    expect(cost!.perStage.tts!.measured).toBe(false);
-    expect(cost!.perStage.tts).toMatchObject({ reason: 'no-usage-reported' });
+    expect(cost!.perStage.tts!.measured).toBe(true);
+    // Priced through the token rate, so its figure moves with AUDIO, not chars.
+    expect(cost!.perStage.tts).toMatchObject({ measured: true });
   });
 
   it('labels an Arm C figure UNVERIFIED — the floor has never met an invoice', async () => {
@@ -344,21 +345,62 @@ describe('TICKET 053 · the MT stage prices from reported usage', () => {
     expect(usdOf(cost!.total)).toBeCloseTo(sum, 12);
   });
 
-  it('ARM B STILL CANNOT: its TTS bills audio-out tokens nothing reports', async () => {
+  it('ARM B is priced too now — from the AUDIO it produced, and labelled unverified', async () => {
     const { cost, costUnits } = await runMeteredTurn({
       models: ARM_B_TRIPLE,
       usage: { inputTokens: 1000, outputTokens: 500 },
     });
-    // Two of three stages now metered...
     expect(cost!.perStage.stt!.measured).toBe(true);
     expect(cost!.perStage.mt!.measured).toBe(true);
-    // ...and the third is the hole that keeps the total honest.
+    expect(cost!.perStage.tts!.measured).toBe(true);
+    expect(cost!.total.measured).toBe(true);
+    expect(costUnits).not.toBeNull();
+
+    // AND IT SAYS SO. The tokens-per-second conversion has never met an
+    // invoice, so the figure is a ballpark and the label is the disclosure —
+    // exactly the treatment Arm C's per-request floor already gets. A number
+    // that arrived without evidence must not arrive wearing evidence's clothes.
+    expect(cost!.perStage.tts!.verified).toBe(false);
+    expect(cost!.total.verified).toBe(false);
+  });
+
+  it('SILENCE IS NOT FREE: a turn that synthesized NO audio leaves TTS unmeasured', async () => {
+    // The duration is the quantity, so ZERO duration is an unknown bill rather
+    // than a zero one — a TTS call that returned nothing still happened, and
+    // `no-usage-reported` says that while `$0.00` would deny it.
+    const silentTts = {
+      name: 'silent',
+      streamingInput: true,
+      // eslint-disable-next-line require-yield
+      async *synthesize(): AsyncGenerator<Int16Array, void, void> {
+        return;
+      },
+    };
+    let cost: TurnResult['cost'];
+    const runOpts: CostOptions = {
+      models: ARM_B_TRIPLE,
+      onCost: (_utt, c) => {
+        cost = c;
+      },
+    };
+    for await (const _e of runCascade(
+      audioOf(3, 24_000),
+      { stt: new OneTurnStt(), mt: new MeteredMt('hola', undefined), tts: silentTts },
+      runOpts as RunCascadeOptions,
+    )) {
+      /* drain */
+    }
     expect(cost!.perStage.tts!.measured).toBe(false);
+    expect(cost!.perStage.tts).toMatchObject({ reason: 'no-usage-reported' });
     expect(cost!.total.measured).toBe(false);
-    expect(cost!.total.usd).toBeNull();
-    expect(costUnits).toBeNull();
-    // NOT a partial sum wearing a total's clothes: summing stt+mt would report
-    // Arm B as cheaper than it was and hand Experiment 2 a rigged comparison.
-    expect(cost!.total.usd).not.toBe(usdOf(cost!.perStage.stt!) + usdOf(cost!.perStage.mt!));
+  });
+
+  it('a SHORT utterance still prices — rounding to whole tokens would zero it', async () => {
+    // 200 chars x 2 samples = 400 samples = ~17 ms of audio ~= 0.36 tokens.
+    // `Math.round` makes that 0 tokens and $0.00 measured — a free TTS stage
+    // that never happened. The fraction is what keeps it honest.
+    const { cost } = await runOneTurn({ models: ARM_B_TRIPLE, text: 'x'.repeat(200), deltas: 2 });
+    expect(cost!.perStage.tts!.measured).toBe(true);
+    expect(usdOf(cost!.perStage.tts!)).toBeGreaterThan(0);
   });
 });

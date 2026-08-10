@@ -55,6 +55,41 @@ export const COST_NOT_MEASURED_CELL = 'not measured';
 export const ELEVENLABS_MIN_CHARS_PER_REQUEST = 1000;
 
 /**
+ * TICKET 053 — HOW MANY AUDIO-OUT TOKENS A SECOND OF `gpt-4o-mini-tts` IS.
+ *
+ * PRD §5 publishes the RATE ($12/M audio-out tokens); what was missing was the
+ * QUANTITY. `/v1/audio/speech` streams raw PCM and reports no usage in the
+ * response or its headers, which is why the stage priced as `no-usage-reported`
+ * and every Arm B total read `not measured`.
+ *
+ * The platform DOES report it, just not to the caller: the completions-usage
+ * export carries `output_audio_tokens` per model per day. Derived from
+ * 2026-08-10 (UTC), the first day with enough traffic to divide:
+ *
+ *   platform  23,848 output_audio_tokens over 200 requests
+ *   ledger     1,093.6 s of stored Arm B output audio over 59 runs
+ *   implied    ~21.8 tokens per second
+ *
+ * IT IS AN UPPER BOUND, WHICH IS WHY THE ASSUMPTION BELOW IS UNVERIFIED. Any
+ * TTS call whose run never stored audio — an abandoned run, a cancelled sweep —
+ * spent tokens without contributing seconds to that denominator, so the true
+ * figure is at most this one. A round 20/s would mean ~9% of the day's audio
+ * went unrecorded, which is entirely possible. The number is deliberately NOT
+ * rounded to a prettier one: 21.8 is what the two measurements divide to, and
+ * inventing 20 because it looks like a constant would be a fabrication wearing
+ * a measurement's clothes.
+ *
+ * Pricing from DURATION is exact in the part we control: the synthesized audio
+ * is counted sample by sample as it arrives, per utterance. Only the conversion
+ * is assumed — which is precisely why every figure it produces carries the
+ * `unverified` label, and why it is a BALLPARK for comparing arms rather than
+ * an invoice. Settling it needs one thing and only one: the completions-usage
+ * export for a window, divided by the audio this ledger stored for the same
+ * window. Until someone does that, the label is the honest disclosure.
+ */
+export const TTS_AUDIO_TOKENS_PER_SECOND = 21.8;
+
+/**
  * ElevenLabs' documented default `generation_config.chunk_length_schedule` for
  * the WebSocket stream-input endpoint: the vendor buffers incoming text and
  * flushes a generation once the buffer reaches the next threshold, in
@@ -246,6 +281,24 @@ export const PRICING_ASSUMPTIONS: readonly PricingAssumption[] = Object.freeze([
       "determines billing at all, and that our adapter's auto_mode=true — which asks the " +
       'vendor to generate on every frame — does not bypass the schedule and bill per ' +
       "frame instead. The answers differ by an order of magnitude in Arm C's disfavour.",
+    verified: false,
+  }),
+  Object.freeze({
+    id: 'openai-tts-audio-tokens-from-duration',
+    models: ['gpt-4o-mini-tts'],
+    statement:
+      'gpt-4o-mini-tts bills AUDIO-OUT TOKENS, and `/v1/audio/speech` reports none to ' +
+      'the caller — so the token count is derived from the audio actually synthesized, ' +
+      'at TTS_AUDIO_TOKENS_PER_SECOND. Two things are UNVERIFIED. First the constant ' +
+      "itself: it is the platform's reported daily token total divided by the audio this " +
+      'ledger stored for the same window, and any call whose run stored no audio makes ' +
+      'that an OVER-estimate of the rate. Second the INPUT side: the rate card prices ' +
+      "this model's text input at 0 because PRD §5 publishes an audio-out rate only, " +
+      'while the platform export shows thousands of input text tokens against it — if ' +
+      'those are billed, every Arm B TTS figure here is LOW. Both are settled the same ' +
+      "way: export the platform's completions usage for a window and divide by the audio " +
+      'this ledger stored for it. Until then the figure is a BALLPARK — good enough to ' +
+      'compare one arm against another, not to reconcile against a bill.',
     verified: false,
   }),
   Object.freeze({

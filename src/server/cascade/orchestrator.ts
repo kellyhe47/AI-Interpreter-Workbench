@@ -75,6 +75,7 @@ import type { TimingMark, TimingSink } from '../../core/decorators/index';
 import { withRetry, withTimeout, withTiming } from '../../core/decorators/index';
 import { createMt, createStt, createTts } from '../../core/registry';
 import {
+  TTS_AUDIO_TOKENS_PER_SECOND,
   elevenLabsRequestCharCounts,
   priceCascade,
   rateFor,
@@ -233,6 +234,7 @@ function cascadeCost(
   sttSamples: number,
   ttsDeltas: readonly string[],
   mtUsage: { inputTokens: number; outputTokens: number } | undefined,
+  ttsSamples: number,
 ): CascadeCost {
   // NO MODEL IDS, NO PRICES. `provider.name` is a VENDOR name and prices
   // nothing, so an un-forwarded triple must reach `priceCascade` as three
@@ -254,15 +256,49 @@ function cascadeCost(
   // vendor's own documented chunk schedule, which is positional — so the figure
   // depends on WHAT was said and not on HOW it arrived.
   const synthesized = ttsDeltas.join('');
-  const perCharacter = rateFor(models.tts)?.shape === 'per-character';
-  const tts: StageUsage | undefined =
-    perCharacter && synthesized.length > 0
+  const ttsShape = rateFor(models.tts)?.shape;
+  const perCharacter = ttsShape === 'per-character';
+
+  // TICKET 053 — THE TOKEN-BILLED TTS PRICES FROM THE AUDIO IT PRODUCED.
+  //
+  // `gpt-4o-mini-tts` bills audio-out TOKENS and `/v1/audio/speech` reports
+  // none, so the count comes from the one quantity we measure exactly: the
+  // samples that actually arrived, counted as they arrived. The conversion is
+  // the assumed part (see TTS_AUDIO_TOKENS_PER_SECOND), the duration is not.
+  //
+  // A turn that produced NO audio prices as `no-usage-reported`, not as a
+  // stage that cost nothing — a TTS call that returned silence still has an
+  // unknown bill, and 0 tokens would assert it was free.
+  const ttsSeconds = ttsSamples / SAMPLE_RATE;
+  const tokenBilled = ttsShape === 'token';
+  const tts: StageUsage | undefined = perCharacter
+    ? synthesized.length > 0
       ? {
           model: models.tts,
           shape: 'per-character',
           // ONE ENTRY PER REQUEST, never a total — a total cannot express the
           // difference the 1k-char floor makes.
           requestCharCounts: elevenLabsRequestCharCounts(synthesized),
+        }
+      : undefined
+    : tokenBilled && ttsSamples > 0
+      ? {
+          model: models.tts,
+          shape: 'token',
+          // The card prices this model's text input at 0 (PRD §5 publishes an
+          // audio-out rate only), so a text-token estimate would change no
+          // figure while inventing a count nobody measured. 0 is what the card
+          // already asserts; the OPEN QUESTION of whether input is billed at
+          // all is carried by the pricing assumption, where it can be checked.
+          inputTokens: 0,
+          // NOT ROUNDED, deliberately. This is a DERIVED estimate, not a
+          // vendor's integer count, and rounding it to one biases every short
+          // utterance toward zero: a 0.4 s answer is 8.7 tokens, which
+          // `Math.round` turns into 9 and a 0.02 s one into 0 — a MEASURED
+          // $0.00, the exact fabrication this module exists to prevent. Cost is
+          // linear in tokens, so carrying the fraction is both more accurate
+          // and the only form that cannot manufacture a free stage.
+          outputTokens: ttsSeconds * TTS_AUDIO_TOKENS_PER_SECOND,
         }
       : undefined;
 
@@ -497,7 +533,7 @@ export async function* runCascade(
       }
 
       opts?.onTimings?.(utt, timings);
-      const cost = cascadeCost(opts?.models, sttSamples, targetPartials, mtUsage);
+      const cost = cascadeCost(opts?.models, sttSamples, targetPartials, mtUsage, totalSamples);
       opts?.onCost?.(utt, cost);
       const session = opts?.session;
       const record: UtteranceRecord = {

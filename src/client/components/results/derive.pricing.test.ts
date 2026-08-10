@@ -169,14 +169,25 @@ describe('R2-5b · a figure resting on an unverified assumption SAYS SO', () => 
     expect(agg.provenance.line.toLowerCase()).toContain('unverified');
   });
 
-  it('does not label Arm B unverified — nothing about its meters is in question', () => {
-    // A flag that is always on teaches nothing. This is the assertion that
-    // makes the Arm C label informative rather than decorative.
+  it('labels Arm B unverified too, and NAMES A DIFFERENT ASSUMPTION (ticket 053)', () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and its reasoning was right at the
+    // time: "a flag that is always on teaches nothing". Ticket 053 turned the
+    // flag on for Arm B — pricing its TTS from audio duration through an
+    // assumed tokens-per-second is exactly the kind of claim the flag exists
+    // for — so the old assertion had to go.
+    //
+    // What keeps the label informative is no longer that some arm lacks it.
+    // It is that each arm NAMES ITS OWN assumption, so "unverified" is a
+    // pointer to a specific open question rather than a mood. If these ids
+    // ever collapse into one shared label, the flag really has become
+    // decorative and this test is where that shows up.
     seedArm('B');
     const agg = armAggregate('B');
-    expect(agg.costVerified).toBe(true);
-    expect(agg.costAssumptions).toEqual([]);
-    expect(agg.provenance.line.toLowerCase()).not.toContain('unverified');
+    expect(agg.costVerified).toBe(false);
+    expect(agg.costAssumptions).toContain('openai-tts-audio-tokens-from-duration');
+    // ...and NOT Arm C's, which is a different open question entirely.
+    expect(agg.costAssumptions).not.toContain('elevenlabs-1k-minimum-per-request');
+    expect(agg.provenance.line.toLowerCase()).toContain('unverified');
   });
 
   it('draws the label from the SAME assumption store the module publishes', () => {

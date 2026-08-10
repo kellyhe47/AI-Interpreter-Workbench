@@ -350,9 +350,14 @@ describe('AC8 · the ElevenLabs 1,000-character-per-request minimum', () => {
     expect(text).toMatch(/request|chunk/i);
   });
 
-  it('labels every Arm C cost figure unverified, and every Arm B one verified', () => {
+  it('labels BOTH cascade TTS stages unverified — Arm B joined Arm C (ticket 053)', () => {
+    // Arm B's TTS used to be `verified: true` for a hollow reason: nobody had
+    // flagged it, because nobody could price it at all. Now that it prices from
+    // audio DURATION through an assumed tokens-per-second, it carries a real
+    // assumption and must carry the label with it. A figure that became
+    // available without becoming checked is exactly what this flag is for.
     expect(isVerifiedPricing(MODEL)).toBe(false);
-    expect(isVerifiedPricing('gpt-4o-mini-tts')).toBe(true);
+    expect(isVerifiedPricing('gpt-4o-mini-tts')).toBe(false);
 
     const armC = priceCascade({
       stt: { model: 'gpt-4o-transcribe', shape: 'per-minute', audioMs: 30_000 },
@@ -368,7 +373,13 @@ describe('AC8 · the ElevenLabs 1,000-character-per-request minimum', () => {
     // is itself unverified, or the label is escapable by aggregation.
     expect(armC.perStage.tts.verified).toBe(false);
     expect(armC.total.verified).toBe(false);
-    expect(armB.total.verified).toBe(true);
+    // ...and Arm B's total is unverified too, for its own separate reason.
+    expect(armB.perStage.tts.verified).toBe(false);
+    expect(armB.total.verified).toBe(false);
+    // Both are MEASURED, though — an unverified number is still a number, and
+    // collapsing it to `not measured` would lose the comparison entirely.
+    expect(armB.total.measured).toBe(true);
+    expect(armC.total.measured).toBe(true);
   });
 });
 
