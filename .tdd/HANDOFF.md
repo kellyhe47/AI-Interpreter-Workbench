@@ -1,9 +1,9 @@
 # Handoff — 2026-08-10
 
-Branch `main`, HEAD `66d91b1`. **Working tree clean. Nothing in flight.**
+Branch `main`. **Working tree clean. Nothing in flight.**
 
 ```
-npx vitest run   2545 passing / 0 failing
+npx vitest run   2540 passing / 0 failing
 npm run eval     13 pass / 0 fail
 npm run check    exit 0     ← typecheck && test && eval && verify-citations
 ```
@@ -23,14 +23,16 @@ npm run check    exit 0     ← typecheck && test && eval && verify-citations
 
 ---
 
-## The one item that is ready to pick up
+## The one item that was ready to pick up — now done
 
-**Ticket 074's REMAINING section** — `inputCantoOnRealtime` (Cantonese → English on Realtime).
+**Ticket 074 is CLOSED.** `inputCantoOnRealtime` and the whole `warnings()` helper are deleted, the
+LiveView banner and `WarnIcon` with them, `COPY.cantoInputWarn` is retired copy asserted absent, and
+the coverage card's **Cantonese → English × Realtime** cell reads `reached`. The two tests that had
+to go red did, for the predicted reason, and were re-pointed rather than deleted. FINDINGS.md §2
+records both Realtime directions as reached **by observation, neither scored**.
 
-The operator confirmed on 2026-08-10: *"I've spoken Cantonese into real time and gotten English
-back."* So the warning is stale exactly as `targetCantoOnRealtime` was, and 074 records the four
-concrete steps plus which test will go red for the right reason. It is small, unblocked and fully
-specified.
+**Nothing is unblocked right now.** The next moves all sit with the operator (see below); 053 and
+069 are the only code-side candidates, and both are described honestly in the table.
 
 ---
 
@@ -38,7 +40,7 @@ specified.
 
 | # | state |
 |---|---|
-| **074** | done except the YUE→EN item above — start here |
+| **074** | **closed** — nothing left |
 | **053** | **NOT merge-ready.** `tdd/053` holds `stub()` + `test()` only — 1218 lines of tests, no `feat`, no implementation. Its own header claims "COMPLETE ON BRANCH"; that is wrong. It is the right ticket for cascade **cost** metering (MT tokens, ElevenLabs characters). Arm B's cost can never exist regardless — `openai-tts` returns raw PCM while `gpt-4o-mini-tts` bills audio-out tokens. |
 | **069** | landed, but **did not stop the STT hallucination**. 54 of 61 sweep runs on the deployed instance still failed segmentation, and all 54 stored **no utterances at all**. Next levers: an STT prompt, a stricter VAD threshold, or trimming from the manifest's first anchor rather than by amplitude. |
 | 050, 026 | deferred by operator decision (PRD §15B) |

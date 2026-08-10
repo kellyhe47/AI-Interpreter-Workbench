@@ -480,15 +480,18 @@ describe('language pair, direction and the Cantonese-on-Realtime warning', () =>
     expect(screen.getByRole('button', { name: 'Stop session' })).toBeInTheDocument();
   });
 
-  // ...and the REVERSE direction keeps its warning, untouched. Cantonese
-  // speech INPUT on Realtime was never tested and is not cleared by the
-  // forward observation.
-  it('swapping to Cantonese INPUT on Realtime still fires the input warning', () => {
+  // TICKET 074 REMAINING (2026-08-10) — re-pointed, not deleted. This case used
+  // to assert the reverse-direction banner STILL fired; the operator has since
+  // spoken Cantonese into Realtime and gotten English back, so the banner named
+  // a working configuration as unverified and is retired like its sibling.
+  it('swapping to Cantonese INPUT on Realtime fires NOTHING, and still never blocks', () => {
     renderApp({ initialState: { mode: 'realtime', langIdx: 1 } });
     fireEvent.click(screen.getByRole('button', { name: 'Swap direction' }));
     expect(screen.getByRole('button', { name: /Cantonese → English/ })).toBeInTheDocument();
-    expect(screen.getByText(COPY.cantoInputWarn)).toBeInTheDocument();
+    expect(screen.queryByText(COPY.cantoInputWarn)).not.toBeInTheDocument();
     expect(screen.queryByText(COPY.cantoTargetWarn)).not.toBeInTheDocument();
+    expect(screen.getByText('both modes')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start microphone' })).toBeEnabled();
   });
 
   it('the same pair on Cascade warns about nothing', () => {

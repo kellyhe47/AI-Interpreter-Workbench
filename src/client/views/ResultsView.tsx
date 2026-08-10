@@ -719,7 +719,12 @@ const COVERAGE_STAGES = ['realtime', 'stt', 'mt', 'tts'] as const;
 type CoverageStage = (typeof COVERAGE_STAGES)[number];
 
 const REACHED = 'reached';
-const NOT_REACHED = 'not reached';
+/**
+ * TICKET 074 — no whole-cell `not reached` survives. The last one was YUE→EN on
+ * Realtime, cleared by observation on 2026-08-10. The phrase still appears
+ * inside `REACHED_ARM_B_ONLY`, which is a per-arm claim, not a stage verdict —
+ * reintroduce a standalone constant only with the failing observation behind it.
+ */
 /**
  * TICKET 074 — the EN→Cantonese TTS cell is the one cell that must name an ARM.
  * Arms B and C differ in exactly this stage, and for this language they differ
@@ -761,7 +766,10 @@ const COVERAGE_ROWS: ReadonlyArray<{
   {
     direction: 'yue-en',
     label: 'Cantonese → English',
-    cells: { realtime: NOT_REACHED, stt: REACHED, mt: REACHED, tts: REACHED },
+    // Realtime: observed by the operator on 2026-08-10 — Cantonese spoken in,
+    // English back. It read 'not reached' only because nobody had tried the
+    // reverse direction, which is not the same claim as a failure.
+    cells: { realtime: REACHED, stt: REACHED, mt: REACHED, tts: REACHED },
   },
 ];
 

@@ -107,7 +107,6 @@ import {
   pairs,
   stateLabel,
   supportPill,
-  warnings,
   type ProviderStage,
   type SessionStatus,
 } from '../state/sessionMachine';
@@ -241,26 +240,6 @@ function MicIcon({ size, stroke }: { size: number; stroke: string }): ReactEleme
       <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z" />
       <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
       <path d="M12 19v3" />
-    </svg>
-  );
-}
-
-function WarnIcon(): ReactElement {
-  return (
-    <svg
-      width={14}
-      height={14}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3z" />
-      <path d="M12 9v4" />
-      <path d="M12 17h.01" />
     </svg>
   );
 }
@@ -760,7 +739,6 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
   const showSessionArea = !idleLike && !denied;
   const stoppable = STOPPABLE_STATUSES.includes(status);
   const live = CONNECTED_STATUSES.includes(status);
-  const warn = warnings(state.langIdx, state.reversed, state.mode);
   const pill = supportPill(state.langIdx);
   const cascade = state.mode === 'cascade';
   const recipe = cascade
@@ -1047,19 +1025,13 @@ export default function LiveView({ controller }: LiveViewProps): ReactElement {
         </Banner>
       )}
       {/*
-        TICKET 074 — the forward-direction banner is GONE. It said Realtime does
-        not list Cantonese as an output language; that list belongs to
-        `gpt-realtime-translate`, not the `gpt-realtime` this app runs, and the
-        operator has since run EN→YUE on Realtime and heard Cantonese. The
-        reverse-direction banner below stays: YUE→EN was never tested.
+        TICKET 074 — BOTH Cantonese-on-Realtime banners are GONE. The forward one
+        (EN→YUE) cited `gpt-realtime-translate`'s output-language list, which does
+        not govern the `gpt-realtime` this app runs (ticket 073). The reverse one
+        (YUE→EN) outlived it only because nobody had tried that direction; on
+        2026-08-10 the operator spoke Cantonese into Realtime and got English
+        back, so it too named a working configuration as unverified.
       */}
-      {!stopped && warn.inputCantoOnRealtime && (
-        <Banner tone="warning">
-          <WarnIcon />
-          Realtime does not document Cantonese speech input — recognition quality in this direction
-          is unverified. The run proceeds to observe actual behavior.
-        </Banner>
-      )}
       {status === 'disconnected' && (
         <Banner tone="negative">
           <CrossCircleIcon />

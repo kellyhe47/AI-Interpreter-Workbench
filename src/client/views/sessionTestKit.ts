@@ -54,9 +54,10 @@ export const COPY = {
   /** Exact re-prompt phrase chosen for the denied card. */
   noRePrompt: 'do not re-prompt',
   /**
-   * TICKET 074 — RETIRED COPY, kept so tests can assert it is ABSENT. The
-   * forward-direction banner claimed a configuration the operator has since run
-   * successfully was unsupported.
+   * TICKET 074 — RETIRED COPY, both entries, kept so tests can assert they are
+   * ABSENT. Each banner claimed a configuration the operator has since run
+   * successfully was unsupported or unverified: EN→YUE first, then YUE→EN once
+   * they spoke Cantonese into Realtime and got English back (2026-08-10).
    */
   cantoTargetWarn:
     'Realtime does not list Cantonese as a supported output language — the run proceeds to observe the actual failure mode. Text may look correct while audio pronunciation is not.',

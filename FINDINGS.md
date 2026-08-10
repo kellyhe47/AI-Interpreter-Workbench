@@ -90,7 +90,8 @@ vendors stop being interchangeable (§4.3). Clinical *adequacy* stays **`not yet
 Realtime was long recorded here as unable to produce Cantonese. Wrong twice over: the
 13-output-language list belongs to `gpt-realtime-translate`, not the `gpt-realtime` this project
 runs, and the runs behind the claim predate ticket 062, i.e. any target language on the wire. The
-operator has since run EN→YUE on Realtime and heard Cantonese.
+operator has since run EN→YUE on Realtime and heard Cantonese, and YUE→EN — Cantonese spoken in,
+English back. **Both directions are reached on Realtime by observation**; neither is scored.
 
 ### Corpus
 

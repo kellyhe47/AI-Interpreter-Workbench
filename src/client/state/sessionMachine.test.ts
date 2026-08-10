@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as sessionMachine from './sessionMachine';
 import { DEFAULT_CASCADE_TRIPLE } from '../../core/arms';
 import {
   LIVE_MAX_SESSION_MS,
@@ -8,7 +9,6 @@ import {
   reduce,
   stateLabel,
   supportPill,
-  warnings,
   type ContextPolicy,
   type MicPermission,
   type ProviderStage,
@@ -532,66 +532,19 @@ describe('rule 7 — language pair helpers', () => {
     expect(supportPill(1)).not.toBe('cascade only');
   });
 
-  const cases: Array<{
-    name: string;
-    langIdx: number;
-    reversed: boolean;
-    mode: Parameters<typeof warnings>[2];
-    expected: { inputCantoOnRealtime: boolean };
-  }> = [
-    {
-      // TICKET 074 — the FORWARD warning is gone: it told the operator that a
-      // configuration they have now run successfully was unsupported.
-      name: 'target Cantonese on realtime fires nothing — the forward warning is retired',
-      langIdx: 1,
-      reversed: false,
-      mode: 'realtime',
-      expected: { inputCantoOnRealtime: false },
-    },
-    {
-      // ...and the REVERSE warning stays, untouched. YUE→EN is a different
-      // claim, it was never tested, and the operator has not cleared it.
-      name: 'source Cantonese on realtime STILL fires the input warning',
-      langIdx: 1,
-      reversed: true,
-      mode: 'realtime',
-      expected: { inputCantoOnRealtime: true },
-    },
-    {
-      name: 'Cantonese pair on cascade fires nothing',
-      langIdx: 1,
-      reversed: false,
-      mode: 'cascade',
-      expected: { inputCantoOnRealtime: false },
-    },
-    {
-      name: 'reversed Cantonese pair on cascade fires nothing',
-      langIdx: 1,
-      reversed: true,
-      mode: 'cascade',
-      expected: { inputCantoOnRealtime: false },
-    },
-    {
-      name: 'Spanish pair on realtime fires nothing',
-      langIdx: 0,
-      reversed: false,
-      mode: 'realtime',
-      expected: { inputCantoOnRealtime: false },
-    },
-    {
-      name: 'reversed Spanish pair on realtime fires nothing',
-      langIdx: 0,
-      reversed: true,
-      mode: 'realtime',
-      expected: { inputCantoOnRealtime: false },
-    },
-  ];
-
-  for (const c of cases) {
-    it(c.name, () => {
-      // Deep-equal: `targetCantoOnRealtime` is not merely false, it is GONE.
-      expect(warnings(c.langIdx, c.reversed, c.mode)).toEqual(c.expected);
-      expect('targetCantoOnRealtime' in warnings(c.langIdx, c.reversed, c.mode)).toBe(false);
-    });
-  }
+  // TICKET 074 (REMAINING item, 2026-08-10) — the language-warning helper is
+  // GONE, not merely returning false. Both Cantonese-on-Realtime warnings were
+  // retired: the forward one first, then `inputCantoOnRealtime` once the
+  // operator spoke Cantonese into Realtime and got English back. Nothing this
+  // project supports earns a warning, so nothing computes one.
+  //
+  // This is the re-pointed version of "swapping to Cantonese INPUT on Realtime
+  // still fires the input warning" — the case that had to go red.
+  it('there is no language-warning helper, and no warning name survives it', () => {
+    const exported = Object.keys(sessionMachine);
+    // Needle assembled from fragments: prose in this file must not satisfy the
+    // scan (ticket 060's lesson).
+    expect(exported).not.toContain('warn' + 'ings');
+    expect(exported.some((k) => /canto/i.test(k))).toBe(false);
+  });
 });

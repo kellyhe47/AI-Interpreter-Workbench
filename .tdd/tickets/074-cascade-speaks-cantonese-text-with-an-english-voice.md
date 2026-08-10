@@ -1,7 +1,7 @@
 ---
 id: 074
 title: "The cascade produces correct Cantonese TEXT and reads it with an English voice — PRD §10's trap is in Arm B/C, not Realtime"
-status: done-except-yue-to-en
+status: done
 source: operator (2026-08-10) — "make sure we are outputting to Cantonese specifically"
 depends_on: [062, 073]
 touches: [src/server/providers/elevenlabs-tts.ts, src/server/providers/openai-tts.ts, src/core/models.ts, src/server/ws.ts, src/client/state/sessionMachine.ts, src/client/views/ResultsView.tsx]
@@ -161,7 +161,7 @@ Arm B, not reached on Arm C** — replacing a claim that was never true of eithe
 
 ---
 
-## RESOLUTION (2026-08-10) — DONE except one item, see "REMAINING" below
+## RESOLUTION (2026-08-10) — DONE
 
 Suite 2545 passing / 0 failing. `npm run check` exits 0. FINDINGS.md is 250 lines (at budget).
 
@@ -185,7 +185,28 @@ coverage card, the observation note and FINDINGS §4.3, not papered over.
 **The pill is gone.** `supportPill` returns `'both modes'` for every pair; `targetCantoOnRealtime`
 and its banner are removed.
 
-### REMAINING — one item, unblocked, ready for the next agent
+### REMAINING — CLOSED 2026-08-10. Ticket is DONE.
+
+`inputCantoOnRealtime` is gone, and with it the helper that computed it:
+
+- `LanguageWarnings` and `warnings()` are **deleted** from `sessionMachine.ts`, not left returning an
+  empty bag — a seam with zero production callers is the failure mode this run hit in 064, 066 and
+  067. `sessionMachine.test.ts` now guards the export surface instead: no `warnings` export, no key
+  matching `/canto/i`, needle assembled from fragments per ticket 060.
+- The `LiveView.tsx` banner and the now-unused `WarnIcon` are removed. `COPY.cantoInputWarn` joins
+  `cantoTargetWarn` as retired copy, kept only so tests assert its ABSENCE.
+- The LiveView case *"swapping to Cantonese INPUT on Realtime still fires the input warning"* went
+  red for exactly the predicted reason and was **re-pointed**: it now asserts neither banner renders,
+  the pill reads `both modes`, and Start is still enabled.
+- Coverage card **Cantonese → English × Realtime** is `reached`; its test was re-pointed too. No
+  standalone `not reached` constant survives (the phrase remains only inside the per-arm
+  `REACHED_ARM_B_ONLY`). FINDINGS.md §2 now records both directions as reached by observation, with
+  neither scored.
+
+`npm run check` exits 0 — 2540 passing (was 2545: six table-driven warning cases retired, one
+export-surface guard added), 13/13 eval, citations verified.
+
+### Original REMAINING text (for the record)
 
 **The operator confirmed on 2026-08-10: *"I've spoken Cantonese into real time and gotten English
 back."*** So `inputCantoOnRealtime` (**YUE→EN**, the reverse direction) is now stale for the same

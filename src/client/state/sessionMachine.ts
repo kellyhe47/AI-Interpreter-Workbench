@@ -97,9 +97,9 @@
  * Language/direction helpers (rule group 7) live in this file:
  * - `pairs`: [{src:'English', tgt:'Spanish'}, {src:'English', tgt:'Cantonese'}]
  * - `supportPill(langIdx)`: 'both modes' for EVERY pair (ticket 074).
- * - `warnings(langIdx, reversed, mode)`: `inputCantoOnRealtime` fires ONLY when
- *   the SOURCE is Cantonese (langIdx 1, reversed) and the mode is realtime.
- *   The forward-direction warning was retired by ticket 074.
+ * - There is NO language-warning helper: ticket 074 retired both Cantonese
+ *   warnings (forward first, then the reverse once the operator ran YUE→EN on
+ *   Realtime and got English back), and removed the seam with them.
  */
 
 import { DEFAULT_CASCADE_TRIPLE, type ProviderTriple } from '../../core/arms';
@@ -552,24 +552,24 @@ export function stateLabel(state: SessionState): string {
   return state.pending ? 'switch-queued' : state.status;
 }
 
-export interface LanguageWarnings {
-  /**
-   * TICKET 074 — the FORWARD warning (`targetCantoOnRealtime`) is gone. It told
-   * the operator that EN→YUE on Realtime was unsupported; they have run it and
-   * heard Cantonese, so the banner named a working configuration as broken.
-   *
-   * This one STAYS, deliberately and separately. YUE→EN is a different claim:
-   * Cantonese speech INPUT on Realtime has never been tested by anyone here,
-   * and it must not be swept along with its sibling. Absence of evidence in the
-   * reverse direction is not the evidence the forward direction now has.
-   */
-  inputCantoOnRealtime: boolean;
-}
-
-export function warnings(langIdx: number, reversed: boolean, mode: Mode): LanguageWarnings {
-  const realtimeInvolved = mode === 'realtime';
-  const cantoPair = langIdx === 1;
-  return {
-    inputCantoOnRealtime: cantoPair && reversed && realtimeInvolved,
-  };
-}
+/**
+ * TICKET 074 — BOTH Cantonese-on-Realtime warnings are now retired, so the
+ * helper that computed them is gone rather than left returning an empty bag
+ * (a seam with zero production callers is a liability this repo has paid for
+ * three times: 064, 066, 067).
+ *
+ * `targetCantoOnRealtime` (EN→YUE) went first: it encoded
+ * `gpt-realtime-translate`'s output-language list, which does not apply to the
+ * `gpt-realtime` this project runs (ticket 073), and the operator has run the
+ * pair and heard Cantonese.
+ *
+ * `inputCantoOnRealtime` (YUE→EN) was deliberately kept at that point, because
+ * the reverse direction had never been tested and absence of evidence there was
+ * not the evidence the forward direction had. On 2026-08-10 the operator closed
+ * that gap by observation — Cantonese spoken into Realtime, English back — so
+ * the banner now makes the same false claim its sibling did: a configuration
+ * that works, labelled unverified.
+ *
+ * No language pair or direction this project supports earns a warning today.
+ * If one ever does, reintroduce it with the observation that justifies it.
+ */

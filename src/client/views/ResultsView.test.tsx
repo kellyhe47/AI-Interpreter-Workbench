@@ -739,9 +739,11 @@ describe('ResultsView — coverage card rows are DIRECTIONS with per-stage cells
     renderView(comparisonLedger());
     const row = card('coverage').querySelector('[data-direction="en-yue"]')!;
     expect(row.querySelector('[data-stage="realtime"]')!.textContent).toBe('reached');
-    // ...while the REVERSE direction keeps its own unexercised claim.
+    // ...and so is the REVERSE direction, as of 2026-08-10: the operator spoke
+    // Cantonese into Realtime and got English back. It read 'not reached' only
+    // because nobody had tried it — untried is not failed.
     const reverse = card('coverage').querySelector('[data-direction="yue-en"]')!;
-    expect(reverse.querySelector('[data-stage="realtime"]')!.textContent).toBe('not reached');
+    expect(reverse.querySelector('[data-stage="realtime"]')!.textContent).toBe('reached');
   });
 });
 
