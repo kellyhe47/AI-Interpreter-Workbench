@@ -61,6 +61,59 @@ export const FRAME_MS = 20;
 /** Samples per frame at SAMPLE_RATE (480 at 24 kHz). Derived, not a literal. */
 export const FRAME_SAMPLES = (SAMPLE_RATE * FRAME_MS) / 1000;
 
+/**
+ * TICKET 069 — the PEAK PCM16 amplitude at or above which a frame counts as
+ * carrying signal.
+ *
+ * 256 of 32768 full scale is about −42 dBFS: digital silence and ordinary room
+ * tone sit well below it, and no speech onset frame sits under it. The number
+ * is deliberately CONSERVATIVE in one direction only, because the two errors
+ * are not symmetric — leaving a frame of near-silence in costs nothing but the
+ * hallucination risk this exists to reduce, while withholding a frame that
+ * carried the first phoneme of the clip would corrupt the transcript the study
+ * measures.
+ *
+ * PEAK, not mean or RMS: a frame is 20 ms and the question is only ever
+ * "did anything happen in here", which the loudest sample answers directly.
+ */
+export const SILENCE_PEAK_AMPLITUDE = 256;
+
+/**
+ * TICKET 069 — how many WHOLE LEADING FRAMES of this clip carry no signal.
+ *
+ * WHY IT LIVES HERE: onset can only be expressed in frames, and this module
+ * owns the frame geometry (`FRAME_SAMPLES`, derived from `SAMPLE_RATE`). A
+ * sample-accurate onset would be unusable — the transmitted unit is a frame —
+ * and a copy of the framing arithmetic anywhere else is a second thing that can
+ * desynchronize from the wire rate.
+ *
+ * WHY IT IS A PURE FUNCTION AND NOT A PACER OPTION: this answers a question
+ * ABOUT a clip. What to DO with the answer is a transmission policy, and that
+ * belongs to the layer that owns the socket (see `runner.ts`,
+ * `RunnerDeps.trimLeadingSilence`). The pacer's own schedule must stay
+ * completely untouched by it: frame k is due at `t0 + k * FRAME_MS` whether or
+ * not anybody transmits it.
+ *
+ * LEADING ONLY. It stops at the first frame carrying signal and never looks
+ * past it, so a pause MID-CLIP is never a candidate — a scan of the whole clip
+ * would swallow the silence between two sentences.
+ *
+ * A CLIP THAT IS SILENT ALL THROUGH RETURNS 0. There is no onset to protect, so
+ * there is nothing to withhold: reporting the whole clip would transmit no
+ * audio at all and turn a silent recording into a lost run.
+ */
+export function leadingSilenceFrames(
+  samples: Int16Array,
+  threshold: number = SILENCE_PEAK_AMPLITUDE,
+): number {
+  const total = samples.length;
+  for (let i = 0; i < total; i += 1) {
+    const s = samples[i]!;
+    if (s >= threshold || s <= -threshold) return Math.floor(i / FRAME_SAMPLES);
+  }
+  return 0;
+}
+
 export interface PacerDeps {
   /** Monotonic-ish ms clock (performance.now / Date.now style). */
   now: () => number;

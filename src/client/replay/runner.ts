@@ -136,6 +136,20 @@
  * version here would write a claim the corpus never made and it could never be
  * retracted.
  *
+ * ------------------- TICKET 069: TRIM TRANSMISSION, NOT TIME ---------------
+ * The clip's LEADING SILENT FRAMES are never handed to the transport (see
+ * `leadingSilenceFrames` and `RunnerDeps.trimLeadingSilence`), because a
+ * Whisper-family STT invents a foreign-language sentence out of non-speech and
+ * that invented segment consumes bucket 0, shifting every real utterance late.
+ *
+ * THE PACING CLOCK DOES NOT MOVE. The pacer is handed the WHOLE clip, `t0` is
+ * still epoch-ms of frame 0, and frame k is still due at `t0 + k * FRAME_MS`;
+ * the withheld frames are dropped at the moment they come due, so the frames
+ * after them keep their own due times and the run still spans one clip-length.
+ * Trimming the CLIP instead would shift the audio against `t0 +
+ * trueSpeechEndMs` and improve every latency in the project by exactly the
+ * silence removed — a corruption that looks like a small, consistent win.
+ *
  * ------------------- TICKET 048: WHICH WAITS ARE BOUNDED, AND WHY ----------
  * `runOnce` bounds the three waits in the TAIL of a run — after the last point
  * at which a caller could still be watching a progress bar and after the
@@ -205,7 +219,7 @@ import { CLOCK_INVERSION } from '../../core/timing';
 import type { InterpreterTransport, TransportConfig } from '../transport/types';
 import type { Recording, Run, RunUtterance } from '../state/ledger';
 import { ApiError } from './recordingsClient';
-import { createPacer, type Pacer, type PacerDeps } from './pacer';
+import { createPacer, leadingSilenceFrames, type Pacer, type PacerDeps } from './pacer';
 import type { RecordingsClient, RunsClient } from './recordingsClient';
 
 /**
@@ -427,6 +441,13 @@ export interface RunnerDeps {
   newId: () => string;
   /** Optional clock/scheduler seams handed to the pacer. */
   pacerDeps?: Partial<PacerDeps>;
+  /**
+   * TICKET 069 — withhold the clip's LEADING SILENT FRAMES from the transport.
+   * Defaults to ON (omitted means trim); `false` is the disable control, and a
+   * run with it `false` transmits the clip exactly as every run did before this
+   * ticket. See TRIM TRANSMISSION, NOT TIME in the header.
+   */
+  trimLeadingSilence?: boolean;
 }
 
 export interface RunOnceOptions {
@@ -1099,12 +1120,43 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // re-read, and the run falls into the existing teardown.
   if (namesTarget) await untilSettledOrAborted(transport.start(transportConfig), signal);
 
+  // TICKET 069 — TRIM TRANSMISSION, NOT TIME.
+  //
+  // A Whisper-family STT handed a moment of non-speech invents a sentence in
+  // some language: across the operator's 17 sweep runs the FIRST stored source
+  // text was "Turn right." / "그러나." / "Hallo." / "żeśmy." / "Yardımımın" in 7
+  // of them, each one consuming segment 0 and shifting every real utterance one
+  // slot later (the corruption ticket 068 detects). The audio it invented from
+  // is the clip's opening silence.
+  //
+  // ⚠️ THE OBVIOUS FIX IS THE DANGEROUS ONE. Trimming the CLIP — pacing
+  // `samples.subarray(onset)` — would move frame 0 forward against `t0`, and
+  // every manifest anchor is `t0 + trueSpeechEndMs`. Every latency in the
+  // project would improve by exactly the silence removed, which reads as a
+  // small consistent IMPROVEMENT rather than as an error, and no assertion on
+  // transcripts, status or `speech_end` alone can see it.
+  //
+  // So NOTHING here touches the pacer: the whole clip is still paced at 1x off
+  // an untouched `t0`, frame k is still due at `t0 + k * FRAME_MS`, and the run
+  // still spans a full clip-length of wall clock. The ONLY change is that the
+  // leading silent frames are not handed to the transport when they come due.
+  // The STT is therefore given nothing to hallucinate on, and every anchor
+  // still means precisely what it meant before.
+  const skippedFrames =
+    deps.trimLeadingSilence === false ? 0 : leadingSilenceFrames(samples);
+  /** Index of the frame the pacer is delivering, in the ORIGINAL clip. */
+  let frameIndex = 0;
+
   // The clock anchor: epoch ms of frame 0. Every timing the run reports is
   // meaningful only relative to this.
   const t0 = deps.now();
   pacer = createPacer({
     samples,
     onFrame: (frame) => {
+      const index = frameIndex;
+      frameIndex += 1;
+      // Withheld, not shifted: the frames after it keep their own due times.
+      if (index < skippedFrames) return;
       transport.sendAudio(frame);
     },
     signal,

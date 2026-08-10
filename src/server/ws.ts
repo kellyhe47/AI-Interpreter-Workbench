@@ -39,7 +39,7 @@
 import type { Server as HttpServer } from 'node:http';
 import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
-import { encodeTtsFrame } from '../core/protocol';
+import { encodeTtsFrame, sourceLanguageOfDirection } from '../core/protocol';
 import type { ClientToServerMessage, RunOrigin } from '../core/protocol';
 import type { UtteranceRecord } from '../core/timing';
 import { createMt, createStt, createTts } from '../core/registry';
@@ -161,7 +161,23 @@ export function attachCascadeWs(
           // the options that carry the model onto that adapter — dropping the
           // model here would make Arms B and C run one configuration under two
           // labels (ticket 039).
-          const resolved = resolveTriple(msg.providers);
+          //
+          // TICKET 069 — AND THE SOURCE LANGUAGE RIDES THROUGH THE SAME CALL.
+          // `resolveTriple` built every adapter from `{ model }` alone, so the
+          // STT stage was never told what language it was about to hear:
+          // `OpenAiSttConfig` had no field for it and `ElevenLabsSttConfig
+          // .languageCode` — a knob wired to both the URL query and the config
+          // frame since ticket 004 — was populated by nothing. A Whisper-family
+          // model handed no language and a moment of leading silence invents a
+          // sentence in one.
+          //
+          // DERIVED FROM `direction`, never read off a field of its own: the
+          // session already knows which way it is running, and a second field
+          // could disagree with it. An unparseable or empty direction yields no
+          // hint at all rather than a guessed 'en'.
+          const resolved = resolveTriple(msg.providers, {
+            sourceLanguage: sourceLanguageOfDirection(msg.direction),
+          });
           providers = {
             stt: createStt(resolved.stt.vendor, resolved.stt.options),
             mt: createMt(resolved.mt.vendor, resolved.mt.options),

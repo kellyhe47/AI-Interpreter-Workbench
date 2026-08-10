@@ -1,13 +1,13 @@
 ---
 id: 069
 title: "The STT hallucinates on leading silence — give it the source language and stop sending it the silence"
-status: pending
+status: done
 source: operator sweep, 2026-08-09 (the upstream half of ticket 068)
 depends_on: [068]
 touches: [src/server/providers/openai-stt.ts, src/server/providers/elevenlabs-stt.ts, src/server/ws.ts, src/core/models.ts, src/client/replay/runner.ts]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Why
@@ -109,3 +109,48 @@ not move.
 - Both halves are independently valuable: the hint alone should stop the foreign-language outputs;
   the trim alone removes the audio that triggers them. Ship both, and pin them separately so a
   future regression in one is not masked by the other.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2491 passing / 0 failing. `npm run check` exits 0. Golden eval 08 (Replay paced at 1×) green.
+
+**The hint.** `resolveTriple(triple, { sourceLanguage })` adds `languageCode` to `stt.options` only,
+real vendors only, key omitted when absent. `sourceLanguageOfDirection` lives in `core/protocol.ts`
+beside the frame field it derives from; it requires exactly two non-empty halves around `→` and
+returns the left one lowercased. `OpenAiSttConfig.languageCode` is new and reaches
+`session.audio.input.transcription.language`. **`elevenlabs-stt.ts` needed no change at all** — its
+wire half already worked; only the `resolveTriple` link was missing, which is exactly what the ticket
+predicted.
+
+Derived, never declared: `ws.ts` reads only `msg.direction`, so a frame carrying its own
+`sourceLanguage` is structurally ignored, and no field was added to `ClientToServerMessage`. An
+unparseable direction (`''`, no arrow, `en→`) sends **no key at all** — never a guessed `'en'`.
+
+**The trim, and the constraint that made it dangerous.** The pacer is still handed the **whole clip**
+— no `subarray`, no offset, no new anchor — and `t0` still precedes `createPacer`. The withholding
+happens inside `onFrame`: `frameIndex` counts frames of the *original* clip and frames below
+`skippedFrames` return without calling `transport.sendAudio`. Withheld frames are **dropped, never
+shifted**, so frame *k* stays due at `t0 + k · FRAME_MS` and the run still spans a full clip-length.
+`createPacer` is byte-for-byte unchanged, which is why eval 08 is untouched.
+
+`SILENCE_PEAK_AMPLITUDE = 256` (≈ −42 dBFS), **peak** rather than mean/RMS, deliberately conservative
+in one direction: leaving a near-silent frame in costs a little hallucination risk, while withholding
+a frame carrying the first phoneme corrupts the transcript. A wholly silent clip returns `0` rather
+than transmitting nothing, so a silent recording is a lost measurement and not a lost run.
+
+### The mutation that mattered
+
+The orchestrator replaced the transmission-trim with a **clip-trim** (`samples.subarray(...)`) — the
+exact failure the ticket was written to prevent, which would improve every latency by precisely the
+silence removed and look like a small consistent gain rather than an error.
+
+It was caught: *"expected 200 to be less than or equal to 1"* — the first transmitted frame would
+have departed 200 ms early. **Only the frame-departure assertion caught it**; the `speech_end`
+equality did not, because `speech_end` is `t0 + trueSpeechEndMs` either way. That is exactly why the
+test-writer built two independent pins instead of one, and it is the reason this ticket is safe.
+
+### Still upstream, still true
+
+This reduces the hallucination; it does not make the provider incapable of it. Ticket 068's
+segment-count detection remains the backstop — a hallucination that still gets through fails loudly
+rather than shifting every utterance one slot.

@@ -32,6 +32,25 @@
  * typo'd or stale menu entry produce a run that is labelled as one thing and
  * executed as another. The known-model list in the message is read from MENUS,
  * so a menu entry added without a mapping here fails loudly and names itself.
+ *
+ * TICKET 069 — AND THE SESSION'S SOURCE LANGUAGE RIDES THROUGH HERE TOO.
+ * `resolveTriple` is the ONE place a model id becomes adapter options, so it is
+ * also the only place the session can hand the STT stage a fact the model id
+ * cannot carry. Ticket 062 routed the TARGET language to the MT stage; the
+ * SOURCE language is the same wiring one stage upstream, and its absence is
+ * what let a Whisper-family model invent "그러나." / "żeśmy." / "Yardımımın" on
+ * the clip's opening silence in 7 of the operator's 17 sweep runs.
+ *
+ * IT LANDS ON THE STT STAGE AND NOWHERE ELSE, under ONE option key
+ * (`languageCode`) for both vendors, so the mapping stays uniform: ElevenLabs
+ * already declared exactly that field, and `OpenAiSttConfig` gained it rather
+ * than a second name meaning the same thing. Fixture STT is untouched — it is
+ * an escape rather than a table entry and has no language knob to set.
+ *
+ * ABSENCE STAYS ABSENCE. No source language, or an empty one, means NO KEY at
+ * all: `''` on the wire is a claim a run that could not name its own language
+ * has no business making, and a defaulted `'en'` would be this project's
+ * characteristic sin in a new place.
  */
 import { MENUS, type ProviderTriple } from './arms';
 
@@ -105,10 +124,41 @@ export function resolveModel(kind: ProviderKind, model: string): ResolvedProvide
   return { vendor: mapping.vendor, options: { [mapping.optionKey]: model } };
 }
 
-/** Resolve a whole cascade triple, each stage under its own kind. */
-export function resolveTriple(triple: ProviderTriple): ResolvedTriple {
+/** What the SESSION knows that a model id cannot carry (ticket 069). */
+export interface ResolveTripleOptions {
+  /**
+   * ISO code of the language being SPOKEN — `'en'` for an `en→es` run, `'es'`
+   * for `es→en`. A CODE, not a human name: both STT wire fields
+   * (ElevenLabs `language_code`, OpenAI `session.audio.input.transcription
+   * .language`) take codes, and the config key both adapters share is already
+   * named `languageCode`.
+   *
+   * DERIVED FROM `direction` BY THE CALLER, never declared beside it — see
+   * `sourceLanguageOfDirection` in core/protocol.ts. Omitted (or empty) when
+   * the session cannot name it, and then no key reaches the adapter at all.
+   */
+  sourceLanguage?: string;
+}
+
+/**
+ * Resolve a whole cascade triple, each stage under its own kind.
+ *
+ * TICKET 069 — `opts.sourceLanguage` is added to the STT stage's options as
+ * `languageCode`, for real vendors only. See the header: absent means absent.
+ */
+export function resolveTriple(
+  triple: ProviderTriple,
+  opts: ResolveTripleOptions = {},
+): ResolvedTriple {
+  const stt = resolveModel('stt', triple.stt);
+  const sourceLanguage = opts.sourceLanguage ?? '';
+  // Fixture STT is excluded by its VENDOR, not by the model id: it is the one
+  // stage that is an escape rather than a table entry, and it has no knob.
+  if (sourceLanguage !== '' && stt.vendor !== FIXTURE_VENDOR) {
+    stt.options.languageCode = sourceLanguage;
+  }
   return {
-    stt: resolveModel('stt', triple.stt),
+    stt,
     mt: resolveModel('mt', triple.mt),
     tts: resolveModel('tts', triple.tts),
   };

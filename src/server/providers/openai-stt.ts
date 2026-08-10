@@ -13,6 +13,8 @@
  *   audio.input.format {type:'audio/pcm', rate: 24000},   // ALWAYS 24000 —
  *     the API rejects 16000; regression-locked by a dedicated test
  *   audio.input.transcription.model 'gpt-4o-transcribe' (config.model overrides),
+ *   audio.input.transcription.language <config.languageCode> — TICKET 069, and
+ *     the KEY IS OMITTED ENTIRELY when no language is configured,
  *   audio.input.turn_detection {type:'server_vad', silence_duration_ms: 500}.
  * - Each audio Int16Array chunk is sent as
  *   {type:'input_audio_buffer.append', audio:<base64 of little-endian PCM16 bytes>}
@@ -54,6 +56,20 @@ export interface OpenAiSttConfig {
   apiKey?: string;
   /** Transcription model. Default 'gpt-4o-transcribe'. */
   model?: string;
+  /**
+   * TICKET 069 — ISO code of the language being SPOKEN ('en', 'es', 'yue'),
+   * sent as `session.audio.input.transcription.language`.
+   *
+   * THE SAME KEY NAME `ElevenLabsSttConfig` USES, deliberately: `resolveTriple`
+   * maps one option onto both STT vendors, and two names for one fact is how a
+   * mapping starts dropping it on one of them.
+   *
+   * OMITTED MEANS NO KEY ON THE WIRE. Every session this adapter opened before
+   * 069 named no language at all, which is what let the model invent one on the
+   * clip's opening silence; a DEFAULTED language would trade that for confident
+   * mistranscription of every clip that is not in it.
+   */
+  languageCode?: string;
 }
 
 export interface OpenAiSttDeps {
@@ -179,6 +195,7 @@ export class OpenAiStt implements SttProvider {
     void (async () => {
       await waitForOpen(ws);
       if (wsClosed || queue.isDone) return;
+      const lang = this.config.languageCode;
       ws.send(
         JSON.stringify({
           type: 'session.update',
@@ -188,7 +205,13 @@ export class OpenAiStt implements SttProvider {
               input: {
                 // ALWAYS 24000 — the API rejects 16000 (regression-locked).
                 format: { type: 'audio/pcm', rate: 24000 },
-                transcription: { model: this.config.model ?? 'gpt-4o-transcribe' },
+                transcription: {
+                  model: this.config.model ?? 'gpt-4o-transcribe',
+                  // TICKET 069 — beside the model, never instead of it, and
+                  // ABSENT when unknown: no `language` key at all rather than a
+                  // null or a guessed 'en'.
+                  ...(lang === undefined || lang === '' ? {} : { language: lang }),
+                },
                 turn_detection: { type: 'server_vad', silence_duration_ms: 500 },
               },
             },

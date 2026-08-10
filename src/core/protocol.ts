@@ -87,6 +87,39 @@ export type ClientToServerMessage =
     }
   | { type: 'session.end' };
 
+/** The separator `direction` is built from: 'en→es'. One place, one glyph. */
+const DIRECTION_ARROW = '→';
+
+/**
+ * TICKET 069 — the ISO code of the language a session is LISTENING to, read off
+ * the direction it is already running.
+ *
+ * DERIVED, NEVER DECLARED. `session.start` deliberately gains no
+ * `sourceLanguage` field: a second field could disagree with `direction`, and
+ * disagreeing silently is the exact shape of the defect this fixes (062 on the
+ * target side, 069 on the source side). `direction` IS the answer — `en→es`
+ * means the microphone is hearing English — so the answer is computed from it.
+ *
+ * IT RETURNS `undefined` RATHER THAN GUESSING. An empty direction (Live before
+ * a pair is chosen, a pre-062 client) or one this cannot parse yields no hint
+ * at all, and the STT adapter then opens its session with no language key —
+ * exactly what it has always done, and strictly better than a confident `'en'`
+ * on a Spanish clip. Unmeasured is absence.
+ *
+ * The value is a CODE ('en', 'es', 'yue'), which is what both STT vendors'
+ * language fields take.
+ */
+export function sourceLanguageOfDirection(direction: string | undefined): string | undefined {
+  if (direction === undefined) return undefined;
+  const parts = direction.split(DIRECTION_ARROW);
+  if (parts.length !== 2) return undefined;
+  const source = parts[0]!.trim().toLowerCase();
+  // Both halves must be there: 'en→' names no target and is as malformed as
+  // 'gibberish'. A half-parsed direction is not evidence of anything.
+  if (source === '' || parts[1]!.trim() === '') return undefined;
+  return source;
+}
+
 /**
  * Server -> client JSON (text frame) messages. TTS audio travels as binary
  * frames with the 4-byte utt header (see FRAMING above), NOT as JSON.
