@@ -945,6 +945,22 @@ interface UtteranceBuckets {
    * onto utterance 0.
    */
   usage: Map<number, unknown>;
+  /**
+   * TICKET 053 — the cost the SERVER already computed for that turn, as it
+   * arrived on `utterance.complete`.
+   *
+   * The cascade's three stages are metered server-side, where the usage
+   * actually is: the STT's samples, the MT's usage frame, the TTS's synthesized
+   * audio. `priceCascade` turns them into a per-utterance figure and puts it on
+   * the wire — and the client used to drop it here, exactly as it dropped the
+   * realtime `usage` envelope before ticket 070. Every cascade run therefore
+   * stored `cost: null` while the server had the number in hand.
+   *
+   * A KEY PRESENT means the server reported a priced figure. Absent means it
+   * could not price the turn, which stays `null` rather than falling through to
+   * a blended rate nobody measured.
+   */
+  serverCost: Map<number, number>;
 }
 
 function emptyBuckets(): UtteranceBuckets {
@@ -955,6 +971,7 @@ function emptyBuckets(): UtteranceBuckets {
     targetFinal: new Map(),
     targetDelta: new Map(),
     usage: new Map(),
+    serverCost: new Map(),
   };
 }
 
@@ -1146,6 +1163,12 @@ function attributeUtterances(args: {
     // through `has` rather than `get`, so a REFUSAL is not mistaken for silence.
     const reportedCost =
       usageCosts !== undefined && usageCosts.has(utt) ? (usageCosts.get(utt) ?? null) : undefined;
+    // TICKET 053 — the CASCADE's own metered figure, which outranks the blended
+    // $/min fallback for the same reason 070's usage envelope does: it is a
+    // measurement of this turn rather than an average imposed on it. It cannot
+    // collide with `reportedCost` — a run is one architecture, and only
+    // realtime reports a usage envelope while only cascade reports costUnits.
+    const serverCost = buckets.serverCost.has(utt) ? buckets.serverCost.get(utt)! : undefined;
 
     const targetDelta = buckets.targetDelta.get(utt) ?? '';
     return {
@@ -1167,9 +1190,11 @@ function attributeUtterances(args: {
       // utterance's cost either. `null` says so; `0` would report it as free.
       cost: reportedCost !== undefined
         ? reportedCost
-        : costPerMinUsd > 0
-          ? costPerMinUsd * (spanMs / 60_000)
-          : null,
+        : serverCost !== undefined
+          ? serverCost
+          : costPerMinUsd > 0
+            ? costPerMinUsd * (spanMs / 60_000)
+            : null,
       // An utterance with no end-to-end number has none to report, which is a
       // fact about THAT utterance and not about the Run. Keyed on the RESOLVED
       // value (040): a track-carried utterance DID produce audio and must not
@@ -1305,6 +1330,13 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       // nothing" and "the vendor reported an envelope" are different facts.
       if (record.utt !== undefined && record.usage !== undefined) {
         buckets.usage.set(record.utt, record.usage);
+      }
+      // TICKET 053 — and the cascade's SERVER-SIDE price arrives on the same
+      // doorstep. Only a finite number is filed: `costUnits: null` is the
+      // server saying it could NOT price the turn, and storing that as a
+      // measured figure would turn "unmeasured" into "$0.00" one layer later.
+      if (record.utt !== undefined && typeof record.costUnits === 'number') {
+        buckets.serverCost.set(record.utt, record.costUnits);
       }
       observed += 1;
       // Manifest-less: over at the first boundary, exactly as it always was.
@@ -1614,6 +1646,15 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   const usagePricing =
     usageModel === undefined ? undefined : priceReportedUsage(buckets.usage, usageModel);
 
+  // TICKET 053 — the cascade's own total, summed from the per-turn figures the
+  // SERVER priced. `undefined` when the transport priced no turn at all, which
+  // is what keeps a cascade run that metered nothing on the `null` road rather
+  // than reporting a $0.00 sum of an empty set.
+  const cascadeTotalUsd =
+    buckets.serverCost.size === 0
+      ? undefined
+      : [...buckets.serverCost.values()].reduce((sum, usd) => sum + usd, 0);
+
   const utterances =
     manifest === undefined || mismatched || drifted || cancelled
       ? undefined
@@ -1707,12 +1748,23 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     // TICKET 052 — the blended fallback keeps its rule verbatim for a run that
     // reported no usage at all. No declared rate, no figure: Replay says
     // `not measured` rather than a `$0.00` that reads as a free run.
+    //
+    // TICKET 053 — AND THE CASCADE'S SUM COMES FROM ITS OWN TURNS. The two
+    // clauses above are the REALTIME paths (a usage envelope) and 052's blended
+    // rate; a cascade run has neither, so its total fell to `null` even after
+    // every one of its utterances carried a server-priced figure. The run-level
+    // total is the sum of the turns that reported, on the same rule 070 states
+    // for realtime: turns that could not be priced are absent from the sum
+    // rather than counted as zero, and a run where NONE could be priced reports
+    // `null` instead of a $0.00 that would read as free.
     cost:
       usagePricing !== undefined
         ? usagePricing.totalUsd
-        : transport.costPerMinUsd > 0
-          ? transport.costPerMinUsd * (recording.durationMs / 60_000)
-          : null,
+        : cascadeTotalUsd !== undefined
+          ? cascadeTotalUsd
+          : transport.costPerMinUsd > 0
+            ? transport.costPerMinUsd * (recording.durationMs / 60_000)
+            : null,
     // TICKET 059 — THE PRICE SOURCE THIS RUN RAN UNDER, copied onto the record
     // at the moment of the run exactly as `corpusVersion` is. It reports the
     // SOURCE, never the figure: it is written whatever `cost` came to and

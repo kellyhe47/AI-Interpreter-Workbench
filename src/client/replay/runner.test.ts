@@ -3933,3 +3933,78 @@ describe('a run that was not paced at 1x is not evidence', () => {
     expect(run.status).toBe('complete');
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 053 — THE CASCADE'S SERVER-SIDE COST HAS TO REACH THE STORED RUN.
+//
+// THIS IS THE TEST THAT WOULD HAVE CAUGHT THE REAL FAILURE. The server prices
+// all three cascade stages, `priceCascade` was unit-tested end to end, a probe
+// against the live API returned stt+mt+tts = $0.000435 — and every cascade run
+// in production still stored `cost: null`, because the client dropped
+// `costUnits` on the doorstep exactly as it once dropped 070's usage envelope.
+// Every test involved passed. None of them followed the number to the Run.
+//
+// So these assert the JOURNEY, not the arithmetic: what the transport reported
+// is what the stored record carries.
+// ---------------------------------------------------------------------------
+
+/** The corpus script with a server-priced cost on each completion. */
+function pricedCorpusScript(costs: ReadonlyArray<number | null>): FixtureScriptEvent[] {
+  return corpusScript().map((e) =>
+    e.type === 'utteranceComplete' && typeof e.record.utt === 'number'
+      ? { ...e, record: { ...e.record, costUnits: costs[e.record.utt] ?? null } }
+      : e,
+  );
+}
+
+function pricedHarness(costs: ReadonlyArray<number | null>): Harness {
+  return makeHarness({
+    recording: CORPUS_RECORDING,
+    transportFactory: () =>
+      new FixtureTransport({
+        armId: 'fx',
+        kind: 'cascade',
+        script: pricedCorpusScript(costs),
+        // 0 is what production sets for cascade (browserDeps): the blended
+        // $/min path is unconfigured on purpose, so if the server's figure is
+        // dropped there is nothing behind it and the cost reads null.
+        costPerMinUsd: 0,
+      }),
+  });
+}
+
+describe('TICKET 053 — the cascade cost the SERVER measured reaches the Run', () => {
+  it('files each turn’s costUnits onto THAT turn, not the next one', async () => {
+    const costs = [0.000101, 0.000202, 0.000303, 0.000404];
+    const h = pricedHarness(costs);
+    const { run } = await runCorpus(h);
+
+    expect(run.status).toBe('complete');
+    // Per utterance, in manifest order — the misattribution ticket 068 caught
+    // in the audio path is just as possible here, and just as invisible in a
+    // total. Asserting the SUM alone would pass with every value shifted.
+    expect(utterancesOf(run).map((u) => u.cost)).toEqual(costs);
+  });
+
+  it('an UNPRICED turn stays null — never 0, and never a blended rate', async () => {
+    // `costUnits: null` is the server saying it could not price the turn. With
+    // costPerMinUsd 0 there is no fallback either, and both roads must end at
+    // null: a measured zero and an unmeasured turn are different facts.
+    const h = pricedHarness([0.000101, null, 0.000303, null]);
+    const { run } = await runCorpus(h);
+
+    expect(utterancesOf(run).map((u) => u.cost)).toEqual([0.000101, null, 0.000303, null]);
+  });
+
+  it('THE REGRESSION, stated as production’s own shape: cascade + costPerMinUsd 0', async () => {
+    // This is the configuration that shipped and stored null for every cascade
+    // run. If the client ever stops reading costUnits again, this fails while
+    // every server-side pricing test stays green — which is exactly what
+    // happened the first time.
+    const h = pricedHarness([0.00042, 0.00042, 0.00042, 0.00042]);
+    const { run } = await runCorpus(h);
+
+    expect(utterancesOf(run).every((u) => u.cost !== null)).toBe(true);
+    expect(run.cost).toBeCloseTo(0.00168, 12);
+  });
+});
