@@ -2968,3 +2968,731 @@ describe('TICKET 069 — a clip with no leading silence is untouched (AC8, AC9)'
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 070 — THE TRANSPORT REPORTS THE USAGE AND THE RUNNER DROPS IT.
+//
+// Every arm on the operator's Results screen reads `cost measured on 0 of N
+// samples`. Ticket 059 is working: an unmeasured cost reads `not measured` and
+// never a fabricated `$0.000`. NOTHING MEASURES.
+//
+// `runner.ts` contains zero references to `usage`. It prices with
+// `transport.costPerMinUsd` — a single blended $/min that `browserDeps.ts`
+// wires at `0` on EVERY transport, Replay and Live alike (four call sites, all
+// `costPerMinUsd: 0`) — so `costPerMinUsd > 0` is false and both the Run's
+// `cost` and every `RunUtterance.cost` are `null` on every real run.
+//
+// Meanwhile `realtime.ts` ALREADY sends it:
+//
+//     case 'response.done': {
+//       const response = msg.response as { usage?: unknown } | undefined;
+//       h.onUtteranceComplete?.({ utt: this.utt, usage: response?.usage });
+//
+// `UtteranceCompletion` already DECLARES `usage?: unknown`, and
+// `priceRealtimeUsage` already prices exactly that envelope — from
+// `useSessionController.ts`, the LIVE path, and nowhere else. The runner's
+// handler is `onUtteranceComplete: () => {`: it takes no parameter at all, so
+// the number arrives and is discarded on the doorstep.
+//
+// THE FIXTURES BELOW PACE PRODUCTION. Every transport here declares
+// `costPerMinUsd: 0`, exactly as `browserDeps` does, so the ONLY thing that can
+// produce a figure is the usage envelope. Nothing in this block touches the
+// blended path, which ticket 053 owns and this ticket deliberately leaves
+// unconfigured.
+//
+// FOUR TRAPS THESE TESTS EXIST TO CATCH, in ascending order of subtlety:
+//
+//  1. A fix that prices nothing (today).
+//  2. A fix that reimplements the arithmetic instead of calling
+//     `priceRealtimeUsage`. Pinned two ways: the dollar figures below are hand
+//     derived from `RATE_CARD`'s own published numbers (asserted as a premise,
+//     so a rate change restates them visibly), AND four envelopes are included
+//     whose verdict is a REFUSAL nobody re-derives by accident — a cached count
+//     with no breakdown, a breakdown that contradicts its own total, an
+//     envelope whose only numbers are negative, and an empty one.
+//  3. A fix that BLENDS across turns. A run of four turns where three report
+//     usage must read three priced records, one `null`, and `3 of 4` — never a
+//     four-way average of the three priced turns (which would satisfy "the
+//     total is right" and "every record has a figure" simultaneously and be
+//     wrong), and never the three-turn total relabelled `4 of 4`.
+//  4. A fix that collapses "measured, and it came to zero" into "unmeasured".
+//     A turn reporting `audio_tokens: 0` MEASURED a zero, and `$0.000` is the
+//     honest rendering of it — the other half of ticket 059.
+//
+// AND TWO CONTROLS THAT MATTER AS MUCH. A realtime run with no usage anywhere
+// keeps today's `null` / `0 of N` (so the fix cannot invent a figure), and a
+// CASCADE run keeps `cost: null` even when its completions carry a realtime
+// envelope — Arms B and C stay unpriced until 053 is implemented, and this
+// ticket may not half-price a cascade run on the way past.
+// ---------------------------------------------------------------------------
+
+import {
+  RATE_CARD,
+  costFromPriceSource,
+  formatCostUsd,
+  priceRealtimeUsage,
+  type RealtimeUsage,
+  type TokenRate,
+} from '../../core/pricing';
+import { RunLedger, type RunArmAggregate } from '../state/ledger';
+
+/** The dev model — never an arm, and priced at a DIFFERENT meter (10 / 20). */
+const MINI_MODEL = 'gpt-realtime-mini';
+
+/* ---------------------------------------------------------------- envelopes --
+ *
+ * THE RATE-CARD ARITHMETIC, WRITTEN OUT. `gpt-realtime`: audio in $32/M, audio
+ * out $64/M (the 2× that makes summing the two directions first wrong), text in
+ * $4/M, text out $16/M, cached input $0.40/M. Every figure below is
+ * `sum(tokens × rate) / 1e6` over those five meters, by hand.
+ */
+
+/** Audio and text, both directions, no caching. */
+const USAGE_PLAIN: RealtimeUsage = {
+  input_token_details: { audio_tokens: 1000, text_tokens: 500 },
+  output_token_details: { audio_tokens: 2000, text_tokens: 250 },
+};
+/** (1000×32 + 500×4 + 2000×64 + 250×16) / 1e6 = 166000 / 1e6. */
+const USD_PLAIN = 0.166;
+
+/**
+ * The cached SUBSET, subtracted and re-priced (PRICING_ASSUMPTIONS'
+ * `realtime-cached-tokens-are-a-subset`). The additive reading — the bug 052
+ * replaced — comes to 0.13408 here, so this envelope alone separates the two.
+ */
+const USAGE_CACHED: RealtimeUsage = {
+  input_token_details: {
+    audio_tokens: 2000,
+    text_tokens: 1000,
+    cached_tokens: 1200,
+    cached_tokens_details: { audio_tokens: 800, text_tokens: 400 },
+  },
+  output_token_details: { audio_tokens: 1000, text_tokens: 100 },
+};
+/** (1200×32 + 800×0.4 + 600×4 + 400×0.4 + 1000×64 + 100×16) / 1e6 = 106880 / 1e6. */
+const USD_CACHED = 0.10688;
+/** What ADDING the cached tokens on top would come to. Named so it can be refused. */
+const USD_CACHED_ADDITIVE = 0.13408;
+
+/** Audio only, both directions. */
+const USAGE_AUDIO_ONLY: RealtimeUsage = {
+  input_token_details: { audio_tokens: 500 },
+  output_token_details: { audio_tokens: 500 },
+};
+/** (500×32 + 500×64) / 1e6 = 48000 / 1e6. */
+const USD_AUDIO_ONLY = 0.048;
+
+/**
+ * Text only, both directions — the SUB-METERS. Priced at the audio meters this
+ * would come to 0.096, so this envelope catches a fix that knows there are two
+ * directions but not that there are two modalities.
+ */
+const USAGE_TEXT_ONLY: RealtimeUsage = {
+  input_token_details: { text_tokens: 1000 },
+  output_token_details: { text_tokens: 1000 },
+};
+/** (1000×4 + 1000×16) / 1e6 = 20000 / 1e6. */
+const USD_TEXT_ONLY = 0.02;
+/** The same envelope read off the AUDIO meters. Named so it can be refused. */
+const USD_TEXT_ON_AUDIO_METERS = 0.096;
+
+/** A turn that really did consume nothing. MEASURED — `0` is not `null`. */
+const USAGE_ZERO: RealtimeUsage = {
+  input_token_details: { audio_tokens: 0 },
+  output_token_details: { audio_tokens: 0 },
+};
+
+/* The four REFUSALS. `priceRealtimeUsage` answers `null` to each; the figure a
+ * plain multiply-and-sum would produce is named beside it, so "this fix did its
+ * own arithmetic" is a failing assertion and not a code review. */
+
+/** A cached count with no breakdown: the split is unknown, so the turn is not priceable. */
+const USAGE_CACHED_NO_DETAIL: RealtimeUsage = {
+  input_token_details: { audio_tokens: 2000, cached_tokens: 1200 },
+  output_token_details: { audio_tokens: 1000 },
+};
+/** (2000×32 + 1000×64) / 1e6 — what ignoring `cached_tokens` would report. */
+const USD_CACHED_NO_DETAIL_NAIVE = 0.128;
+
+/** A breakdown that contradicts its own total (800 + 100 ≠ 1200). */
+const USAGE_CACHED_CONTRADICTS: RealtimeUsage = {
+  input_token_details: {
+    audio_tokens: 2000,
+    cached_tokens: 1200,
+    cached_tokens_details: { audio_tokens: 800, text_tokens: 100 },
+  },
+  output_token_details: { audio_tokens: 1000 },
+};
+/** (1200×32 + 800×0.4 + 1000×64) / 1e6 — subtract-then-reprice with no agreement check. */
+const USD_CACHED_CONTRADICTS_NAIVE = 0.10272;
+
+/** Every number negative: a metering fault, NOT a turn that was free. */
+const USAGE_NEGATIVE_ONLY: RealtimeUsage = {
+  input_token_details: { audio_tokens: -5 },
+  output_token_details: { audio_tokens: -1 },
+};
+
+/** An envelope that reported nothing at all. */
+const USAGE_EMPTY: RealtimeUsage = {};
+
+/* ------------------------------------------------------------------ harness --
+ *
+ * The 4-entry `MANIFEST` / `CORPUS_RECORDING` pair the 031 suites already use,
+ * driven by a REALTIME transport whose completions carry `usage`.
+ */
+
+interface UsageTurn {
+  /** The `response.done` envelope. `undefined` => the `usage` KEY IS ABSENT. */
+  usage?: unknown;
+  /** When `onUtteranceComplete` fires. Default: that turn's own window. */
+  completeAt?: number;
+}
+
+/** Turn u answers on [100 + 100u, 150 + 100u] ms — corpusScript's own windows. */
+function usageScript(turns: readonly UsageTurn[]): FixtureScriptEvent[] {
+  const events: FixtureScriptEvent[] = [];
+  turns.forEach((turn, utt) => {
+    const base = 100 + utt * 100;
+    events.push(
+      { at: base, type: 'sourceText', kind: 'final', text: `src ${utt}`, utt },
+      { at: base + 25, type: 'targetText', kind: 'final', text: `tgt ${utt}`, utt },
+      { at: base + 30, type: 'audio', pcm: ramp(240), utt },
+      {
+        at: turn.completeAt ?? base + 50,
+        type: 'utteranceComplete',
+        // ABSENT, not `usage: undefined`: the runner must handle a transport
+        // that reports no usage key at all, which is every cascade completion
+        // and any realtime `response.done` that omits it.
+        record: turn.usage === undefined ? { utt } : { utt, usage: turn.usage },
+      },
+    );
+  });
+  return events;
+}
+
+function usageHarness(opts: {
+  turns: readonly UsageTurn[];
+  kind?: TransportKind;
+  /** PRODUCTION'S OWN VALUE (browserDeps wires 0 on all four transports). */
+  costPerMinUsd?: number;
+  recording?: Partial<Recording>;
+}): Harness {
+  const script = usageScript(opts.turns);
+  return makeHarness({
+    recording: { ...CORPUS_RECORDING, ...opts.recording },
+    transportFactory: () =>
+      new FixtureTransport({
+        armId: 'fx',
+        kind: opts.kind ?? 'realtime',
+        script,
+        costPerMinUsd: opts.costPerMinUsd ?? 0,
+      }),
+  });
+}
+
+async function runUsage(h: Harness, config: RunOnceConfig = REALTIME_CONFIG) {
+  const done = start(h, config);
+  await vi.advanceTimersByTimeAsync(2000);
+  return done;
+}
+
+/** The four turns of the primary fixture, and their hand-derived figures. */
+const PRIMARY_TURNS: readonly UsageTurn[] = [
+  { usage: USAGE_PLAIN },
+  { usage: USAGE_CACHED },
+  { usage: USAGE_AUDIO_ONLY },
+  { usage: USAGE_TEXT_ONLY },
+];
+const PRIMARY_USD = [USD_PLAIN, USD_CACHED, USD_AUDIO_ONLY, USD_TEXT_ONLY] as const;
+/** 0.166 + 0.10688 + 0.048 + 0.02. */
+const PRIMARY_TOTAL_USD = 0.34088;
+
+/**
+ * What an aggregate makes of the Run — the ONE gate and nothing beside it.
+ *
+ * The runner posts `origin: 'manual'`; re-homed as a sweep exactly as the 068
+ * block does, so the parent Run's own verdict is what is under test rather than
+ * its origin. `runAggregates` is the real path: it expands each Run into its
+ * measured atoms, admits them through `isAggregatableUtterance`, and counts
+ * `measuredCostSamples` beside `n`.
+ */
+function aggregateOf(run: Run): RunArmAggregate {
+  const asSweep: Run = { ...run, origin: 'sweep' };
+  // THE PREMISE: the gate lets this run through on its own terms. If it ever
+  // stops doing so, every count below is vacuous and this says so first.
+  expect(isAggregatableRun(asSweep)).toBe(true);
+  const ledger = new RunLedger();
+  ledger.appendRun(asSweep);
+  const agg = ledger.runAggregates().perArm[runArmTag(asSweep)];
+  expect(agg).toBeDefined();
+  return agg!;
+}
+
+// ---------------------------------------------------------------------------
+
+describe('TICKET 070 — the rate card these figures are derived from (the premise)', () => {
+  it("`gpt-realtime`'s five published meters are what the hand arithmetic used", () => {
+    // Asserted rather than assumed: every dollar figure in this block is
+    // `sum(tokens × rate) / 1e6` over exactly these numbers, so a rate that
+    // moves RESTATES these tests visibly instead of silently re-deriving them.
+    const rate = RATE_CARD[REALTIME_MODEL] as TokenRate;
+    expect({
+      shape: rate.shape,
+      inputPerMillionUsd: rate.inputPerMillionUsd,
+      outputPerMillionUsd: rate.outputPerMillionUsd,
+      textInputPerMillionUsd: rate.textInputPerMillionUsd,
+      textOutputPerMillionUsd: rate.textOutputPerMillionUsd,
+      cachedInputPerMillionUsd: rate.cachedInputPerMillionUsd,
+      cachedTextInputPerMillionUsd: rate.cachedTextInputPerMillionUsd,
+    }).toEqual({
+      shape: 'token',
+      inputPerMillionUsd: 32,
+      outputPerMillionUsd: 64,
+      textInputPerMillionUsd: 4,
+      textOutputPerMillionUsd: 16,
+      cachedInputPerMillionUsd: 0.4,
+      cachedTextInputPerMillionUsd: 0.4,
+    });
+
+    // ...and the price source agrees with the hand arithmetic BEFORE the runner
+    // is involved at all. If these four disagree, every runner assertion below
+    // is measuring the wrong thing and this test names it.
+    expect(priceRealtimeUsage(USAGE_PLAIN, REALTIME_MODEL).usd).toBeCloseTo(USD_PLAIN, 12);
+    expect(priceRealtimeUsage(USAGE_CACHED, REALTIME_MODEL).usd).toBeCloseTo(USD_CACHED, 12);
+    expect(priceRealtimeUsage(USAGE_AUDIO_ONLY, REALTIME_MODEL).usd).toBeCloseTo(
+      USD_AUDIO_ONLY,
+      12,
+    );
+    expect(priceRealtimeUsage(USAGE_TEXT_ONLY, REALTIME_MODEL).usd).toBeCloseTo(USD_TEXT_ONLY, 12);
+
+    // The four REFUSALS, at the source. Each is `null` — never a figure.
+    for (const usage of [
+      USAGE_CACHED_NO_DETAIL,
+      USAGE_CACHED_CONTRADICTS,
+      USAGE_NEGATIVE_ONLY,
+      USAGE_EMPTY,
+    ]) {
+      expect(priceRealtimeUsage(usage, REALTIME_MODEL).usd).toBeNull();
+    }
+    // And the measured zero, which is NOT one of them.
+    expect(priceRealtimeUsage(USAGE_ZERO, REALTIME_MODEL)).toMatchObject({
+      measured: true,
+      usd: 0,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC1 + AC2 — the runner captures `usage` per utterance, keyed by `utt`, and
+// prices it through `priceRealtimeUsage`.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 070 — a realtime run prices every utterance from the reported usage', () => {
+  it('each record carries its OWN turn’s hand-derived figure, to the cent and beyond', async () => {
+    const h = usageHarness({ turns: PRIMARY_TURNS });
+    const { run } = await runUsage(h);
+
+    expect(run.status).toBe('complete');
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(4);
+
+    // THE FIXTURE'S PREMISE: four DISTINCT figures. Equal ones could not detect
+    // a mis-keyed bucket, a blend, or a swapped meter.
+    expect(new Set(PRIMARY_USD).size).toBe(4);
+
+    // THE CLAIM, against the rate card's own arithmetic. Today every one of
+    // these is `null`: `costPerMinUsd` is 0 and nothing reads `usage` at all.
+    utterances.forEach((u, i) => expect(u.cost).toBeCloseTo(PRIMARY_USD[i]!, 12));
+
+    // ...and EXACTLY what the price source Live calls returns, bit for bit. A
+    // reimplementation that rounds, re-orders the terms, or blends will not sit
+    // on the same double.
+    utterances.forEach((u, i) =>
+      expect(u.cost).toBe(priceRealtimeUsage(PRIMARY_TURNS[i]!.usage, REALTIME_MODEL).usd),
+    );
+  });
+
+  it('the cached subset is SUBTRACTED and re-priced, never added on top', async () => {
+    const h = usageHarness({ turns: PRIMARY_TURNS });
+    const { run } = await runUsage(h);
+
+    const cached = utterancesOf(run)[1]!;
+    expect(cached.cost).toBeCloseTo(USD_CACHED, 12);
+    // The additive reading bills cached input at MORE than uncached input and
+    // inverts prompt caching entirely — 052's named defect, refused by name.
+    expect(cached.cost).not.toBeCloseTo(USD_CACHED_ADDITIVE, 6);
+  });
+
+  it('text tokens are priced at the TEXT meters, not at the audio ones', async () => {
+    const h = usageHarness({ turns: PRIMARY_TURNS });
+    const { run } = await runUsage(h);
+
+    const textOnly = utterancesOf(run)[3]!;
+    expect(textOnly.cost).toBeCloseTo(USD_TEXT_ONLY, 12);
+    // 4.8× out on a turn that reported no audio at all.
+    expect(textOnly.cost).not.toBeCloseTo(USD_TEXT_ON_AUDIO_METERS, 6);
+  });
+
+  it('the usage bucket is keyed by `utt`, like every other bucket — not by arrival order', async () => {
+    // The completions arrive 2, 3, 0, 1. Every other bucket in the runner is
+    // keyed by `utt` precisely so an interleaving transport cannot re-file a
+    // measurement; the usage bucket is under the same rule. A fix that pushed
+    // envelopes onto a list would report 0.048 / 0.02 / 0.166 / 0.10688 here.
+    const h = usageHarness({
+      turns: [
+        { usage: USAGE_PLAIN, completeAt: 600 },
+        { usage: USAGE_CACHED, completeAt: 700 },
+        { usage: USAGE_AUDIO_ONLY, completeAt: 450 },
+        { usage: USAGE_TEXT_ONLY, completeAt: 500 },
+      ],
+    });
+    const { run } = await runUsage(h);
+
+    const utterances = utterancesOf(run);
+    expect(run.status).toBe('complete');
+    // The transcripts confirm the buckets really were interleaved and the
+    // records really are in manifest order — the cost list below is read off
+    // the same four buckets.
+    expect(utterances.map((u) => u.transcripts.source)).toEqual([
+      'src 0',
+      'src 1',
+      'src 2',
+      'src 3',
+    ]);
+    utterances.forEach((u, i) => expect(u.cost).toBeCloseTo(PRIMARY_USD[i]!, 12));
+    // Named explicitly, because THIS is the list arrival order would produce.
+    expect(utterances.map((u) => u.cost)).not.toEqual([
+      USD_AUDIO_ONLY,
+      USD_TEXT_ONLY,
+      USD_PLAIN,
+      USD_CACHED,
+    ]);
+  });
+
+  it("the model is the RUN'S model snapshot, not a hardcoded constant", async () => {
+    // `gpt-realtime-mini` is billed 10 / 20 with no text or cached sub-rates,
+    // so the SAME envelope comes to 0.06 instead of 0.166: a fix that always
+    // passes REALTIME_MODEL reports Arm A's price for a dev run.
+    const h = usageHarness({ turns: [0, 1, 2, 3].map(() => ({ usage: USAGE_PLAIN })) });
+    const { run } = await runUsage(h, {
+      ...REALTIME_CONFIG,
+      realtimeModel: MINI_MODEL,
+    });
+
+    // (1000×10 + 500×10 + 2000×20 + 250×20) / 1e6 = 60000 / 1e6 — text falls
+    // back to the headline meters, which the card says OVERSTATES a dev run.
+    const perTurn = 0.06;
+    expect(priceRealtimeUsage(USAGE_PLAIN, MINI_MODEL).usd).toBeCloseTo(perTurn, 12);
+    expect(run.modelSnapshots.realtime).toBe(MINI_MODEL);
+    for (const u of utterancesOf(run)) expect(u.cost).toBeCloseTo(perTurn, 12);
+    expect(run.cost).toBeCloseTo(perTurn * 4, 12);
+    // Arm A's meter, refused by name: the same four turns at `gpt-realtime`.
+    expect(run.cost).not.toBeCloseTo(USD_PLAIN * 4, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC3 — the Run's total is the SUM of its priced turns, and the aggregate
+// counts them. `cost measured on 15 of 15 samples` becomes possible for Arm A.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 070 — the Run total is the sum of its priced utterances', () => {
+  it('sums to the hand-derived total, and the splits sum back to it exactly', async () => {
+    const h = usageHarness({ turns: PRIMARY_TURNS });
+    const { run } = await runUsage(h);
+
+    expect(run.cost).toBeCloseTo(PRIMARY_TOTAL_USD, 12);
+    const total = utterancesOf(run).reduce((sum, u) => sum + (u.cost ?? 0), 0);
+    expect(total).toBeCloseTo(run.cost!, 12);
+    // It is a MEASUREMENT, and it renders as one.
+    expect(formatCostUsd(run.cost)).toBe('$0.341');
+    // The same record was stored, money and all.
+    expect(h.posted).toHaveLength(1);
+    expect(h.posted[0]).toEqual(run);
+  });
+
+  it('`measuredCostSamples` reaches 4 of 4 — the shape of `15 of 15` for Arm A', async () => {
+    const h = usageHarness({ turns: PRIMARY_TURNS });
+    const { run } = await runUsage(h);
+
+    const agg = aggregateOf(run);
+    expect(agg.n).toBe(4);
+    expect(agg.measuredCostSamples).toBe(4);
+    expect(agg.measuredCostSamples).toBe(agg.n);
+    expect(agg.costUsd).toBeCloseTo(PRIMARY_TOTAL_USD, 12);
+  });
+
+  it('a run with NO records still totals from the usage its one turn reported', async () => {
+    // A mic-shaped realtime run: no manifest, so the run ends at the first
+    // utterance boundary and carries no `utterances` key. The usage still
+    // arrived, so the Run still has a total — a fix wired only into
+    // `attributeUtterances` reports `null` here.
+    const h = usageHarness({
+      turns: [{ usage: USAGE_PLAIN }],
+      recording: { ...RECORDING, utterances: undefined },
+    });
+    const { run } = await runUsage(h);
+
+    expect(run.utterances).toBeUndefined();
+    expect(run.cost).toBeCloseTo(USD_PLAIN, 12);
+    expect(run.cost).toBe(priceRealtimeUsage(USAGE_PLAIN, REALTIME_MODEL).usd);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC4 — THE SHARPEST ONE. A turn whose `response.done` omits usage prices
+// `null` FOR THAT TURN ONLY, and the denominator says so.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 070 — an unreported turn prices null for THAT turn, never a blend', () => {
+  const MIXED_TURNS: readonly UsageTurn[] = [
+    { usage: USAGE_PLAIN },
+    { usage: USAGE_CACHED },
+    // No `usage` key at all — the turn the vendor said nothing about.
+    {},
+    { usage: USAGE_TEXT_ONLY },
+  ];
+  /** 0.166 + 0.10688 + 0.02 — the THREE turns that reported. */
+  const MIXED_TOTAL_USD = 0.29288;
+  /** That total spread over four turns. The blend this test exists to refuse. */
+  const MIXED_BLENDED_EACH = MIXED_TOTAL_USD / 4;
+
+  it('three priced records, one null, and the null is the turn that went unreported', async () => {
+    const h = usageHarness({ turns: MIXED_TURNS });
+    const { run } = await runUsage(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances).toHaveLength(4);
+    expect(utterances[2]!.cost).toBeNull();
+    expect(utterances[0]!.cost).toBeCloseTo(USD_PLAIN, 12);
+    expect(utterances[1]!.cost).toBeCloseTo(USD_CACHED, 12);
+    expect(utterances[3]!.cost).toBeCloseTo(USD_TEXT_ONLY, 12);
+    // NULL, never a zero: a turn nobody metered did not cost nothing.
+    expect(utterances[2]!.cost).not.toBe(0);
+    expect(formatCostUsd(utterances[2]!.cost)).toBe('not measured');
+
+    // The unpriced turn is still a RECORD, and still a complete one: it
+    // produced its audio and its transcripts. Money is the only thing missing.
+    expect(utterances[2]!.status).toBe('complete');
+    expect(utterances[2]!.errors).toEqual([]);
+    expect(utterances[2]!.transcripts.source).toBe('src 2');
+  });
+
+  it('the total is the THREE that reported — not a four-way average of them', async () => {
+    const h = usageHarness({ turns: MIXED_TURNS });
+    const { run } = await runUsage(h);
+
+    expect(run.cost).toBeCloseTo(MIXED_TOTAL_USD, 12);
+    // THE BLEND, refused by name. Spreading 0.29288 over four turns gives every
+    // record 0.07322 and still sums to the right total — it satisfies "the
+    // total is right" and "every record has a figure" at once, and it is a
+    // figure nobody measured on three of the four records.
+    for (const u of utterancesOf(run)) expect(u.cost).not.toBeCloseTo(MIXED_BLENDED_EACH, 6);
+  });
+
+  it('the denominator says 3 of 4 — not 4 of 4, and `n` is still 4', async () => {
+    const h = usageHarness({ turns: MIXED_TURNS });
+    const { run } = await runUsage(h);
+
+    const agg = aggregateOf(run);
+    // PROVENANCE REPORTS ACTUAL N. The three-turn total relabelled `4 of 4` is
+    // the other half of the blend, and it is refused here rather than in the
+    // dollars — the dollars cannot tell those two apart.
+    expect(agg.measuredCostSamples).toBe(3);
+    expect(agg.n).toBe(4);
+    expect(agg.measuredCostSamples).not.toBe(agg.n);
+    expect(agg.costUsd).toBeCloseTo(MIXED_TOTAL_USD, 12);
+  });
+
+  it.each([
+    { name: 'a cached count with no breakdown', usage: USAGE_CACHED_NO_DETAIL, naive: USD_CACHED_NO_DETAIL_NAIVE },
+    { name: 'a breakdown contradicting its own total', usage: USAGE_CACHED_CONTRADICTS, naive: USD_CACHED_CONTRADICTS_NAIVE },
+    { name: 'an envelope whose only numbers are negative', usage: USAGE_NEGATIVE_ONLY, naive: 0 },
+    { name: 'an empty envelope', usage: USAGE_EMPTY, naive: 0 },
+  ])(
+    'NO SECOND PRICING PATH: $name prices null for that turn, and its neighbours are untouched',
+    async ({ usage, naive }) => {
+      // These four verdicts are `priceRealtimeUsage`'s OWN judgement and nobody
+      // re-derives them by accident: a fix that multiplies tokens by rates
+      // itself produces `naive` here instead of a refusal.
+      const h = usageHarness({
+        turns: [{ usage: USAGE_PLAIN }, { usage }, { usage: USAGE_AUDIO_ONLY }, { usage: USAGE_TEXT_ONLY }],
+      });
+      const { run } = await runUsage(h);
+
+      const utterances = utterancesOf(run);
+      expect(utterances[1]!.cost).toBeNull();
+      expect(utterances[1]!.cost).not.toBe(naive);
+      // ONE turn, not the run: the other three still price.
+      expect(utterances[0]!.cost).toBeCloseTo(USD_PLAIN, 12);
+      expect(utterances[2]!.cost).toBeCloseTo(USD_AUDIO_ONLY, 12);
+      expect(utterances[3]!.cost).toBeCloseTo(USD_TEXT_ONLY, 12);
+      expect(run.cost).toBeCloseTo(USD_PLAIN + USD_AUDIO_ONLY + USD_TEXT_ONLY, 12);
+      expect(aggregateOf(run).measuredCostSamples).toBe(3);
+    },
+  );
+
+  it('A MEASURED ZERO IS STILL A MEASUREMENT — `0` and `null` stay different facts', async () => {
+    // Ticket 059's other half. A turn reporting `audio_tokens: 0` metered a
+    // zero, and `$0.000` is the honest rendering of it. A fix that treated a
+    // falsy figure as unmeasured would report this run `0 of 4`.
+    const h = usageHarness({ turns: [0, 1, 2, 3].map(() => ({ usage: USAGE_ZERO })) });
+    const { run } = await runUsage(h);
+
+    const utterances = utterancesOf(run);
+    expect(utterances.map((u) => u.cost)).toEqual([0, 0, 0, 0]);
+    for (const u of utterances) expect(u.cost).not.toBeNull();
+    expect(run.cost).toBe(0);
+    expect(formatCostUsd(run.cost)).toBe('$0.000');
+
+    const agg = aggregateOf(run);
+    expect(agg.measuredCostSamples).toBe(4);
+    expect(agg.costUsd).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC5 — THE CONTROL. A run with no usage anywhere keeps today's behaviour, so
+// the fix cannot invent a figure where none was reported.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 070 — CONTROL: a run with no usage anywhere still measures nothing', () => {
+  const SILENT_TURNS: readonly UsageTurn[] = [{}, {}, {}, {}];
+
+  it('every record is null, the Run is null, and it renders `not measured`', async () => {
+    const h = usageHarness({ turns: SILENT_TURNS });
+    const { run } = await runUsage(h);
+
+    expect(run.status).toBe('complete');
+    expect(utterancesOf(run).map((u) => u.cost)).toEqual([null, null, null, null]);
+    expect(run.cost).toBeNull();
+    // NEVER `$0.00`, and never a 0 that reads as "this configuration is free".
+    expect(run.cost).not.toBe(0);
+    expect(formatCostUsd(run.cost)).toBe('not measured');
+  });
+
+  it('`0 of 4` — the denominator the operator sees today, pinned', async () => {
+    const h = usageHarness({ turns: SILENT_TURNS });
+    const { run } = await runUsage(h);
+
+    const agg = aggregateOf(run);
+    expect(agg.measuredCostSamples).toBe(0);
+    expect(agg.costUsd).toBeNull();
+    expect(agg.n).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC7 — CASCADE IS UNTOUCHED. Arms B and C keep `cost: null` until 053 lands.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 070 — CONTROL: a cascade run is not priced through the realtime path', () => {
+  it('a cascade transport reporting a realtime envelope still measures nothing', async () => {
+    // `costPerMinUsd: 0` is what `browserDeps` wires for the real cascade
+    // transport, and 053's per-stage metering (MT tokens, ElevenLabs
+    // characters) is not this ticket. A cascade run that came back priced would
+    // mean this ticket had quietly half-priced Arm B or Arm C through a meter
+    // that does not describe them — and `openai-tts` structurally cannot report
+    // usage at all, so Arm B's total staying null is the FINDING, not a gap.
+    const h = usageHarness({ turns: PRIMARY_TURNS, kind: 'cascade' });
+    const { run } = await runUsage(h, CASCADE_CONFIG);
+
+    expect(run.status).toBe('complete');
+    expect(run.architecture).toBe('cascade');
+    expect(utterancesOf(run).map((u) => u.cost)).toEqual([null, null, null, null]);
+    expect(run.cost).toBeNull();
+    // Named explicitly: this is the figure the realtime path would have produced.
+    expect(run.cost).not.toBeCloseTo(PRIMARY_TOTAL_USD, 6);
+    expect(aggregateOf(run).measuredCostSamples).toBe(0);
+  });
+
+  it("the blended path is untouched for a transport that DOES declare a rate", async () => {
+    // 053's `costPerMinUsd` is left in place and left unconfigured (this
+    // ticket's own out-of-scope note). A fixture that declares 60 USD/min must
+    // still split by manifest span exactly as ticket 031 pinned it.
+    const h = usageHarness({
+      turns: [{}, {}, {}, {}],
+      kind: 'cascade',
+      costPerMinUsd: CORPUS_COST_PER_MIN,
+    });
+    const { run } = await runUsage(h, CASCADE_CONFIG);
+
+    const splits = utterancesOf(run).map((u) => u.cost);
+    [0.1, 0.1, 0.1, 0.7].forEach((usd, i) => expect(splits[i]).toBeCloseTo(usd, 10));
+    expect(run.cost).toBeCloseTo(1, 10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC6 — the 059 stamp survives, on a priced run and on an unpriced one.
+// AC8 — `isAggregatableRun` stays the ONE gate; `n` does not move with a price.
+// ---------------------------------------------------------------------------
+
+describe('TICKET 070 — the price-source stamp is unchanged by any of this (ticket 059)', () => {
+  it('a run that PRICED is stamped, and its figures read back through the stamp', async () => {
+    const h = usageHarness({ turns: PRIMARY_TURNS });
+    const { run } = await runUsage(h);
+
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+    expect((h.posted[0] as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+    // The stamp is what lets a stored figure re-enter the model as a
+    // MEASUREMENT — the mechanism `runSamples` uses on every record.
+    for (const u of utterancesOf(run)) {
+      expect(costFromPriceSource(run.pricingVersion, u.cost).measured).toBe(true);
+    }
+  });
+
+  it('a run that priced NOTHING is stamped just the same — the source, not the figure', async () => {
+    const h = usageHarness({ turns: [{}, {}, {}, {}] });
+    const { run } = await runUsage(h);
+
+    expect(run.cost).toBeNull();
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+  });
+
+  it('a FAILED realtime run carrying usage is stamped too', async () => {
+    const h = makeHarness({
+      recording: CORPUS_RECORDING,
+      transportFactory: () =>
+        new FixtureTransport({
+          armId: 'fx',
+          kind: 'realtime',
+          costPerMinUsd: 0,
+          script: [
+            ...usageScript([{ usage: USAGE_PLAIN }]),
+            { at: 300, type: 'error', message: 'realtime 503', opaque: true },
+          ],
+        }),
+    });
+    const { run } = await runUsage(h);
+
+    expect(run.status).toBe('failed');
+    expect((run as StampedRun).pricingVersion).toBe(PRICING_VERSION);
+  });
+});
+
+describe('TICKET 070 — `isAggregatableRun` stays the ONE gate; a price never moves `n`', () => {
+  it('priced, half-priced and unpriced runs all aggregate to the SAME `n`', async () => {
+    const priced = usageHarness({ turns: PRIMARY_TURNS });
+    const half = usageHarness({
+      turns: [{ usage: USAGE_PLAIN }, {}, {}, { usage: USAGE_TEXT_ONLY }],
+    });
+    const none = usageHarness({ turns: [{}, {}, {}, {}] });
+
+    const runs = [
+      (await runUsage(priced)).run,
+      (await runUsage(half)).run,
+      (await runUsage(none)).run,
+    ];
+
+    // ONE GATE. Every one of these three is aggregatable on the clauses that
+    // already exist — arm, origin, status, languages, realness — and NOT on
+    // whether anybody could price it. An unpriced run is not an unrun run.
+    const aggregates = runs.map((run) => aggregateOf(run));
+    expect(aggregates.map((a) => a.n)).toEqual([4, 4, 4]);
+    // Only the MONEY moves.
+    expect(aggregates.map((a) => a.measuredCostSamples)).toEqual([4, 2, 0]);
+    expect(aggregates[2]!.costUsd).toBeNull();
+    expect(aggregates[1]!.costUsd).toBeCloseTo(USD_PLAIN + USD_TEXT_ONLY, 12);
+  });
+});
