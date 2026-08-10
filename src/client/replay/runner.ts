@@ -283,11 +283,25 @@ export const SEGMENTATION_SETTLE_MS = 250;
  * segmentation, and a FAILED run is not a neutral outcome — it is excluded from
  * every aggregate, so the flake silently shrinks n.
  *
- * 12 s is 48x the settle window and ~3x the worst tail measured, while staying
- * BELOW RUN_COMPLETION_TIMEOUT_MS (30 s) with room to spare — the ordering that
- * matters, since a manifest-backed run must fail with its own NAMED
- * segmentation reason rather than the blunter completion timeout — and 10x
- * shorter than the batch runner's 120 s per-run patience (browserDeps
+ * 12 s WAS ALSO TOO SHORT, and the second measurement says why. On EN Take 2
+ * (24.1 s) Arm A and Arm B complete all four utterances while ARM C fails every
+ * time at `observed 2`, its last transcript stranded on utterance 2. B and C
+ * differ in the TTS STAGE ALONE — same STT, same MT, same audio, same
+ * endpointing — so segmentation is not the problem and neither is the
+ * recording: ElevenLabs simply does not finish the tail utterances inside the
+ * window. Arm C passed on EN Take 1 (20.7 s) and fails on the 24.1 s take,
+ * which is the lag growing with clip length exactly as this comment describes.
+ * The corpus's ES takes run 38-47 s, so without more headroom Arm C would
+ * produce NOTHING on four of six recordings and Experiment 2 would lose its
+ * second column for most of the study.
+ *
+ * 20 s is 80x the settle window. It is informed rather than measured — Arm C
+ * loses two utterances, each needing a full STT -> MT -> TTS chain of roughly
+ * 5 s — and if it is still short the failure is unchanged and says so. It stays
+ * BELOW RUN_COMPLETION_TIMEOUT_MS (30 s), the ordering that matters, since a
+ * manifest-backed run must fail with its own NAMED segmentation reason rather
+ * than the blunter completion timeout; and even on a 47 s ES take, 47 + 20 sits
+ * far under the batch runner's 120 s per-run patience (browserDeps
  * RUN_TIMEOUT_MS), so a genuinely merged clip is still named long before the
  * sweep's blunt abort fires. The cost of the larger window is paid ONLY by runs
  * that are going to fail anyway.
@@ -295,7 +309,7 @@ export const SEGMENTATION_SETTLE_MS = 250;
  * It applies ONLY when the Recording carries a manifest; a manifest-less run's
  * termination is byte-for-byte unchanged, hang included.
  */
-export const SEGMENTATION_IDLE_MS = 12_000;
+export const SEGMENTATION_IDLE_MS = 20_000;
 
 /**
  * TICKET 046 ROUND 3 (R3-1) — how long a run waits for the transport's audio

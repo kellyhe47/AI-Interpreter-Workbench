@@ -2449,7 +2449,11 @@ function alignHarness(script: FixtureScriptEvent[]) {
 /** Well past pacing (20.94 s) AND past the idle deadline armed at its end. */
 async function runAlign(h: Harness) {
   const done = start(h);
-  await vi.advanceTimersByTimeAsync(40_000);
+  // Past SEGMENTATION_IDLE_MS *and* RUN_COMPLETION_TIMEOUT_MS, derived rather
+  // than a magic 40_000: raising the idle window to 20 s pushed a run that
+  // fails on it past the old constant, and the test hung rather than failing
+  // an assertion.
+  await vi.advanceTimersByTimeAsync(SEGMENTATION_IDLE_MS + RUN_COMPLETION_TIMEOUT_MS + 10_000);
   return done;
 }
 
