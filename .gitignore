@@ -30,3 +30,7 @@ benchmark-results/*.json
 # qa artifacts
 .qa/screens/
 node_modules
+
+# Operational backups pulled from a deployed instance (ticket 072) — large WAVs,
+# and never the source of truth. data/ is.
+backups/
