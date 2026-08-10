@@ -83,6 +83,25 @@ class ChoppedMt implements MtProvider {
   }
 }
 
+/**
+ * TICKET 053 — an MT whose VENDOR reported a token count, like the real one now
+ * does. `reports === undefined` models a vendor that said nothing.
+ */
+class MeteredMt implements MtProvider {
+  readonly name = 'openai';
+  readonly streaming = true;
+  constructor(
+    private readonly text: string,
+    private readonly reports: { inputTokens: number; outputTokens: number } | undefined,
+  ) {}
+
+  async *translate(_text: string, opts?: ProviderCallOpts): AsyncGenerator<string, void, void> {
+    yield this.text;
+    // After the content, exactly as the usage frame arrives on the wire.
+    if (this.reports !== undefined) opts?.onUsage?.(this.reports);
+  }
+}
+
 function providersFor(text: string, deltas: number): CascadeProviders {
   return {
     stt: new OneTurnStt(),
@@ -245,5 +264,101 @@ describe('R2-6 · the TTS bill follows what was SYNTHESIZED, not how MT chopped 
       deltas: 40,
     });
     expect(usdOf(cost!.perStage.tts!)).toBeLessThan(40 * FLOOR_USD);
+  });
+});
+
+/* ================================================================= 053 ===== */
+
+/**
+ * TICKET 053 — THE MT STAGE METERS, AND WHAT THAT DOES TO EACH ARM.
+ *
+ * The interesting result is not that a number appeared. It is that the same
+ * change completes ARM C's total and cannot complete ARM B's: `eleven_flash_v2_5`
+ * bills per CHARACTER (derivable from the text) while `gpt-4o-mini-tts` bills
+ * audio-out TOKENS and returns raw PCM with no usage anywhere in the response.
+ * Two cascade arms, identical but for one stage, and only one of them can ever
+ * state what it cost — a provider-observability finding, pinned here so nobody
+ * later "fixes" Arm B by inventing a number.
+ */
+async function runMeteredTurn(opts: {
+  models: { stt: string; mt: string; tts: string };
+  usage?: { inputTokens: number; outputTokens: number };
+  text?: string;
+}): Promise<TurnResult> {
+  const text = opts.text ?? 'hola mundo';
+  let cost: TurnResult['cost'];
+  const runOpts: CostOptions = {
+    models: opts.models,
+    onCost: (_utt, c) => {
+      cost = c;
+    },
+  };
+  const events: CascadeEvent[] = [];
+  for await (const e of runCascade(
+    audioOf(3, 24_000),
+    { stt: new OneTurnStt(), mt: new MeteredMt(text, opts.usage), tts: new FixtureTts({ samplesPerChar: 2 }) },
+    runOpts as RunCascadeOptions,
+  )) {
+    events.push(e);
+  }
+  const complete = events.find((e) => e.type === 'utterance.complete');
+  if (complete === undefined || complete.type !== 'utterance.complete') {
+    throw new Error('no utterance.complete event');
+  }
+  return { costUnits: complete.record.costUnits, cost };
+}
+
+describe('TICKET 053 · the MT stage prices from reported usage', () => {
+  it('a reported turn prices MT at the CARD rate for the reported tokens', () => {
+    // Hand-derived from RATE_CARD['gpt-4o-mini']: 1000 in, 500 out.
+    const rate = RATE_CARD['gpt-4o-mini'] as { inputPerMillionUsd: number; outputPerMillionUsd: number };
+    const expected = (1000 / 1e6) * rate.inputPerMillionUsd + (500 / 1e6) * rate.outputPerMillionUsd;
+    return runMeteredTurn({
+      models: ARM_B_TRIPLE,
+      usage: { inputTokens: 1000, outputTokens: 500 },
+    }).then(({ cost }) => {
+      expect(usdOf(cost!.perStage.mt!)).toBeCloseTo(expected, 12);
+    });
+  });
+
+  it('SILENCE IS NOT ZERO: a turn whose vendor reported nothing leaves MT unmeasured', async () => {
+    const { cost } = await runMeteredTurn({ models: ARM_B_TRIPLE, usage: undefined });
+    expect(cost!.perStage.mt!.measured).toBe(false);
+    expect(cost!.perStage.mt!.usd).toBeNull();
+  });
+
+  it('ARM C is now fully priced end to end — every stage measured, so is the total', async () => {
+    const { cost, costUnits } = await runMeteredTurn({
+      models: ARM_C_TRIPLE,
+      usage: { inputTokens: 1000, outputTokens: 500 },
+    });
+    expect(cost!.perStage.stt!.measured).toBe(true);
+    expect(cost!.perStage.mt!.measured).toBe(true);
+    expect(cost!.perStage.tts!.measured).toBe(true);
+    expect(cost!.total.measured).toBe(true);
+    // ...and it reaches the RECORD, which is what an aggregate reads.
+    expect(costUnits).not.toBeNull();
+    // The total is the sum of its stages and nothing else.
+    const sum =
+      usdOf(cost!.perStage.stt!) + usdOf(cost!.perStage.mt!) + usdOf(cost!.perStage.tts!);
+    expect(usdOf(cost!.total)).toBeCloseTo(sum, 12);
+  });
+
+  it('ARM B STILL CANNOT: its TTS bills audio-out tokens nothing reports', async () => {
+    const { cost, costUnits } = await runMeteredTurn({
+      models: ARM_B_TRIPLE,
+      usage: { inputTokens: 1000, outputTokens: 500 },
+    });
+    // Two of three stages now metered...
+    expect(cost!.perStage.stt!.measured).toBe(true);
+    expect(cost!.perStage.mt!.measured).toBe(true);
+    // ...and the third is the hole that keeps the total honest.
+    expect(cost!.perStage.tts!.measured).toBe(false);
+    expect(cost!.total.measured).toBe(false);
+    expect(cost!.total.usd).toBeNull();
+    expect(costUnits).toBeNull();
+    // NOT a partial sum wearing a total's clothes: summing stt+mt would report
+    // Arm B as cheaper than it was and hand Experiment 2 a rigged comparison.
+    expect(cost!.total.usd).not.toBe(usdOf(cost!.perStage.stt!) + usdOf(cost!.perStage.mt!));
   });
 });

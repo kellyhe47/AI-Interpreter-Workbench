@@ -7,6 +7,17 @@
 export interface ProviderCallOpts {
   signal?: AbortSignal;
   /**
+   * TICKET 053 — where a provider hands back the usage ITS VENDOR REPORTED,
+   * when the vendor reports any. Never an estimate: a provider that is told
+   * nothing calls this never, and the stage prices as `no-usage-reported`
+   * rather than as a stage that cost nothing.
+   *
+   * It is a CALLBACK rather than a return value because `translate` yields a
+   * token stream — the usage frame arrives after the last content delta, so
+   * there is no return slot left to put it in.
+   */
+  onUsage?: (usage: { inputTokens: number; outputTokens: number }) => void;
+  /**
    * TICKET 062 — the human-readable language THIS CALL must produce ('Spanish').
    * A per-CALL fact, not a construction one: the registry builds every MT
    * adapter from `{ model }` alone, so an adapter that could only read its

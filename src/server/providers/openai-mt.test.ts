@@ -218,3 +218,67 @@ describe('TICKET 062 — translate() honours the session target language', () =>
     expect(system).not.toContain('German');
   });
 });
+
+// ---------------------------------------------------------------------------
+// TICKET 053 — THE MT METER. The tokens were always on the wire; nobody asked
+// for them, and the parser threw the frame away as noise ("frames with empty
+// `choices` (usage frames)" — skipped silently, per the header above). That one
+// omission is why every cascade run in the study reads `cost: not measured`.
+// ---------------------------------------------------------------------------
+describe('TICKET 053 — MT reports the vendor’s own token usage', () => {
+  it('ASKS for the meter: the request body carries stream_options.include_usage', async () => {
+    const { fetchImpl, calls } = okSseFetch();
+    const mt = new OpenAiMt({ apiKey: 'k' }, { fetchImpl });
+    await collect(mt.translate('hello world'));
+
+    const body = JSON.parse(String(calls[0]!.init!.body)) as {
+      stream: boolean;
+      stream_options?: { include_usage?: boolean };
+    };
+    // Without this OpenAI sends no usage frame at all, and the stage is
+    // unmeasurable no matter how the parser is written.
+    expect(body.stream).toBe(true);
+    expect(body.stream_options).toEqual({ include_usage: true });
+  });
+
+  it('reports the vendor’s numbers VERBATIM, and only after the content', async () => {
+    const { fetchImpl } = okSseFetch();
+    const mt = new OpenAiMt({ apiKey: 'k' }, { fetchImpl });
+    const seen: Array<{ inputTokens: number; outputTokens: number }> = [];
+    const text = await collect(
+      mt.translate('hello world', { onUsage: (u) => seen.push(u) }),
+    );
+
+    // The fixture's usage frame says 9/3 — not a count this adapter derived
+    // from 'hola mundo', which is the whole point of a metered figure.
+    expect(seen).toEqual([{ inputTokens: 9, outputTokens: 3 }]);
+    expect(text.join('')).toBe('hola mundo');
+  });
+
+  it('SILENCE STAYS SILENCE: a stream with no usage frame reports nothing', async () => {
+    // The stage must price as `no-usage-reported`, never as a free translation.
+    // An adapter that invented 0/0 here would put $0.00 in the ledger — the
+    // exact fabrication `priceStage` exists to prevent.
+    const withoutUsage = SSE_PAYLOADS.filter((p) => !p.includes('usage'));
+    const { fetchImpl } = okSseFetch(withoutUsage);
+    const mt = new OpenAiMt({ apiKey: 'k' }, { fetchImpl });
+    let called = 0;
+    await collect(mt.translate('hello world', { onUsage: () => (called += 1) }));
+
+    expect(called).toBe(0);
+  });
+
+  it('a MALFORMED usage frame is silence too, not a zero', async () => {
+    const bad = [
+      delta('hola'),
+      JSON.stringify({ choices: [], usage: { prompt_tokens: 'nine' } }),
+      '[DONE]',
+    ];
+    const { fetchImpl } = okSseFetch(bad);
+    const mt = new OpenAiMt({ apiKey: 'k' }, { fetchImpl });
+    let called = 0;
+    await collect(mt.translate('hello', { onUsage: () => (called += 1) }));
+
+    expect(called).toBe(0);
+  });
+});

@@ -89,8 +89,12 @@ export const COVERAGE_CITATIONS: readonly CoverageCitation[] = [
     commit: null,
     addedLines: null,
     note:
-      'No mechanism exists at any price. The speech-to-speech model answers a ' +
-      'Cantonese request in Mandarin and no parameter changes that, so nothing ' +
-      'was built and there is nothing to cite.',
+      'Nothing had to be built: the operator ran the pair on Realtime and heard ' +
+      'Cantonese, in both directions. The claim this card used to make — no ' +
+      'mechanism at any price — described the output-language list of a ' +
+      'different model, `gpt-realtime-translate`, which does not govern the ' +
+      '`gpt-realtime` this project runs; and it rested on runs made before any ' +
+      'target language reached the wire at all. Reached by observation, and ' +
+      'never by a scored sweep.',
   },
 ];

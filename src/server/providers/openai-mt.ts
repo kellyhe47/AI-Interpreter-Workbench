@@ -86,6 +86,11 @@ export class OpenAiMt implements MtProvider {
       body: JSON.stringify({
         model: this.config.model ?? 'gpt-4o-mini',
         stream: true,
+        // TICKET 053 — ASK FOR THE METER. Without this the stream carries no
+        // usage frame at all, which is why the MT stage priced as
+        // `no-usage-reported` and every cascade total read `not measured`. The
+        // tokens were always there; nobody requested them.
+        stream_options: { include_usage: true },
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: text },
@@ -116,11 +121,25 @@ export class OpenAiMt implements MtProvider {
           if (!line.startsWith('data:')) continue;
           const payload = line.slice('data:'.length).trim();
           if (payload === '[DONE]') break outer;
-          let parsed: { choices?: Array<{ delta?: { content?: unknown } }> };
+          let parsed: {
+            choices?: Array<{ delta?: { content?: unknown } }>;
+            usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
+          };
           try {
             parsed = JSON.parse(payload) as typeof parsed;
           } catch {
             continue; // tolerate malformed frames
+          }
+          // The usage frame rides the SAME stream, after the content deltas,
+          // and carries an empty `choices`. Reported straight through: this
+          // adapter never derives a token count from the text it saw.
+          const usage = parsed.usage;
+          if (usage !== undefined && usage !== null) {
+            const inputTokens = usage.prompt_tokens;
+            const outputTokens = usage.completion_tokens;
+            if (typeof inputTokens === 'number' && typeof outputTokens === 'number') {
+              opts?.onUsage?.({ inputTokens, outputTokens });
+            }
           }
           const content = parsed.choices?.[0]?.delta?.content;
           if (typeof content === 'string' && content.length > 0) yield content;

@@ -232,6 +232,7 @@ function cascadeCost(
   models: ProviderTriple | undefined,
   sttSamples: number,
   ttsDeltas: readonly string[],
+  mtUsage: { inputTokens: number; outputTokens: number } | undefined,
 ): CascadeCost {
   // NO MODEL IDS, NO PRICES. `provider.name` is a VENDOR name and prices
   // nothing, so an un-forwarded triple must reach `priceCascade` as three
@@ -265,10 +266,27 @@ function cascadeCost(
         }
       : undefined;
 
-  // MT carries no usage today (`MtProvider.translate` yields text and reports
-  // none), so the TOTAL is `stage-unmeasured` while the stages that DID meter
-  // still report through `onCost`.
-  return priceCascade({ stt, mt: undefined, tts });
+  // TICKET 053 — MT NOW METERS, from the vendor's own usage frame (see
+  // `onUsage`). Absent usage stays absent: a turn whose provider reported
+  // nothing prices as `no-usage-reported`, never as a free translation.
+  //
+  // This completes ARM C's total — stt (per-minute) + mt (token) + tts
+  // (per-character) are now all metered. ARM B's stays holed regardless,
+  // because `gpt-4o-mini-tts` bills audio-out TOKENS and returns raw PCM with
+  // no usage anywhere in the response; tokens are not derivable from a sample
+  // count. That asymmetry is a finding about provider observability, not a gap
+  // to paper over with an invented number.
+  const mt: StageUsage | undefined =
+    mtUsage === undefined
+      ? undefined
+      : {
+          model: models.mt,
+          shape: 'token',
+          inputTokens: mtUsage.inputTokens,
+          outputTokens: mtUsage.outputTokens,
+        };
+
+  return priceCascade({ stt, mt, tts });
 }
 
 /**
@@ -394,8 +412,15 @@ export async function* runCascade(
       // it. Spread rather than assigned: a session that named none must leave
       // the key ABSENT, so the adapter's own default applies visibly instead of
       // the pipeline inventing 'Spanish' for a run nobody told anything.
+      // TICKET 053 — the vendor's OWN token count for this turn, or nothing.
+      // Declared per turn so one utterance's meter can never be attributed to
+      // the next, the shape of the bug ticket 068 caught in the audio path.
+      let mtUsage: { inputTokens: number; outputTokens: number } | undefined;
       const mtStream = providers.mt.translate(finalText, {
         signal: uttAc.signal,
+        onUsage: (u) => {
+          mtUsage = u;
+        },
         ...(opts?.session?.targetLanguage === undefined
           ? {}
           : { targetLanguage: opts.session.targetLanguage }),
@@ -472,7 +497,7 @@ export async function* runCascade(
       }
 
       opts?.onTimings?.(utt, timings);
-      const cost = cascadeCost(opts?.models, sttSamples, targetPartials);
+      const cost = cascadeCost(opts?.models, sttSamples, targetPartials, mtUsage);
       opts?.onCost?.(utt, cost);
       const session = opts?.session;
       const record: UtteranceRecord = {
