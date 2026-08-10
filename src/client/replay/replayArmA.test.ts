@@ -433,6 +433,12 @@ function makeArmAHarness(opts: ArmAHarnessOptions = {}) {
     createTransport,
     now: () => Date.now(),
     newId: () => 'run-arm-a',
+    // The trailing pad (see runner.ts TRAILING_PAD_MS) is paced in REAL time,
+    // so leaving production's 1.5 s on for every case in this file would add
+    // minutes of sleep to the suite. It is switched OFF here and asserted
+    // explicitly, with the seam omitted, in the pad's own describe block —
+    // where the DEFAULT is what is under test rather than ambient.
+    trailingPadMs: 0,
   };
 
   return {

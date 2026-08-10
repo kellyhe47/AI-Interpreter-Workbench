@@ -214,12 +214,19 @@ import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag, type ArmTag, type
 import type { CorpusUtterance } from '../../core/corpus';
 import { PRICING_VERSION, priceRealtimeUsage } from '../../core/pricing';
 import { readWav, writeWav } from '../../harness/wav';
-import { SAMPLE_RATE } from '../../core/protocol';
+import { ENDPOINTING_MS, SAMPLE_RATE } from '../../core/protocol';
 import { CLOCK_INVERSION } from '../../core/timing';
 import type { InterpreterTransport, TransportConfig } from '../transport/types';
 import type { Recording, Run, RunUtterance } from '../state/ledger';
 import { ApiError } from './recordingsClient';
-import { createPacer, leadingSilenceFrames, type Pacer, type PacerDeps } from './pacer';
+import {
+  FRAME_MS,
+  FRAME_SAMPLES,
+  createPacer,
+  leadingSilenceFrames,
+  type Pacer,
+  type PacerDeps,
+} from './pacer';
 import type { RecordingsClient, RunsClient } from './recordingsClient';
 
 /**
@@ -380,6 +387,38 @@ export const RUN_POST_TIMED_OUT = 'run record post failed: no response within';
 export const MAX_CLIP_MS = 45_000;
 
 /**
+ * THE CLIP ENDS BEFORE THE TURN DOES — trailing silence appended at replay.
+ *
+ * A provider's VAD closes a turn only after it OBSERVES `ENDPOINTING_MS` of
+ * silence. A recording carries whatever silence the operator left before they
+ * hit stop, and on 2026-08-10 that was 21–640 ms across five of six corpus
+ * takes. So the stream ended before the last turn could endpoint: the final
+ * utterance never produced a turn-final, and every run failed
+ * `segmentation: expected 4 utterances, observed 3` — on all three arms at
+ * once, because all three read the same `ENDPOINTING_MS`.
+ *
+ * NOTHING RECONCILED THE TWO ENDS BEFORE THIS. The manifest is built by the
+ * local segmenter, which ends the last utterance at end-of-clip and needs no
+ * trailing silence at all, so a take with none is ACCEPTED at record time and
+ * can only fail later, in Replay, against a gate it was never measured by.
+ * That is a defect in the runner, not in the recording: at 500 ms it merely
+ * had a narrower blast radius (a 640 ms tail cleared it by 140 ms).
+ *
+ * IT IS PURE ADDITION, WHICH IS WHY IT IS MEASUREMENT-NEUTRAL. The pad goes
+ * AFTER the last real frame, so frame k of the clip is still due at
+ * `t0 + k * FRAME_MS`, `t0` does not move, and every manifest anchor
+ * (`t0 + trueSpeechEndMs`) means exactly what it meant before. Contrast the
+ * leading trim above, which had to withhold TRANSMISSION precisely because
+ * moving the clip would have moved every anchor with it.
+ *
+ * The margin over `ENDPOINTING_MS` is deliberate: the VAD's silence window has
+ * to fit INSIDE the pad with room for jitter and the last frame's own duration,
+ * and the two errors are not symmetric — an over-long pad costs half a second
+ * of wall clock per run, while a pad one frame short costs the whole run.
+ */
+export const TRAILING_PAD_MS = ENDPOINTING_MS + 500;
+
+/**
  * TICKET 046 ROUND 3 (R3-7) — the prefix of the line a run carries when the
  * capture path SAW a track and admitted none of it.
  *
@@ -448,6 +487,18 @@ export interface RunnerDeps {
    * ticket. See TRIM TRANSMISSION, NOT TIME in the header.
    */
   trimLeadingSilence?: boolean;
+  /**
+   * Milliseconds of digital silence appended AFTER the clip and paced at 1x
+   * like every other frame. Omitted means `TRAILING_PAD_MS` — production never
+   * sets it. `0` is the disable control, reproducing exactly what every run did
+   * before this change. See THE CLIP ENDS BEFORE THE TURN DOES in the header.
+   *
+   * It is a DURATION rather than a boolean because the pad is paced in real
+   * time: a suite that ran production's 1.5 s for every one of its ~100 runner
+   * cases would spend two and a half minutes asleep. Tests shrink it; two cases
+   * (`TRAILING_PAD_MS` and the omitted-seam default) pin what production sends.
+   */
+  trailingPadMs?: number;
 }
 
 export interface RunOnceOptions {
@@ -1259,11 +1310,26 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   /** Index of the frame the pacer is delivering, in the ORIGINAL clip. */
   let frameIndex = 0;
 
+  // ...AND THE MIRROR IMAGE AT THE OTHER END (see TRAILING_PAD_MS). The clip is
+  // handed to the pacer with silence APPENDED, so the provider's VAD gets the
+  // full silence window it needs to close the last turn. Appending is safe in
+  // exactly the way prepending would not be: every real frame keeps its due
+  // time, so no anchor moves.
+  const padFrames = Math.ceil((deps.trailingPadMs ?? TRAILING_PAD_MS) / FRAME_MS);
+  const paced =
+    padFrames === 0
+      ? samples
+      : (() => {
+          const withPad = new Int16Array(samples.length + padFrames * FRAME_SAMPLES);
+          withPad.set(samples, 0); // the tail is left as zeros: digital silence
+          return withPad;
+        })();
+
   // The clock anchor: epoch ms of frame 0. Every timing the run reports is
   // meaningful only relative to this.
   const t0 = deps.now();
   pacer = createPacer({
-    samples,
+    samples: paced,
     onFrame: (frame) => {
       const index = frameIndex;
       frameIndex += 1;

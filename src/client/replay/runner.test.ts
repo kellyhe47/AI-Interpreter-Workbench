@@ -14,7 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag } from '../../core/arms';
 import type { CorpusUtterance } from '../../core/corpus';
-import { SAMPLE_RATE } from '../../core/protocol';
+import { ENDPOINTING_MS, SAMPLE_RATE } from '../../core/protocol';
 import { writeWav } from '../../harness/wav';
 import {
   isAggregatableRun,
@@ -40,6 +40,7 @@ import {
   RUN_COMPLETION_TIMEOUT_MS,
   SEGMENTATION_IDLE_MS,
   SEGMENTATION_SETTLE_MS,
+  TRAILING_PAD_MS,
   abandonedRunStub,
   runOnce,
   type RunOnceConfig,
@@ -184,6 +185,12 @@ function makeHarness(opts: HarnessOptions = {}) {
     createTransport,
     now: () => Date.now(),
     newId: () => 'run-1',
+    // The trailing pad (see runner.ts TRAILING_PAD_MS) is paced in REAL time,
+    // so leaving production's 1.5 s on for every case in this file would add
+    // minutes of sleep to the suite. It is switched OFF here and asserted
+    // explicitly, with the seam omitted, in the pad's own describe block —
+    // where the DEFAULT is what is under test rather than ambient.
+    trailingPadMs: 0,
   };
 
   return {
@@ -3694,5 +3701,132 @@ describe('TICKET 070 — `isAggregatableRun` stays the ONE gate; a price never m
     expect(aggregates.map((a) => a.measuredCostSamples)).toEqual([4, 2, 0]);
     expect(aggregates[2]!.costUsd).toBeNull();
     expect(aggregates[1]!.costUsd).toBeCloseTo(USD_PLAIN + USD_TEXT_ONLY, 12);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// THE TRAILING PAD — the clip must not end before the last turn can endpoint.
+//
+// WHAT BROKE, IN PRODUCTION, ON 2026-08-10: five of six corpus takes carried
+// 21–640 ms of silence after the last word, because the operator hit stop when
+// they stopped talking. A provider's VAD closes a turn only after it OBSERVES
+// ENDPOINTING_MS of silence, so the final turn never endpointed and all 26 runs
+// failed `segmentation: expected 4 utterances, observed 3` — on Arm A, B and C
+// alike. The manifest said 4 because the LOCAL segmenter ends the last
+// utterance at end-of-clip and needs no trailing silence at all.
+//
+// WHAT THESE TESTS CAN AND CANNOT PIN. FixtureTransport is scripted: it emits
+// the completions it was given and models no VAD, so no unit test here can
+// reproduce "observed 3". What is pinned instead is what the provider is
+// HANDED — the same reasoning ticket 069's AC10 states for the leading trim —
+// plus the property that makes the pad safe: it moves NOTHING.
+// ---------------------------------------------------------------------------
+
+/** 50 frames (1000 ms) of unambiguous speech: no leading silence to trim. */
+const PAD_CLIP_FRAMES = TRIM_TOTAL_FRAMES;
+/** What production appends, in frames. Derived here, never a second literal. */
+const PAD_FRAMES = Math.ceil(TRAILING_PAD_MS / FRAME_MS);
+
+/**
+ * The corpus harness on production's OWN default: the seam is DELETED rather
+ * than set, so these cases exercise the path a real run takes. (makeHarness
+ * switches the pad off for every other case in this file, which is why it has
+ * to be removed here rather than merely left alone.)
+ */
+function padHarness(opts: { trailingPadMs?: number } = {}): Harness {
+  const h = trimHarness({ samples: loud(PAD_CLIP_FRAMES * FRAME_SAMPLES) });
+  const deps = h.deps as RunnerDeps & { trailingPadMs?: number };
+  if (opts.trailingPadMs === undefined) delete deps.trailingPadMs;
+  else deps.trailingPadMs = opts.trailingPadMs;
+  return h;
+}
+
+/** Long enough for the clip AND the pad: 2 s of advance would truncate pacing. */
+async function runPadded(h: Harness) {
+  const done = start(h);
+  await vi.advanceTimersByTimeAsync(10_000);
+  return done;
+}
+
+describe('the trailing pad gives the VAD its window', () => {
+  it('is longer than the endpointing window it exists to satisfy', () => {
+    // The whole point: a pad <= ENDPOINTING_MS cannot close the last turn, and
+    // one exactly equal has no room for jitter or the final frame's duration.
+    expect(TRAILING_PAD_MS).toBeGreaterThan(ENDPOINTING_MS);
+    expect(TRAILING_PAD_MS).toBe(ENDPOINTING_MS + 500);
+  });
+
+  it('appends PAD_FRAMES of digital silence AFTER the clip, on the default path', async () => {
+    const h = padHarness();
+    await runPadded(h);
+
+    const received = h.transports[0]!.received;
+    expect(received).toHaveLength(PAD_CLIP_FRAMES + PAD_FRAMES);
+
+    // The clip's own frames are untouched and still first...
+    const clipFrames = received.slice(0, PAD_CLIP_FRAMES);
+    for (const frame of clipFrames) {
+      expect(Array.from(frame).every((sample) => sample === 0)).toBe(false);
+    }
+    // ...and every appended frame is a full frame of pure zeros. Both halves
+    // matter: a pad of noise would be something for the STT to transcribe, and
+    // a short pad would not close the turn.
+    const padded = received.slice(PAD_CLIP_FRAMES);
+    expect(padded).toHaveLength(PAD_FRAMES);
+    for (const frame of padded) {
+      expect(frame.length).toBe(FRAME_SAMPLES);
+      expect(Array.from(frame).every((sample) => sample === 0)).toBe(true);
+    }
+    // And it really is long enough to satisfy the window, stated in ms.
+    expect(padded.length * FRAME_MS).toBeGreaterThan(ENDPOINTING_MS);
+  });
+
+  it('is paced at 1x like every other frame — silence sent in a burst is not silence', async () => {
+    // A pad flushed at socket speed occupies no TIME, and time is the only
+    // thing a VAD is counting. This is the assertion that catches that fix.
+    const h = padHarness();
+    const { t0 } = await runPadded(h);
+
+    expect(h.sendTimes).toHaveLength(PAD_CLIP_FRAMES + PAD_FRAMES);
+    for (let k = 0; k < h.sendTimes.length; k += 1) {
+      expect(Math.abs(h.sendTimes[k]! - t0 - k * FRAME_MS)).toBeLessThanOrEqual(1);
+    }
+    expect(h.sendTimes.at(-1)! - t0).toBeGreaterThanOrEqual(
+      (PAD_CLIP_FRAMES + PAD_FRAMES - 1) * FRAME_MS - 1,
+    );
+  });
+
+  it('MOVES NOTHING: every anchor and transcript matches the same run with no pad', async () => {
+    // Pure addition after the last real frame — contrast the leading trim,
+    // which had to withhold transmission precisely because touching the clip's
+    // START would have dragged every manifest anchor with it.
+    const padded = padHarness();
+    const withPad = await runPadded(padded);
+
+    const control = padHarness({ trailingPadMs: 0 });
+    const noPad = await runPadded(control);
+
+    const anchorsWith = utterancesOf(withPad.run).map((u) => u.timings.speech_end!);
+    const anchorsWithout = utterancesOf(noPad.run).map((u) => u.timings.speech_end!);
+    expect(anchorsWith).toEqual([100, 200, 300, 400].map((ms) => withPad.t0 + ms));
+    expect(anchorsWith.map((t) => t - withPad.t0)).toEqual(
+      anchorsWithout.map((t) => t - noPad.t0),
+    );
+    expect(withPad.run.timings.speech_end! - withPad.t0).toBe(
+      noPad.run.timings.speech_end! - noPad.t0,
+    );
+    expect(withPad.run.status).toBe('complete');
+    expect(noPad.run.status).toBe('complete');
+    expect(utterancesOf(withPad.run).map((u) => u.transcripts.source)).toEqual(
+      utterancesOf(noPad.run).map((u) => u.transcripts.source),
+    );
+
+    // AND THE PAD ACTUALLY HAPPENED — without this the equalities above are
+    // satisfied by an implementation that appends nothing.
+    expect(padded.transports[0]!.received).toHaveLength(PAD_CLIP_FRAMES + PAD_FRAMES);
+    expect(control.transports[0]!.received).toHaveLength(PAD_CLIP_FRAMES);
+    // The audio the provider heard is byte-identical up to the clip's end.
+    expect(transmitted(control)).toEqual(transmitted(padded).slice(0, PAD_CLIP_FRAMES * FRAME_SAMPLES));
   });
 });

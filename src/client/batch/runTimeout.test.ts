@@ -565,6 +565,11 @@ function realHarness(opts: {
       },
       now: () => Date.now(),
       newId: () => `run-${++nextId}`,
+      // Production's trailing pad (runner.ts TRAILING_PAD_MS) is paced like any
+      // other frame, so it also consumes this file's VIRTUAL clock — a warmup
+      // that used to complete inside 1000 ms no longer would. Off here; the
+      // pad's own block asserts the default with the seam omitted.
+      trailingPadMs: 0,
     };
   };
 
