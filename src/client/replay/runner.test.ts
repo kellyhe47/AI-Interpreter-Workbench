@@ -33,12 +33,14 @@ import {
   type FixtureScriptEvent,
 } from '../transport/fixture';
 import type { TransportConfig, TransportKind } from '../transport/types';
-import { FRAME_MS, FRAME_SAMPLES } from './pacer';
+import { FRAME_MS, FRAME_SAMPLES, type PacerDeps } from './pacer';
 import { ApiError, type RecordingsClient, type RunsClient } from './recordingsClient';
 import {
   RUN_COMPLETION_TIMED_OUT,
   RUN_COMPLETION_TIMEOUT_MS,
   SEGMENTATION_IDLE_MS,
+  PACING_MEAN_LATENESS_MS,
+  PACING_NOT_REALTIME,
   SEGMENTATION_SETTLE_MS,
   TRAILING_PAD_MS,
   abandonedRunStub,
@@ -3833,5 +3835,101 @@ describe('the trailing pad gives the VAD its window', () => {
     expect(control.transports[0]!.received).toHaveLength(PAD_CLIP_FRAMES);
     // The audio the provider heard is byte-identical up to the clip's end.
     expect(transmitted(control)).toEqual(transmitted(padded).slice(0, PAD_CLIP_FRAMES * FRAME_SAMPLES));
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// PACING IS THE MEASUREMENT (see runner.ts PACING_NOT_REALTIME).
+//
+// On 2026-08-10 an entire sweep was collected from a HIDDEN Chrome tab. Chrome
+// clamps setTimeout to ~1/second there, and the pacer is built on setTimeout,
+// so the clip left in ~1 s bursts instead of a 20 ms cadence. Measured in that
+// very tab: setInterval(20 ms) -> effective interval 981 ms.
+//
+// Every run still completed. Transcripts were sane. Percentiles were computed
+// and reported off numbers that carried up to a second of flush jitter. The
+// invariant PRD §7 calls load-bearing was broken for hours and NOTHING in the
+// product said a word — which is the only reason this guard exists.
+//
+// `throttledPacerDeps` reproduces the browser's behaviour exactly: a floor on
+// every scheduled delay. It is the browser's rule, not a bug injected to suit
+// the assertion.
+// ---------------------------------------------------------------------------
+
+/** Chrome's background-tab clamp: no timer fires sooner than `floorMs`. */
+function throttledPacerDeps(floorMs: number): Partial<PacerDeps> {
+  return {
+    setTimeout: (fn: () => void, ms: number) =>
+      globalThis.setTimeout(fn, Math.max(floorMs, ms)),
+  };
+}
+
+function pacingHarness(opts: { pacerDeps?: Partial<PacerDeps> }): Harness {
+  const h = trimHarness({ samples: loud(TRIM_TOTAL_FRAMES * FRAME_SAMPLES) });
+  if (opts.pacerDeps) (h.deps as RunnerDeps).pacerDeps = opts.pacerDeps;
+  return h;
+}
+
+describe('a run that was not paced at 1x is not evidence', () => {
+  it('a THROTTLED tab fails the run, names the drift, and stores no utterances', async () => {
+    // 1000 ms floor == what Chrome actually does to a hidden tab.
+    const h = pacingHarness({ pacerDeps: throttledPacerDeps(1000) });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(120_000);
+    const { run } = await done;
+
+    expect(run.status).toBe('failed');
+    const line = run.errors.find((e) => e.startsWith(PACING_NOT_REALTIME));
+    expect(line).toBeDefined();
+    // The line has to carry the EVIDENCE, not just the verdict: an operator
+    // reading it should see how bad it was without re-running anything.
+    expect(line).toMatch(/frames arrived \d+ ms late on average across \d+ frames/);
+    expect(line).toMatch(/worst \d+ ms/);
+
+    // AND IT LEAVES THE LEDGER'S AGGREGATE. Same route a segmentation mismatch
+    // takes — the existing `status` gate, never a second predicate.
+    expect(run.utterances).toBeUndefined();
+    // Judged as a sweep row, the way every aggregate sees it.
+    expect(isAggregatableRun({ ...run, origin: 'sweep' })).toBe(false);
+  });
+
+  it('CONTROL: the same clip paced normally passes with no pacing line at all', async () => {
+    const h = pacingHarness({});
+    const { run } = await runCorpus(h);
+
+    expect(run.status).toBe('complete');
+    expect(run.errors.some((e) => e.startsWith(PACING_NOT_REALTIME))).toBe(false);
+    expect(run.utterances).toHaveLength(MANIFEST.length);
+    expect(isAggregatableRun({ ...run, origin: 'sweep' })).toBe(true);
+  });
+
+  it('a SINGLE stall is tolerated — one GC pause must not fail a sweep', async () => {
+    // A lone stall is normal on a busy machine and must not fail a sweep: that
+    // would be worse than the blind spot the guard replaces.
+    //
+    // THE TOLERANCE SCALES WITH CLIP LENGTH, which this 1-second fixture makes
+    // unusually harsh — a 300 ms stall here is 15% of the whole clip and still
+    // only ~48 ms of mean lateness. The same stall inside a real §9 take (20 s,
+    // ~1000 frames) is under 3 ms. Throttling does not scale away like that: it
+    // holds near half the clamp for the entire run however long the clip is.
+    let stalled = false;
+    const h = pacingHarness({
+      pacerDeps: {
+        setTimeout: (fn: () => void, ms: number) => {
+          if (!stalled) {
+            stalled = true;
+            return globalThis.setTimeout(fn, PACING_MEAN_LATENESS_MS + 50);
+          }
+          return globalThis.setTimeout(fn, ms);
+        },
+      },
+    });
+    const done = start(h);
+    await vi.advanceTimersByTimeAsync(120_000);
+    const { run } = await done;
+
+    expect(run.errors.some((e) => e.startsWith(PACING_NOT_REALTIME))).toBe(false);
+    expect(run.status).toBe('complete');
   });
 });

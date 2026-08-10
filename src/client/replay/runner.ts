@@ -445,6 +445,48 @@ export const MAX_CLIP_MS = 45_000;
 export const TRAILING_PAD_MS = ENDPOINTING_MS + 500;
 
 /**
+ * PACING IS THE MEASUREMENT, SO IT HAS TO BE CHECKED.
+ *
+ * PRD §7: "Replay is paced at 1x, in the same 20 ms framing as live capture.
+ * Dumping the clip as fast as the socket accepts would invalidate VAD,
+ * endpointing, and every latency figure." Every number this project reports
+ * depends on that invariant — and NOTHING verified it at runtime.
+ *
+ * It is breakable by the operator without any warning at all. Chrome clamps
+ * `setTimeout` to roughly ONCE PER SECOND in a hidden tab, and the pacer is
+ * built on `setTimeout`. Measured in production's own tab on 2026-08-10:
+ *
+ *   setInterval(20 ms) in a hidden tab -> effective interval 981 ms
+ *   (14 ticks where 686 were due)
+ *
+ * Because the pacer is wall-clock anchored it then emits every overdue frame
+ * at once, so the clip still leaves in about a clip-length of wall clock — the
+ * AVERAGE rate looks right — while the provider actually receives ~1 s bursts
+ * instead of a 20 ms cadence. Runs complete, transcripts look sane, and every
+ * latency carries up to a second of flush jitter. THAT is the dangerous shape:
+ * a corruption that presents as success. A whole sweep was collected this way
+ * before anyone thought to measure the timer.
+ *
+ * MEAN lateness is the metric, and the alternative is instructive: the SHARE of
+ * late frames cannot tell throttling from one GC pause. The pacer is wall-clock
+ * anchored, so a single 750 ms stall leaves every frame behind it overdue and
+ * emitted in one catch-up burst — ~30% of a short clip's frames "late" from one
+ * hiccup. Averaged over the clip that same stall is ~110 ms, while a throttled
+ * tab sits near half the clamp (~500 ms) for the WHOLE run. The mean separates
+ * a hiccup from a broken invariant; a count of late frames does not.
+ *
+ * So the runner now measures its own pacing and refuses to call the result
+ * evidence when it drifted. `status: 'failed'` rather than a diagnostic on a
+ * complete run — unlike CAPTURE_GATE_NEVER_OPENED below, bad pacing invalidates
+ * the very numbers the run exists to produce, so it must leave every aggregate
+ * through `isAggregatableRun`'s EXISTING clause.
+ */
+export const PACING_MEAN_LATENESS_MS = 250;
+
+/** The prefix of the line a run carries when its own pacing drifted. */
+export const PACING_NOT_REALTIME = 'replay pacing: clip not delivered at 1x';
+
+/**
  * TICKET 046 ROUND 3 (R3-7) — the prefix of the line a run carries when the
  * capture path SAW a track and admitted none of it.
  *
@@ -1354,11 +1396,21 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
   // The clock anchor: epoch ms of frame 0. Every timing the run reports is
   // meaningful only relative to this.
   const t0 = deps.now();
+  /** How far past due each frame reached the transport, summed. */
+  let totalLatenessMs = 0;
+  let worstLatenessMs = 0;
   pacer = createPacer({
     samples: paced,
     onFrame: (frame) => {
       const index = frameIndex;
       frameIndex += 1;
+      // THE PACING CHECK (see PACING_NOT_REALTIME). Frame k is DUE at
+      // `t0 + k * FRAME_MS`; how late it actually is measures the one invariant
+      // every reported number rests on. Counted for withheld frames too — the
+      // 069 trim changes what is transmitted, never when a frame came due.
+      const lateness = Math.max(0, deps.now() - (t0 + index * FRAME_MS));
+      totalLatenessMs += lateness;
+      if (lateness > worstLatenessMs) worstLatenessMs = lateness;
       // Withheld, not shifted: the frames after it keep their own due times.
       if (index < skippedFrames) return;
       transport.sendAudio(frame);
@@ -1539,6 +1591,21 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     errors.push(`segmentation: expected ${expected} utterances, observed ${segments}`);
   }
 
+  // THE PACING VERDICT (see PACING_NOT_REALTIME). A cancelled run is exempt for
+  // the same reason it is exempt from the segmentation gate: the operator ended
+  // it, the pipeline did not. The share is of frames the pacer actually
+  // delivered, so a run abandoned early is judged on what it managed to pace.
+  const pacedFrames = frameIndex;
+  const meanLatenessMs = pacedFrames === 0 ? 0 : totalLatenessMs / pacedFrames;
+  const drifted = !cancelled && meanLatenessMs > PACING_MEAN_LATENESS_MS;
+  if (drifted) {
+    errors.push(
+      `${PACING_NOT_REALTIME}: frames arrived ${Math.round(meanLatenessMs)} ms late on ` +
+        `average across ${pacedFrames} frames (worst ${Math.round(worstLatenessMs)} ms) — ` +
+        `every latency this run measured is suspect`,
+    );
+  }
+
   // TICKET 070 — PRICED OFF THE BUCKET, NOT OFF THE RECORDS. It sits here, above
   // `attributeUtterances`, because a MANIFEST-LESS (mic-shaped) run produces no
   // records at all and still has a total to report: a fix wired only into the
@@ -1548,7 +1615,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     usageModel === undefined ? undefined : priceReportedUsage(buckets.usage, usageModel);
 
   const utterances =
-    manifest === undefined || mismatched || cancelled
+    manifest === undefined || mismatched || drifted || cancelled
       ? undefined
       : attributeUtterances({
           manifest,
@@ -1625,7 +1692,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     armTag: deriveArmTag(config),
     // Only the batch runner (ticket 009) produces 'sweep'.
     origin: 'manual',
-    status: cancelled || failed || mismatched ? 'failed' : 'complete',
+    status: cancelled || failed || mismatched || drifted ? 'failed' : 'complete',
     timings,
     transcripts: {
       source: sourceTranscript,
