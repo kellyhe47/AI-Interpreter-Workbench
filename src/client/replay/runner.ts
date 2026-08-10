@@ -212,7 +212,7 @@
 
 import { DEFAULT_CASCADE_TRIPLE, REALTIME_MODEL, deriveArmTag, type ArmTag, type RunConfig } from '../../core/arms';
 import type { CorpusUtterance } from '../../core/corpus';
-import { PRICING_VERSION } from '../../core/pricing';
+import { PRICING_VERSION, priceRealtimeUsage } from '../../core/pricing';
 import { readWav, writeWav } from '../../harness/wav';
 import { SAMPLE_RATE } from '../../core/protocol';
 import { CLOCK_INVERSION } from '../../core/timing';
@@ -814,6 +814,18 @@ interface UtteranceBuckets {
   source: Map<number, string>;
   targetFinal: Map<number, string>;
   targetDelta: Map<number, string>;
+  /**
+   * TICKET 070 — the `response.done` usage envelope that turn reported, EXACTLY
+   * as the transport handed it over. A KEY PRESENT means the transport reported
+   * something (whether or not it can be priced); a key ABSENT means it said
+   * nothing about that turn, and the two are different facts all the way down to
+   * `cost: null` versus a blended fallback.
+   *
+   * Keyed by `utt` like every other bucket, and for the same reason: the
+   * transport is free to interleave, so a list would re-file utterance 2's spend
+   * onto utterance 0.
+   */
+  usage: Map<number, unknown>;
 }
 
 function emptyBuckets(): UtteranceBuckets {
@@ -823,7 +835,66 @@ function emptyBuckets(): UtteranceBuckets {
     source: new Map(),
     targetFinal: new Map(),
     targetDelta: new Map(),
+    usage: new Map(),
   };
+}
+
+/**
+ * TICKET 070 — WHAT THE REPORTED USAGE COMES TO, PER TURN AND IN TOTAL.
+ *
+ * Absent when the transport reported no envelope at all, which is what leaves
+ * 053's blended `costPerMinUsd` path exactly where it was.
+ */
+interface ReportedUsagePricing {
+  /** `utt` -> the priced figure, or `null` when the envelope was REFUSED. */
+  perUtterance: Map<number, number | null>;
+  /** Sum of the turns that priced. NULL when none did — never 0. */
+  totalUsd: number | null;
+}
+
+/**
+ * TICKET 070 — PRICES THE REPORTED USAGE THROUGH THE ONE PRICE SOURCE.
+ *
+ * `priceRealtimeUsage` is the function the LIVE footer already calls
+ * (`useSessionController`), and calling it is the whole point: its refusals — a
+ * cached count with no breakdown, a breakdown contradicting its own total, an
+ * envelope whose only numbers are negative, an empty one — are judgements no
+ * multiply-and-sum reimplementation arrives at, and each of them is a turn that
+ * must read `not measured` rather than a confident wrong figure. A second
+ * pricing path here would be a second opinion about money.
+ *
+ * PER TURN, NEVER BLENDED. A turn nobody metered contributes NOTHING to the
+ * total and carries `null` of its own; spreading the metered turns across all of
+ * them would satisfy "the total is right" and "every record has a figure" at
+ * once and be wrong on every record.
+ *
+ * A MEASURED ZERO IS A MEASUREMENT. `audio_tokens: 0` is a turn that really did
+ * consume nothing, so it prices `0` and counts toward the denominator; only an
+ * absent or unpriceable envelope is `null` (ticket 059's other half).
+ *
+ * The turns are summed in `utt` ORDER rather than arrival order, so a transport
+ * that interleaves cannot move the last bits of the run's own double.
+ */
+function priceReportedUsage(
+  usage: ReadonlyMap<number, unknown>,
+  model: string,
+): ReportedUsagePricing | undefined {
+  if (usage.size === 0) return undefined;
+
+  const perUtterance = new Map<number, number | null>();
+  let totalUsd = 0;
+  let measured = 0;
+  for (const utt of [...usage.keys()].sort((a, b) => a - b)) {
+    const cost = priceRealtimeUsage(usage.get(utt), model);
+    const usd = cost.measured ? cost.usd : null;
+    perUtterance.set(utt, usd);
+    if (usd !== null) {
+      totalUsd += usd;
+      measured += 1;
+    }
+  }
+
+  return { perUtterance, totalUsd: measured === 0 ? null : totalUsd };
 }
 
 /**
@@ -896,8 +967,14 @@ function attributeUtterances(args: {
   t0: number;
   durationMs: number;
   costPerMinUsd: number;
+  /**
+   * TICKET 070 — what the reported usage came to, per `utt`. Absent when the
+   * transport reported no usage at all (every cascade run today), which is what
+   * leaves the blended split below untouched.
+   */
+  usageCosts?: ReadonlyMap<number, number | null>;
 }): RunUtterance[] {
-  const { manifest, buckets, t0, durationMs, costPerMinUsd } = args;
+  const { manifest, buckets, t0, durationMs, costPerMinUsd, usageCosts } = args;
   const last = manifest.length - 1;
 
   return manifest.map((entry, i) => {
@@ -945,6 +1022,12 @@ function attributeUtterances(args: {
     const previousEnd = i === 0 ? 0 : manifest[i - 1]!.trueSpeechEndMs;
     const spanMs = i === last ? durationMs - previousEnd : entry.trueSpeechEndMs - previousEnd;
 
+    // TICKET 070 — `undefined` means the transport reported no usage for this
+    // turn; `null` means it reported an envelope nobody could price. Read
+    // through `has` rather than `get`, so a REFUSAL is not mistaken for silence.
+    const reportedCost =
+      usageCosts !== undefined && usageCosts.has(utt) ? (usageCosts.get(utt) ?? null) : undefined;
+
     const targetDelta = buckets.targetDelta.get(utt) ?? '';
     return {
       utteranceId: entry.id,
@@ -955,9 +1038,19 @@ function attributeUtterances(args: {
         source: buckets.source.get(utt),
         target: buckets.targetFinal.get(utt) ?? (targetDelta.length > 0 ? targetDelta : undefined),
       },
-      // TICKET 052 — a transport that declares NO rate has not measured this
-      // utterance's cost. `null` says so; `0` would report it as free.
-      cost: costPerMinUsd > 0 ? costPerMinUsd * (spanMs / 60_000) : null,
+      // TICKET 070 — THE TURN'S OWN REPORTED SPEND WINS, and it answers for
+      // that turn alone: `0` when it metered a zero, `null` when the envelope
+      // was absent or unpriceable. Only a turn the transport said NOTHING about
+      // falls through to 053's blended $/min, which is unconfigured everywhere
+      // in production and left that way on purpose.
+      //
+      // TICKET 052 — and a transport that declares NO rate has not measured this
+      // utterance's cost either. `null` says so; `0` would report it as free.
+      cost: reportedCost !== undefined
+        ? reportedCost
+        : costPerMinUsd > 0
+          ? costPerMinUsd * (spanMs / 60_000)
+          : null,
       // An utterance with no end-to-end number has none to report, which is a
       // fact about THAT utterance and not about the Run. Keyed on the RESOLVED
       // value (040): a track-carried utterance DID produce audio and must not
@@ -1027,6 +1120,16 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     resolve?.();
   };
 
+  // TICKET 070 — THE RUN'S OWN MODEL SNAPSHOT, minted ONCE and used both to
+  // describe the run and to price it. Arm A's meter and the dev model's are
+  // different rate cards (`gpt-realtime` 32/64, `gpt-realtime-mini` 10/20), so a
+  // price read off a hardcoded constant would report Arm A's spend for a dev
+  // run; reading the same object the Run carries makes the two unable to
+  // disagree. `undefined` for a cascade run — 053 owns the cascade meters, and
+  // pricing one through the realtime card would half-price Arms B and C.
+  const modelSnapshots = modelSnapshotsFor(config);
+  const usageModel = config.architecture === 'realtime' ? modelSnapshots.realtime : undefined;
+
   const transport = deps.createTransport(config);
 
   /** Set once pacing begins; a lost stage cancels it from the handler. */
@@ -1074,7 +1177,16 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       }
       bucket[mark.event] = mark.t;
     },
-    onUtteranceComplete: () => {
+    onUtteranceComplete: (record) => {
+      // TICKET 070 — THE USAGE ARRIVES HERE AND USED TO BE DISCARDED ON THE
+      // DOORSTEP: this handler took no parameter at all, so `realtime.ts`'s
+      // `{ utt, usage }` was dropped and every Replay figure read
+      // `cost measured on 0 of N samples`. Filed by `utt` like every other
+      // bucket; an ABSENT `usage` key files nothing, because "the vendor said
+      // nothing" and "the vendor reported an envelope" are different facts.
+      if (record.utt !== undefined && record.usage !== undefined) {
+        buckets.usage.set(record.utt, record.usage);
+      }
       observed += 1;
       // Manifest-less: over at the first boundary, exactly as it always was.
       if (expected === undefined) {
@@ -1335,6 +1447,14 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     errors.push(`segmentation: expected ${expected} utterances, observed ${segments}`);
   }
 
+  // TICKET 070 — PRICED OFF THE BUCKET, NOT OFF THE RECORDS. It sits here, above
+  // `attributeUtterances`, because a MANIFEST-LESS (mic-shaped) run produces no
+  // records at all and still has a total to report: a fix wired only into the
+  // attribution would price a corpus run and leave every other realtime run at
+  // `null`.
+  const usagePricing =
+    usageModel === undefined ? undefined : priceReportedUsage(buckets.usage, usageModel);
+
   const utterances =
     manifest === undefined || mismatched || cancelled
       ? undefined
@@ -1344,6 +1464,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
           t0,
           durationMs: recording.durationMs,
           costPerMinUsd: transport.costPerMinUsd,
+          usageCosts: usagePricing?.perUtterance,
         });
 
   // TICKET 055b — THE ENVELOPE SPEAKS FOR ONE UTTERANCE, OR FOR NONE.
@@ -1407,7 +1528,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
     recordingId: recording.id,
     architecture: config.architecture,
     providerTriple: config.providers,
-    modelSnapshots: modelSnapshotsFor(config),
+    modelSnapshots,
     // DERIVED, never declared — a caller-supplied config.armTag is ignored.
     armTag: deriveArmTag(config),
     // Only the batch runner (ticket 009) produces 'sweep'.
@@ -1418,12 +1539,21 @@ export async function runOnce(options: RunOnceOptions): Promise<RunOnceResult> {
       source: sourceTranscript,
       target: targetFinal ?? (targetTranscript.length > 0 ? targetTranscript : undefined),
     },
-    // TICKET 052 — same rule at Run level. No declared rate, no figure: Replay
-    // reports `not measured` rather than a `$0.00` that reads as a free run.
+    // TICKET 070 — THE SUM OF THE TURNS THAT REPORTED, and nothing else: three
+    // metered turns out of four total three turns' spend, and the fourth's
+    // absence is disclosed by the denominator (`measuredCostSamples`) rather
+    // than smoothed into the figure. `null` when envelopes arrived and none
+    // could be priced — never a 0, which would claim the run was free.
+    //
+    // TICKET 052 — the blended fallback keeps its rule verbatim for a run that
+    // reported no usage at all. No declared rate, no figure: Replay says
+    // `not measured` rather than a `$0.00` that reads as a free run.
     cost:
-      transport.costPerMinUsd > 0
-        ? transport.costPerMinUsd * (recording.durationMs / 60_000)
-        : null,
+      usagePricing !== undefined
+        ? usagePricing.totalUsd
+        : transport.costPerMinUsd > 0
+          ? transport.costPerMinUsd * (recording.durationMs / 60_000)
+          : null,
     // TICKET 059 — THE PRICE SOURCE THIS RUN RAN UNDER, copied onto the record
     // at the moment of the run exactly as `corpusVersion` is. It reports the
     // SOURCE, never the figure: it is written whatever `cost` came to and

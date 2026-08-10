@@ -1,13 +1,13 @@
 ---
 id: 070
 title: "Replay prices nothing — the realtime transport reports usage and the runner throws it away"
-status: pending
+status: done
 source: operator ("I need cost fixed"), 2026-08-09, after the first real sweep
 depends_on: []
 touches: [src/client/replay/runner.ts, src/client/transport/types.ts, src/client/transport/realtime.ts]
-iterations: 0
+iterations: 1
 test_files: []
-branch: ""
+branch: main
 ---
 
 ## Observed — on the operator's own sweep
@@ -104,3 +104,47 @@ Live already uses. Do not touch the cascade stages; that is 053.
   Arm C priceable once 053 is implemented, Arm B never.** FINDINGS.md already states that as a
   controllability finding — *one provider tells you what you spent and the others do not* — and this
   ticket makes the first half of it real rather than aspirational.
+
+## RESOLUTION (2026-08-09)
+
+Suite 2516 passing / 0 failing. `npm run check` exits 0.
+
+The runner now captures `record.usage` into a `Map<utt, unknown>` bucket keyed like every other
+bucket, and `priceReportedUsage` walks it in `utt` order calling **`priceRealtimeUsage`** — the same
+function Live calls — once per turn. `priceRealtimeUsage` appears 3× in `runner.ts` and the rate card
+is never touched there, so there is no second pricing path to drift.
+
+Two properties carry the design:
+
+- **`const usd = cost.measured ? cost.usd : null`** — the refusal is a `null`, per turn. A turn whose
+  `response.done` omits usage, contradicts its own cached breakdown, carries only negative numbers,
+  or arrives empty prices `null` for **that turn only**; its neighbours are untouched and the run
+  totals the rest.
+- **`totalUsd: measured === 0 ? null : totalUsd`** — a run where nothing priced is `null`, never `0`.
+  And because the guard is `cost.measured` rather than truthiness, a genuinely **measured zero stays
+  a measurement**: four turns of `audio_tokens: 0` total `0` and render `$0.000` at `4 of 4`, which
+  is ticket 059's other half held here.
+
+### Mutation-verified by the orchestrator
+
+| mutation | result |
+|---|---|
+| `cost.measured ? cost.usd : 0` — an unpriceable turn becomes free | **4 red** |
+| blend the priced turns across all turns | **9 red** |
+| `cost.measured && cost.usd` — a measured zero collapses to unmeasured | **1 red** |
+
+### Note on how this landed
+
+The implementing agent was cut off by an API error mid-report, after its work was already complete.
+State was re-derived from disk rather than from the notification: 2516/2516, both typechecks, build
+and eval verified independently, then the three mutations above. No part of this rests on the agent's
+own account of what it did.
+
+### What this does NOT do
+
+Cascade is untouched — Arms B and C still price `null` until 053 is implemented, and Arm B's total
+can never exist (`openai-tts` returns raw PCM and no usage while `gpt-4o-mini-tts` bills audio-out
+tokens). `transport.costPerMinUsd` is left in place and unconfigured.
+
+**Stored runs carry no usage**, so cost stays `not measured` on today's data. A re-run is what fills
+it — and after 068/069 the operator needs one anyway.
