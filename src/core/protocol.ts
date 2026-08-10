@@ -49,6 +49,27 @@ export const SAMPLE_RATE = 24000;
 /** Byte length of the downstream (server->client) binary frame header. */
 export const TTS_FRAME_HEADER_BYTES = 4;
 
+/**
+ * The pinned VAD/endpointing control in milliseconds (PRD §8 register) — how
+ * long the speaker must be silent before their turn is considered complete.
+ *
+ * SINGLE SOURCE OF TRUTH, the same status `SAMPLE_RATE` has above. It was
+ * previously the literal `500` typed out independently at four wire sites
+ * (`openai-stt`, `elevenlabs-stt`, the Realtime `session.update`, and the
+ * replay segmenter's `silenceMs`) plus a fifth copy in the results provenance
+ * line. PRD §8's argument only holds while every arm sends the SAME value — a
+ * threshold that drifts between arms stops cancelling in the A-vs-B difference
+ * and silently becomes the thing being measured.
+ *
+ * Raised 500 -> 1000 on 2026-08-10 by operator decision: at 500 ms a natural
+ * speaking pace did not reliably separate utterances. **This invalidates every
+ * take recorded under the old value** — `corpus/SCRIPTS.md` asked for a ~1 s
+ * pause, which is no longer a gap at all at this threshold, so those takes
+ * would merge utterances and fail the segmentation gate. The operator is
+ * discarding the stored takes; SCRIPTS.md now asks for ~2 s.
+ */
+export const ENDPOINTING_MS = 1000;
+
 /** Pipeline stage names used in stage-attributed events. */
 export type CascadeStage = 'stt' | 'mt' | 'tts';
 

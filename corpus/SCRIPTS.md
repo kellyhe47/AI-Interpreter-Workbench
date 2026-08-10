@@ -5,10 +5,16 @@ PRD §9: 9 Recordings holding 36 utterances. 3 Recordings per direction, ~4 utte
 
 ## How to record (read this first)
 
-1. **Pause about one second between utterances.** The segmenter splits on ≥500 ms of silence
-   (`DEFAULT_SEGMENT_OPTIONS.silenceMs`), so a shorter gap merges two utterances into one and a run
-   against that take fails with `segmentation: expected 4 utterances, observed 3`. A full second is
-   comfortable margin. Do **not** pause mid-utterance for longer than that.
+1. **Pause about two seconds between utterances.** The segmenter splits on ≥1000 ms of silence
+   (`DEFAULT_SEGMENT_OPTIONS.silenceMs`, which IS the pinned VAD control `ENDPOINTING_MS`), so a
+   shorter gap merges two utterances into one and a run against that take fails with
+   `segmentation: expected 4 utterances, observed 3`. Two seconds is comfortable margin. Do **not**
+   pause mid-utterance for longer than that.
+
+   > **Raised from 500 ms to 1000 ms on 2026-08-10**, because at 500 ms a natural speaking pace did
+   > not reliably separate utterances. **Takes recorded under the old instruction are unusable** —
+   > their ~1 s pauses are no longer gaps at all. Re-record; do not mix old and new takes in one
+   > corpus version.
 2. **Read verbatim.** WER compares what the pipeline heard against the reference text below. If you
    improvise a word, either re-take or edit the reference to match exactly what you said — otherwise
    the WER figure is measuring your improvisation.
@@ -20,7 +26,8 @@ PRD §9: 9 Recordings holding 36 utterances. 3 Recordings per direction, ~4 utte
 5. Tag each utterance with the category named in **bold** below, and paste its line as the
    reference text. Cantonese takes no reference text.
 
-Roughly 8 seconds per utterance plus pauses puts each take near 35 s, inside the 45 s cap.
+Roughly 8 seconds per utterance plus the 2 s pauses puts each take near 40 s, inside the 45 s cap.
+If a take runs long, drop to 3 utterances rather than shortening the pauses.
 
 ---
 

@@ -17,15 +17,15 @@
  * computed once from the waveform and later frozen into the ticket-030
  * manifest, never a per-arm VAD guess.
  *
- * The 500 ms default matches the pinned endpointing control every arm uses
- * (`silence_duration_ms: 500`, PRD §8). A segmenter that disagreed with the
- * measured VAD would invite boundary disputes later, so the two are kept equal
- * deliberately.
+ * The `silenceMs` default IS the pinned endpointing control every arm uses
+ * (`ENDPOINTING_MS`, PRD §8) — imported, not re-typed, so the segmenter cannot
+ * drift away from the measured VAD and invite boundary disputes later.
  * `index` is renumbered 1..N AFTER slivers are dropped, so the output always
  * satisfies ticket 030's validateManifest contiguity rule directly.
  * ==========================================================================
  */
 
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { rms } from '../audio/pcm';
 
 /** Analysis frame: 20 ms = 480 samples at 24 kHz, the capture frame size. */
@@ -47,7 +47,7 @@ export interface SegmentOptions {
 }
 
 export const DEFAULT_SEGMENT_OPTIONS: Required<SegmentOptions> = {
-  silenceMs: 500,
+  silenceMs: ENDPOINTING_MS,
   floor: 0.01,
   minUtteranceMs: 200,
 };

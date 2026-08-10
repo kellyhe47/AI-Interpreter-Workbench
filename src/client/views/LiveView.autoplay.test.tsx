@@ -652,7 +652,7 @@ describe('source-level guarantees — Live can never suspend its own audio', () 
       // Input gating during output was CONSIDERED AND REJECTED: it kills
       // barge-in (hiding a real architectural difference between arms), it can
       // silently drop real speech, and it layers a second gate on the pinned
-      // `silence_duration_ms: 500` VAD control.
+      // pinned `silence_duration_ms` VAD control.
       expect(matchingLines(readCode(file), GATES_A_TRACK)).toEqual([]);
     });
   }

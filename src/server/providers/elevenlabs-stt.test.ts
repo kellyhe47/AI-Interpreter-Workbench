@@ -36,7 +36,7 @@
  * more partials, then EXACTLY ONE final, and the final is LAST in the turn.
  *
  * Outbound frames are asserted by CONTAINMENT (the config frame carries 24000
- * and silence_duration_ms: 500 somewhere; one frame per audio chunk carrying
+ * and the pinned silence_duration_ms somewhere; one frame per audio chunk carrying
  * that chunk's base64) rather than by deep equality on a whole frame object —
  * an over-pinned frame shape would reject a correct implementation.
  */
@@ -44,6 +44,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { checkTurnFinalMapping, collect } from '../../core/contracts/index';
 import { resolveTriple } from '../../core/models';
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { ProviderError } from '../../core/types';
 import { ElevenLabsStt, type ElevenLabsSttConfig } from './elevenlabs-stt';
 import {
@@ -236,7 +237,7 @@ describe('ElevenLabsStt connection', () => {
     expect(wire).not.toMatch(/scribe_v2_realtime(?!_experimental)/);
   });
 
-  it('the connection/config frame pins 24 kHz and silence_duration_ms 500', async () => {
+  it('the connection/config frame pins 24 kHz and the shared silence_duration_ms', async () => {
     const { created, wsFactory } = makeSetup();
     const stt = new ElevenLabsStt({ apiKey: 'k' }, { wsFactory });
     await collect(stt.transcribe(twoChunkAudio()));
@@ -247,8 +248,9 @@ describe('ElevenLabsStt connection', () => {
     // 24 kHz is pinned project-wide (PRD §8); assert by containment so the
     // frame may declare it as 24000, 'pcm_24000', sample_rate, whatever.
     expect(ws.sent[0]).toContain('24000');
-    // VAD/endpointing is pinned to 500 ms across every arm (PRD §8).
-    expect(deepFind(configFrame, 'silence_duration_ms')).toBe(500);
+    // VAD/endpointing is pinned identically across every arm (PRD §8), and
+    // read from the one constant so an arm cannot drift off it alone.
+    expect(deepFind(configFrame, 'silence_duration_ms')).toBe(ENDPOINTING_MS);
   });
 });
 
@@ -557,9 +559,9 @@ describe('TICKET 069 — the source-language hint reaches Scribe (AC2, AC3, AC4)
       false,
     );
     expect(deepFind(configFrame(ws), 'language_code')).toBeUndefined();
-    // The rest of the frame is untouched: 24 kHz and 500 ms endpointing.
+    // The rest of the frame is untouched: 24 kHz and the pinned endpointing.
     expect(deepFind(configFrame(ws), 'sample_rate')).toBe(24000);
-    expect(deepFind(configFrame(ws), 'silence_duration_ms')).toBe(500);
+    expect(deepFind(configFrame(ws), 'silence_duration_ms')).toBe(ENDPOINTING_MS);
   });
 
   it('the hint changes NOTHING else about the frame — rate, encoding and endpointing are unmoved', async () => {
@@ -571,7 +573,7 @@ describe('TICKET 069 — the source-language hint reaches Scribe (AC2, AC3, AC4)
     const ws = created[0]!;
     expect(deepFind(configFrame(ws), 'sample_rate')).toBe(24000);
     expect(deepFind(configFrame(ws), 'encoding')).toBe('pcm_s16le');
-    expect(deepFind(configFrame(ws), 'silence_duration_ms')).toBe(500);
+    expect(deepFind(configFrame(ws), 'silence_duration_ms')).toBe(ENDPOINTING_MS);
     // ...and the audio still goes out one frame per chunk, base64 LE PCM16.
     const audioFrames = ws.sentJson.filter((m) => m.type === 'audio');
     expect(audioFrames).toHaveLength(1);

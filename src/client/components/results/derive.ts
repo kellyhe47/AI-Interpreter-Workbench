@@ -134,6 +134,7 @@ import {
   formatCostUsd,
   sumMeasuredCosts,
 } from '../../../core/pricing';
+import { ENDPOINTING_MS } from '../../../core/protocol';
 import { anchoredLatencyMs, isMeasuredLatencyMs } from '../../../core/timing';
 import type { WerScore } from '../../../core/wer';
 import {
@@ -220,8 +221,12 @@ function metricRow(
   return { metric, label, valueA: values.valueA, valueB: values.valueB, delta, deltaTone };
 }
 
-/** The pinned endpointing control (PRD §8 register). Stated in every line. */
-export const PINNED_ENDPOINTING_MS = 500;
+/**
+ * The pinned endpointing control (PRD §8 register). Stated in every provenance
+ * line, and re-exported from `core/protocol` rather than re-typed — the
+ * provenance line must report the value the wire actually sent.
+ */
+export const PINNED_ENDPOINTING_MS = ENDPOINTING_MS;
 
 /**
  * Exp 2 compares Arm B with Arm C, which differ in the TTS stage alone. The

@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { armLabel } from '../../../core/arms';
 import { COST_NOT_MEASURED_CELL } from '../../../core/pricing';
+import { ENDPOINTING_MS } from '../../../core/protocol';
 import { RunLedger, type LiveSession, type Run } from '../../state/ledger';
 import {
   DIRECTION_NOT_RECORDED_CELL,
@@ -265,11 +266,11 @@ describe('provenance — ACTUAL N, never intended N', () => {
     expect(p.utteranceCount).toBe(4);
     expect(p.completedReps).toBe(2);
     expect(p.intendedReps).toBe(2);
-    expect(p.endpointingMs).toBe(500);
+    expect(p.endpointingMs).toBe(ENDPOINTING_MS);
     expect(p.endpointingMs).toBe(PINNED_ENDPOINTING_MS);
     expect(p.corpusVersion).toBe(CORPUS_VERSION);
 
-    expect(p.line).toContain('500');
+    expect(p.line).toContain(`endpointing pinned ${ENDPOINTING_MS} ms`);
     expect(p.line).toContain(CORPUS_VERSION);
   });
 });

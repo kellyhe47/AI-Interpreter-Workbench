@@ -22,6 +22,7 @@ import { join, resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { armLabel } from '../../core/arms';
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { COST_NOT_MEASURED_CELL } from '../../core/pricing';
 import { RunLedger, type LiveSession, type Run } from '../state/ledger';
 import {
@@ -500,7 +501,7 @@ describe('ResultsView — exp 2 (Arm B vs Arm C, only TTS differs)', () => {
 /* ================================================================ provenance */
 
 describe('ResultsView — provenance lines report ACTUAL N', () => {
-  it('every experiment card carries a mono provenance line with reps, utterances, 500 ms and corpus', () => {
+  it('every experiment card carries a mono provenance line with reps, utterances, pinned endpointing and corpus', () => {
     const ledger = comparisonLedger();
     const exp1 = deriveComparison(ledger, 'A', 'B')!;
     const exp2 = deriveComparison(ledger, 'B', 'C')!;
@@ -519,7 +520,7 @@ describe('ResultsView — provenance lines report ACTUAL N', () => {
       // The four required items, spelled out.
       expect(text).toMatch(/\d+ of \d+ reps completed/);
       expect(text).toMatch(/\d+ utterances/);
-      expect(text).toContain('endpointing pinned 500 ms');
+      expect(text).toContain(`endpointing pinned ${ENDPOINTING_MS} ms`);
       expect(text).toContain(model.provenanceA.corpusVersion!);
     }
   });

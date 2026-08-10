@@ -25,7 +25,7 @@
  * the constraints are REQUESTED explicitly and named:
  * LIVE_CAPTURE_CONSTRAINTS = { audio: { echoCancellation, noiseSuppression,
  * autoGainControl } }, all true. Same discipline as VAD
- * (`silence_duration_ms: 500`) and endpointing: pinned, named, asserted.
+ * (`silence_duration_ms: ENDPOINTING_MS`) and endpointing: pinned, named, asserted.
  *
  * INPUT GATING IS DELIBERATELY ABSENT. Muting the mic while output plays was
  * considered and REJECTED: it kills barge-in (hiding a real architectural

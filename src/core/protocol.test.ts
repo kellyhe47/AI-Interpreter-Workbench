@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ENDPOINTING_MS,
   SAMPLE_RATE,
   TTS_FRAME_HEADER_BYTES,
   decodeTtsFrame,
@@ -11,6 +12,23 @@ import type { UtteranceRecord } from './timing';
 describe('cascade wire protocol', () => {
   it('SAMPLE_RATE is 24000', () => {
     expect(SAMPLE_RATE).toBe(24000);
+  });
+
+  /**
+   * THE ONE PLACE THE ENDPOINTING NUMBER IS WRITTEN AS A LITERAL. Every wire
+   * site and the replay segmenter now assert against `ENDPOINTING_MS` rather
+   * than a typed-out number, which is what keeps the arms from drifting apart
+   * — but it also means a change to this constant would sail through the whole
+   * suite unnoticed. This test is the tripwire: changing the pinned control is
+   * an experiment-invalidating decision (PRD §8) and must fail here first,
+   * where the comment explains what re-recording it obliges.
+   *
+   * 1000 ms since 2026-08-10 (was 500). Takes recorded under the old value are
+   * NOT comparable: `corpus/SCRIPTS.md` asked for a ~1 s pause, which no longer
+   * separates utterances at this threshold.
+   */
+  it('ENDPOINTING_MS is 1000 — the pinned VAD control, changed only deliberately', () => {
+    expect(ENDPOINTING_MS).toBe(1000);
   });
 
   it('message unions typecheck (compile-time shape lock)', () => {

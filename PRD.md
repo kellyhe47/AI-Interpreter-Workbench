@@ -526,13 +526,15 @@ Permission is not a boolean and must never be rendered as a fixed value. It has 
 ## 8. Measurement Methodology
 
 ### Endpointing — pinned across arms
-Voice activity detection silence threshold is **pinned to 500 ms in every arm**. Verified expressible in both: GA shape is `session.audio.input.turn_detection = {type:"server_vad", silence_duration_ms: 500}` for the Realtime session, and the same turn-detection block on the transcription session for cascade.
+Voice activity detection silence threshold is **pinned to 1000 ms in every arm** (`ENDPOINTING_MS` in `src/core/protocol.ts` — one constant, imported by every wire site and by the replay segmenter, never re-typed). Verified expressible in both: GA shape is `session.audio.input.turn_detection = {type:"server_vad", silence_duration_ms: 1000}` for the Realtime session, and the same turn-detection block on the transcription session for cascade.
+
+**Raised from 500 ms on 2026-08-10** by operator decision: at 500 ms a natural speaking pace did not reliably separate utterances. The value is a control, so raising it invalidates the corpus recorded under the old one — `corpus/SCRIPTS.md`'s ~1 s pause is no longer a gap. Those takes are discarded; the script now asks for ~2 s. What §8 requires is that the value be IDENTICAL across arms, not that it be any particular number.
 
 Endpointing is roughly half the perceived-latency budget and is a pure config dial. Left at provider defaults, the measured architectural gap could be mostly VAD configuration — an invalidation that would be invisible in the data.
 
 **No sensitivity sweep.** With VAD pinned identically, the threshold is a constant added to both arms and cancels in the difference. Sweeping would produce parallel lines restating the constant.
 
-**Instead — VAD offset validity check.** Because the corpus is pre-recorded, true speech-end is computed offline for every clip. We measure `VAD_fire_time − true_speech_end` per arm. If both land near 500 ms the control held; if they diverge (different VAD algorithms), the difference is reported and subtracted.
+**Instead — VAD offset validity check.** Because the corpus is pre-recorded, true speech-end is computed offline for every clip. We measure `VAD_fire_time − true_speech_end` per arm. If both land near 1000 ms the control held; if they diverge (different VAD algorithms), the difference is reported and subtracted.
 
 ### Segmentation — "final" defined precisely
 
@@ -541,7 +543,7 @@ Streaming STT emits two different things both commonly called "final," and confl
 | Signal | Meaning | Used? |
 |---|---|---|
 | `is_final` / stable segment | this *segment* won't be revised; more may follow in the same turn | **no** |
-| `speech_final` / endpoint | the speaker's **turn** is complete, after the pinned 500ms silence | **yes — this is our trigger** |
+| `speech_final` / endpoint | the speaker's **turn** is complete, after the pinned 1000 ms silence | **yes — this is our trigger** |
 
 **We translate on turn-final only.** A long sentence produces one translation, not several. Clause-level commit was considered and cut (§17) — it lowers latency but requires revision handling across segment boundaries and breaks on verb-final languages.
 
@@ -570,7 +572,7 @@ Every setting in this project sits in exactly one of three tiers. The rule: **an
 
 | Tier | Meaning | User control | Examples |
 |---|---|---|---|
-| **1 · Pinned constant** | Variation adds no insight, only risk. Never surfaced as a control. | none | endpointing 500 ms · 24 kHz · turn-final definition · model snapshots · MT `temperature: 0` · Realtime instructions · counterbalanced run order · warmup discard · **Replay context = zero** |
+| **1 · Pinned constant** | Variation adds no insight, only risk. Never surfaced as a control. | none | endpointing 1000 ms · 24 kHz · turn-final definition · model snapshots · MT `temperature: 0` · Realtime instructions · counterbalanced run order · warmup discard · **Replay context = zero** |
 | **2 · Experimental variable** | Deliberately varied, each setting measured and **reported separately, never averaged together** | selectable | architecture (Realtime vs Cascade) · provider triple within a named arm · **Live `contextPolicy`** |
 | **3 · Free exploration** | Anything goes; recorded, inspectable, never aggregated | full | ad-hoc Replay runs with arbitrary provider triples · Live sessions generally |
 
@@ -586,7 +588,7 @@ Every arm is identical except the independent variable. Anything below that is n
 
 | Variable | Value | Why it matters |
 |---|---|---|
-| Endpointing | `silence_duration_ms: 500` | ~half the latency budget; a pure config dial |
+| Endpointing | `silence_duration_ms: 1000` (`ENDPOINTING_MS`) | ~half the latency budget; a pure config dial |
 | Turn-final trigger | turn-final only, never segment-final | changes when translation starts |
 | Audio | 24 kHz mono PCM16, same corpus clips | identical input is the basis of the comparison |
 | `t0` | corpus-derived true speech end | not a VAD guess that differs per arm |
@@ -1073,7 +1075,7 @@ argued. They matter because two of them mark a graded must-have as passing when 
 | 4 | All AWS, single origin, EC2 + Caddy | Rubric prefers AWS; splitting origins buys nothing and costs CORS + two pipelines; Fargate/ALB is config surface with an idle-timeout trap |
 | 5 | Two experiments, different controls | Mixing vendor and architecture changes would confound the headline number |
 | 6 | MT held constant across Arms B and C | Isolates the STT/TTS swap; peer LLMs are indistinguishable at N=24 anyway |
-| 7 | VAD pinned 500 ms; no sensitivity sweep | Endpointing is ~half the latency budget; pinned identically it cancels in the difference, making a sweep redundant |
+| 7 | VAD pinned 1000 ms; no sensitivity sweep | Endpointing is ~half the latency budget; pinned identically it cancels in the difference, making a sweep redundant |
 | 8 | VAD offset validity check | Different VAD algorithms may fire at different real moments despite identical nominal settings |
 | 9 | Translate on finals, not interims | Spoken audio cannot be retracted; ~400 ms is not worth audible self-correction in medical/legal contexts |
 | 10 | Client-side clock, corpus-derived `t0` | Realtime never reaches our server; cross-clock skew would exceed the measured effect |

@@ -5,6 +5,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { OUTBOUND_SAMPLE_RATE } from '../audio/outboundAudio';
+import { ENDPOINTING_MS } from '../../core/protocol';
 import {
   OPENAI_REALTIME_CALLS_URL,
   REALTIME_OPAQUE_ERROR_MESSAGE,
@@ -455,7 +456,7 @@ describe('RealtimeTransport start() handshake', () => {
     expect(h.states.map((s) => s.state)).toContain('connected');
   });
 
-  it('sends session.update on channel open: server_vad @500ms, transcription on, instructions name the target language', async () => {
+  it('sends session.update on channel open: server_vad at the pinned window, transcription on, instructions name the target language', async () => {
     const h = makeHarness();
     const ch = await startConnected(h);
     expect(ch.sent.length).toBeGreaterThanOrEqual(1);
@@ -463,7 +464,7 @@ describe('RealtimeTransport start() handshake', () => {
     const msg = JSON.parse(raw) as { type: string };
     expect(msg.type).toBe('session.update');
     expect(raw).toContain('server_vad');
-    expect(raw).toContain('"silence_duration_ms":500');
+    expect(raw).toContain(`"silence_duration_ms":${ENDPOINTING_MS}`);
     expect(raw).toContain('transcription'); // input audio transcription enabled
     expect(raw).toContain('Spanish'); // interpreter instructions mention target
   });

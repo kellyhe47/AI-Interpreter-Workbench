@@ -15,7 +15,7 @@
  *   audio.input.transcription.model 'gpt-4o-transcribe' (config.model overrides),
  *   audio.input.transcription.language <config.languageCode> — TICKET 069, and
  *     the KEY IS OMITTED ENTIRELY when no language is configured,
- *   audio.input.turn_detection {type:'server_vad', silence_duration_ms: 500}.
+ *   audio.input.turn_detection {type:'server_vad', silence_duration_ms: ENDPOINTING_MS}.
  * - Each audio Int16Array chunk is sent as
  *   {type:'input_audio_buffer.append', audio:<base64 of little-endian PCM16 bytes>}
  *   as it is pulled from the input iterable (one append per chunk).
@@ -39,6 +39,7 @@
  *   the contract only requires numbers.
  */
 
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { ProviderError } from '../../core/types';
 import type { ProviderCallOpts, SttEvent, SttProvider } from '../../core/types';
 import {
@@ -212,7 +213,7 @@ export class OpenAiStt implements SttProvider {
                   // null or a guessed 'en'.
                   ...(lang === undefined || lang === '' ? {} : { language: lang }),
                 },
-                turn_detection: { type: 'server_vad', silence_duration_ms: 500 },
+                turn_detection: { type: 'server_vad', silence_duration_ms: ENDPOINTING_MS },
               },
             },
           },

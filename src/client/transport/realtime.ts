@@ -23,7 +23,7 @@
  *     onConnectionState('connected') at that point.
  *  4. When the data channel opens, send ONE session.update JSON whose
  *     serialized form contains: turn_detection type 'server_vad' with
- *     silence_duration_ms 500, input audio transcription enabled, and
+ *     silence_duration_ms ENDPOINTING_MS, input audio transcription enabled, and
  *     interpreter `instructions` that mention config.targetLanguage.
  *  START FAILURE (e.g. token fetch rejects or non-ok): start() RESOLVES
  *  (never rejects — no unhandled rejections by construction); the failure
@@ -98,6 +98,7 @@
  * ==========================================================================
  */
 
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { base64ToInt16 } from '../audio/pcm';
 import {
   MAX_TRANSPORT_RECONNECT_ATTEMPTS,
@@ -587,7 +588,7 @@ export class RealtimeTransport implements InterpreterTransport {
         audio: {
           input: {
             transcription: { model: 'gpt-4o-mini-transcribe' },
-            turn_detection: { type: 'server_vad', silence_duration_ms: 500 },
+            turn_detection: { type: 'server_vad', silence_duration_ms: ENDPOINTING_MS },
           },
         },
       },

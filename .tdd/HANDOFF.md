@@ -36,6 +36,24 @@ records both Realtime directions as reached **by observation, neither scored**.
 
 ---
 
+## The VAD control moved — 500 ms → 1000 ms (2026-08-10, operator decision)
+
+`ENDPOINTING_MS` in `src/core/protocol.ts` is now the **single source of truth** for the pinned
+endpointing control, the status `SAMPLE_RATE` already had. It was previously the literal `500` typed
+out independently at four wire sites (`openai-stt`, `elevenlabs-stt`, the Realtime `session.update`,
+the replay segmenter's `silenceMs`) plus a fifth copy in the results provenance line — five chances
+for one arm to drift off the control PRD §8 depends on being identical.
+
+`src/core/protocol.test.ts` now holds the **only** literal, deliberately: with every other site
+asserting against the constant, a change would otherwise sail through the suite unnoticed.
+
+**Every take recorded before this is unusable.** `corpus/SCRIPTS.md` asked for a ~1 s pause, which is
+no longer a gap at 1000 ms — those takes merge utterances and fail the segmentation gate. The
+operator is discarding them and the stored/backup runs; SCRIPTS.md now asks for ~2 s. **Do not mix
+old and new takes in one corpus version.** Anything in `data/` or `backups/` predates the change.
+
+---
+
 ## Open tickets, with their real state
 
 | # | state |

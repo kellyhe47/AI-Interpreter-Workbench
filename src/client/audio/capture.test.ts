@@ -198,7 +198,7 @@ describe('startCapture stop()', () => {
  *
  * Input gating/muting during output was CONSIDERED AND REJECTED (it kills
  * barge-in, can drop real speech, and layers a second gate on the pinned
- * `silence_duration_ms: 500`). See LiveView.autoplay.test.tsx for the guard.
+ * `silence_duration_ms: ENDPOINTING_MS`). See LiveView.autoplay.test.tsx for the guard.
  * ======================================================================== */
 
 /** The exact object, asserted whole so a future edit cannot drop one field. */

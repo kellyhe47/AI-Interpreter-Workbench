@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { collect, describeSttContract } from '../../core/contracts/index';
 import { resolveTriple } from '../../core/models';
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { ProviderError } from '../../core/types';
 import { OpenAiStt } from './openai-stt';
 import {
@@ -122,7 +123,7 @@ describe('OpenAiStt adapter specifics', () => {
     expect(created[0]!.headers['Authorization']).toBe('Bearer env-key');
   });
 
-  it('first frame is session.update with pcm rate 24000, gpt-4o-transcribe and server_vad @500ms', async () => {
+  it('first frame is session.update with pcm rate 24000, gpt-4o-transcribe and the pinned server_vad window', async () => {
     const { created, wsFactory } = makeSetup();
     const stt = new OpenAiStt({ apiKey: 'test-key' }, { wsFactory });
     await collect(stt.transcribe(twoChunkAudio()));
@@ -148,7 +149,7 @@ describe('OpenAiStt adapter specifics', () => {
     expect(first.session.audio.input.format.rate).toBe(24000);
     expect(first.session.audio.input.transcription.model).toBe('gpt-4o-transcribe');
     expect(first.session.audio.input.turn_detection.type).toBe('server_vad');
-    expect(first.session.audio.input.turn_detection.silence_duration_ms).toBe(500);
+    expect(first.session.audio.input.turn_detection.silence_duration_ms).toBe(ENDPOINTING_MS);
   });
 
   it('sends one base64 input_audio_buffer.append per audio chunk (little-endian PCM16)', async () => {
@@ -364,7 +365,7 @@ describe('TICKET 069 — the source-language hint reaches the transcription sess
     // REGRESSION LOCK: the API rejects 16000.
     expect(first.session.audio.input.format.rate).toBe(24000);
     expect(first.session.audio.input.turn_detection.type).toBe('server_vad');
-    expect(first.session.audio.input.turn_detection.silence_duration_ms).toBe(500);
+    expect(first.session.audio.input.turn_detection.silence_duration_ms).toBe(ENDPOINTING_MS);
     // ...and the audio still goes out one append per chunk.
     expect(created[0]!.appends).toHaveLength(1);
     expect(created[0]!.appends[0]!.audio).toBe(int16ToBase64(chunk));

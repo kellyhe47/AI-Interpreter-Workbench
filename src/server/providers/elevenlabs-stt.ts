@@ -16,7 +16,7 @@
  *   is never hardcoded anywhere else on the wire.
  * - First frame is the connection/config frame: it declares the sample rate
  *   **24000** (24 kHz is pinned project-wide) and endpointing
- *   `silence_duration_ms: 500` (PRD §8 — the same VAD every arm uses).
+ *   `silence_duration_ms: ENDPOINTING_MS` (PRD §8 — the same VAD every arm uses).
  * - Audio input: ONE frame per `Int16Array` chunk pulled from the input
  *   iterable, sent AS THE CHUNK ARRIVES (the adapter never drains the input
  *   first), carrying base64 of little-endian PCM16.
@@ -57,7 +57,7 @@
  *   header  xi-api-key: <key>
  *   frame 0 { type: 'conversation_config',
  *             audio_format: { encoding: 'pcm_s16le', sample_rate: 24000 },
- *             vad: { silence_duration_ms: 500 }[, language_code] }
+ *             vad: { silence_duration_ms: ENDPOINTING_MS }[, language_code] }
  *   frame n { type: 'audio', audio: '<base64 PCM16-LE>' }   (one per chunk)
  *
  * The model id appears ONLY in the URL, never in a frame, so overriding
@@ -68,6 +68,7 @@
  *   numbers.
  */
 
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { ProviderError } from '../../core/types';
 import type { ProviderCallOpts, SttEvent, SttProvider } from '../../core/types';
 import {
@@ -220,8 +221,8 @@ export class ElevenLabsStt implements SttProvider {
             // 24 kHz is pinned project-wide (PRD §8).
             sample_rate: 24000,
           },
-          // Endpointing pinned to 500 ms across every arm (PRD §8).
-          vad: { silence_duration_ms: 500 },
+          // Endpointing pinned identically across every arm (PRD §8).
+          vad: { silence_duration_ms: ENDPOINTING_MS },
           ...(lang === undefined ? {} : { language_code: lang }),
         }),
       );

@@ -80,7 +80,11 @@ These exist because a violation would produce a number that looks fine and is wr
 - **`SttEvent.type === 'final'` means TURN-final**, never segment-final. For ElevenLabs Scribe the
   turn-final signal is the **committed** transcript; partials are not. Scribe sends the full running
   transcript per message — pass it through, do not accumulate (OpenAI's deltas do accumulate).
-- **VAD pinned at `silence_duration_ms: 500` in every arm.** A measurement control, not a knob.
+- **VAD pinned at `ENDPOINTING_MS` (1000 ms) in every arm**, one constant in `src/core/protocol.ts`
+  imported by every wire site and the replay segmenter. A measurement control, not a knob: changing
+  it invalidates every take recorded under the old value, so `src/core/protocol.test.ts` holds the
+  only literal and fails first. Raised 500 -> 1000 on 2026-08-10 (operator: natural pace did not
+  separate utterances); `corpus/SCRIPTS.md` now asks for ~2 s pauses.
 - **Every new adapter must pass `src/core/contracts` UNCHANGED.** Register via
   `describeXxxContract(name, factory)` with a mocked transport and extend the provider list only —
   touching an assertion defeats the purpose. That file is byte-identical across v1 and v2 while

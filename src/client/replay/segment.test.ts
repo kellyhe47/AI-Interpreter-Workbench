@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { validateManifest, type CorpusUtterance } from '../../core/corpus';
+import { ENDPOINTING_MS } from '../../core/protocol';
 import { generateClip } from '../../harness/wav';
 import {
   DEFAULT_SEGMENT_OPTIONS,
@@ -55,29 +56,38 @@ function durationMsOf(samples: Int16Array): number {
 }
 
 /**
- * Three bursts, each surrounded by quiet longer than the 500 ms default:
- *   [300 quiet][800 tone][700 quiet][600 tone][900 quiet][500 tone][400 quiet]
- * Ground truth: starts 300/1800/3300, speech ends 1100/2400/3800, total 4200.
+ * Three bursts, each surrounded by quiet longer than the ENDPOINTING_MS default:
+ *   [300 quiet][800 tone][1200 quiet][600 tone][1400 quiet][500 tone][400 quiet]
+ * Ground truth: starts 300/2300/4300, speech ends 1100/2900/4800, total 5200.
+ *
+ * The inter-burst gaps were 700/900 ms when the pinned control was 500 ms. At
+ * 1000 ms they stopped being boundaries and the fixture read as ONE utterance —
+ * the same merge that made the operator's real takes unusable, reproduced in
+ * miniature. They are widened rather than the threshold being special-cased.
  */
 const THREE_BURSTS = concat([
   quiet(300),
   tone(800),
-  quiet(700),
+  quiet(1200),
   tone(600),
-  quiet(900),
+  quiet(1400),
   tone(500),
   quiet(400),
 ]);
-const THREE_BURST_STARTS = [300, 1800, 3300];
-const THREE_BURST_ENDS = [1100, 2400, 3800];
+const THREE_BURST_STARTS = [300, 2300, 4300];
+const THREE_BURST_ENDS = [1100, 2900, 4800];
 
 function expectNear(actual: number, expected: number, label: string): void {
   expect(Math.abs(actual - expected), `${label}: ${actual} vs ${expected}`).toBeLessThanOrEqual(TOL);
 }
 
 describe('segmentTake defaults', () => {
-  it('pins silenceMs to the 500 ms endpointing control every arm uses', () => {
-    expect(DEFAULT_SEGMENT_OPTIONS).toEqual({ silenceMs: 500, floor: 0.01, minUtteranceMs: 200 });
+  it('pins silenceMs to the endpointing control every arm uses', () => {
+    expect(DEFAULT_SEGMENT_OPTIONS).toEqual({
+      silenceMs: ENDPOINTING_MS,
+      floor: 0.01,
+      minUtteranceMs: 200,
+    });
     expect(SEGMENT_FRAME_MS).toBe(20);
   });
 });
