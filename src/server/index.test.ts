@@ -281,8 +281,159 @@ describe('API port resolution (Ticket 021)', () => {
     // the module-level listener block. One alone means it is dead code.
     const uses = source.match(/\bresolveApiPort\b/g) ?? [];
     expect(uses.length).toBeGreaterThanOrEqual(2);
+    // The resolver stays pure: the generic PORT is only ever reached through
+    // the injected `env` parameter, never off the global process. (Ticket 071
+    // lifted the blanket ban on consulting PORT at all — the behavioural
+    // precedence tests below are what pin when it may be read.)
     expect(source).not.toMatch(/process\.env\.PORT\b/);
-    expect(source).not.toMatch(/env\.PORT\b/);
+  });
+});
+
+/**
+ * ============ PaaS PORT INJECTION (Ticket 071, normative) ==================
+ * Railway/Heroku/Render/Fly inject the generic `PORT` and route platform
+ * traffic to it. Ticket 021's blanket refusal to read `PORT` therefore made
+ * `npm start` bind 8787 while the platform routed to $PORT — a green build
+ * that answers 502 forever.
+ *
+ * The fix is NOT "read PORT". Reading it unconditionally reintroduces QA F4:
+ * the repo's `workbench` preview config exports the *Vite* port 5173 into the
+ * environment shared by both halves of `npm run dev`, so the API would bind
+ * 5173 while vite.config.ts proxies /api and /ws to 8787.
+ *
+ * PINNED PRECEDENCE (all three tiers):
+ *   1. `API_PORT`  — always wins, in production and out.
+ *   2. `PORT`      — consulted ONLY when NODE_ENV === 'production', which
+ *                    `npm start` sets and `npm run dev` does not.
+ *   3. otherwise   — DEFAULT_API_PORT (8787), the vite proxy target.
+ *
+ * A malformed value is validated by the SAME rule for both variables — one
+ * rule, not two.
+ * ==========================================================================
+ */
+describe('API port resolution honours a PaaS-injected PORT in production (Ticket 071)', () => {
+  it('AC1: in production, PORT is honoured when API_PORT is absent', () => {
+    expect(resolveApiPort({ NODE_ENV: 'production', PORT: '7391' })).toBe(7391);
+  });
+
+  it('AC2: API_PORT still wins over PORT in production', () => {
+    expect(resolveApiPort({ NODE_ENV: 'production', API_PORT: '9000', PORT: '7391' })).toBe(9000);
+  });
+
+  it('AC2: API_PORT still wins over PORT outside production', () => {
+    expect(resolveApiPort({ API_PORT: '9000', PORT: '7391' })).toBe(9000);
+  });
+
+  it('AC3 (QA F4 guard): PORT is ignored when NODE_ENV is unset', () => {
+    expect(resolveApiPort({ PORT: '5173' })).toBe(8787);
+  });
+
+  it('AC3 (QA F4 guard): PORT is ignored when NODE_ENV=development', () => {
+    expect(resolveApiPort({ NODE_ENV: 'development', PORT: '5173' })).toBe(8787);
+  });
+
+  it('AC3 (QA F4 guard): PORT is ignored under NODE_ENV=test', () => {
+    expect(resolveApiPort({ NODE_ENV: 'test', PORT: '5173' })).toBe(8787);
+  });
+
+  it('AC3: production still defaults to 8787 when neither variable is set', () => {
+    expect(resolveApiPort({ NODE_ENV: 'production' })).toBe(8787);
+  });
+
+  it('AC4: a malformed production PORT falls back to the default', () => {
+    for (const bad of ['', '   ', 'abc', '0', '-1', '8787.5', '65536', 'NaN', '80 80']) {
+      expect(resolveApiPort({ NODE_ENV: 'production', PORT: bad })).toBe(8787);
+    }
+  });
+
+  it('AC4: a malformed value is rejected identically for API_PORT and PORT — one rule, not two', () => {
+    for (const bad of ['', '   ', 'abc', '0', '-1', '8787.5', '65536', 'NaN', '80 80']) {
+      expect(resolveApiPort({ NODE_ENV: 'production', API_PORT: bad })).toBe(
+        resolveApiPort({ NODE_ENV: 'production', PORT: bad }),
+      );
+      expect(resolveApiPort({ NODE_ENV: 'production', API_PORT: bad })).toBe(8787);
+    }
+    // ...and a well-formed value is accepted identically by both.
+    for (const good of ['1', '7391', '65535']) {
+      expect(resolveApiPort({ NODE_ENV: 'production', API_PORT: good })).toBe(Number(good));
+      expect(resolveApiPort({ NODE_ENV: 'production', PORT: good })).toBe(Number(good));
+    }
+  });
+
+  it('AC4: a malformed API_PORT does NOT fall through to PORT in production', () => {
+    // API_PORT is present-but-broken: that is an operator mistake about the
+    // API's own port, not an invitation to bind whatever the platform set.
+    expect(resolveApiPort({ NODE_ENV: 'production', API_PORT: 'abc', PORT: '7391' })).toBe(8787);
+  });
+});
+
+describe('runtime dependencies resolve without devDependencies (Ticket 071)', () => {
+  it('AC5: tsx is a runtime dependency — `npm start` runs it after a dev-dep prune', async () => {
+    const pkg = JSON.parse(await readRepoFile('package.json')) as {
+      scripts: Record<string, string>;
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
+
+    expect(pkg.scripts.start).toContain('tsx');
+    expect(pkg.dependencies).toHaveProperty('tsx');
+    expect(pkg.devDependencies).not.toHaveProperty('tsx');
+  });
+
+  it('AC5: every external package the server entry imports is in dependencies', async () => {
+    const pkg = JSON.parse(await readRepoFile('package.json')) as {
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+    };
+
+    // Walk the real import graph of the server entry rather than trusting a list.
+    const seen = new Set<string>();
+    const external = new Set<string>();
+    const visit = async (absPath: string): Promise<void> => {
+      if (seen.has(absPath)) return;
+      seen.add(absPath);
+      const source = await fs.readFile(absPath, 'utf8');
+      for (const m of source.matchAll(/from\s+'([^']+)'/g)) {
+        const spec = m[1] ?? '';
+        if (spec === '' || spec.startsWith('node:')) continue;
+        if (!spec.startsWith('.')) {
+          const parts = spec.split('/');
+          external.add(spec.startsWith('@') ? parts.slice(0, 2).join('/') : (parts[0] ?? spec));
+          continue;
+        }
+        const base = path.resolve(path.dirname(absPath), spec);
+        const candidates = [`${base}.ts`, `${base}.tsx`, path.join(base, 'index.ts')];
+        for (const candidate of candidates) {
+          try {
+            await fs.access(candidate);
+            await visit(candidate);
+            break;
+          } catch {
+            /* try the next candidate */
+          }
+        }
+      }
+    };
+    await visit(path.join(repoRoot, 'src/server/index.ts'));
+
+    expect(external.size).toBeGreaterThan(0);
+    for (const dep of external) {
+      expect(
+        Object.prototype.hasOwnProperty.call(pkg.dependencies, dep),
+        `${dep} is imported by the server entry graph but is not in dependencies`,
+      ).toBe(true);
+    }
+  });
+
+  it('AC6: engines.node is declared and matches the major version in use', async () => {
+    const pkg = JSON.parse(await readRepoFile('package.json')) as {
+      engines?: { node?: string };
+    };
+
+    expect(pkg.engines?.node).toBeTruthy();
+    const declaredMajor = Number(/(\d+)/.exec(pkg.engines?.node ?? '')?.[1]);
+    const runningMajor = Number(process.versions.node.split('.')[0]);
+    expect(declaredMajor).toBe(runningMajor);
   });
 });
 

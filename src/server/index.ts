@@ -115,35 +115,57 @@ const DEFAULT_API_PORT = 8787
  * Resolve the port the API listens on. Pure — env in, number out — so the
  * decision is testable without spawning a process.
  *
- * PRECEDENCE: `API_PORT` when set, otherwise DEFAULT_API_PORT. The generic
- * port variable (the one tooling exports for whatever it happens to be
- * launching) is DELIBERATELY NEVER CONSULTED.
+ * PRECEDENCE (three tiers, Ticket 071):
+ *   1. `API_PORT`  — always wins, in production and out.
+ *   2. `PORT`      — consulted ONLY when NODE_ENV === 'production'.
+ *   3. otherwise   — DEFAULT_API_PORT.
  *
- * WHY: the repo's own `workbench` preview config declares the *Vite* port
- * 5173, and the harness exports it into the environment shared by both halves
- * of `npm run dev`. The API used to read that generic variable, so it bound
- * 5173 while vite.config.ts still proxied /api and /ws to 8787 — every API
- * call was ECONNREFUSED and the whole Replay/storage half of the app was dead
- * (QA F4). An API-specific name is the only fix that holds no matter who
- * exports the generic one: pinning the port inside `dev:server` would leave
- * `npm start` equally exposed.
+ * WHY `PORT` IS NOT READ OUTSIDE PRODUCTION: the repo's own `workbench`
+ * preview config declares the *Vite* port 5173, and the harness exports it
+ * into the environment shared by both halves of `npm run dev`. The API used to
+ * read that generic variable unconditionally, so it bound 5173 while
+ * vite.config.ts still proxied /api and /ws to 8787 — every API call was
+ * ECONNREFUSED and the whole Replay/storage half of the app was dead (QA F4).
+ * `npm start` sets NODE_ENV=production and `npm run dev` does not, so the
+ * production guard is exactly the line between "a platform assigned this port"
+ * and "some local tool exported its own".
  *
- * DEPLOYMENT TRADEOFF (accepted): PaaS platforms that inject a generic port
- * variable and expect the process to bind it (Heroku/Railway/Render/Fly) need
- * `API_PORT` set explicitly. PRD §14 pins deployment to EC2 + Caddy, which
- * reverse-proxies to a fixed port, so nothing here injects one. A future move
- * to such a platform must export API_PORT in the process environment.
+ * WHY `PORT` IS READ IN PRODUCTION (Ticket 071): PaaS platforms inject a
+ * generic port and route external traffic to it (Heroku/Railway/Render/Fly).
+ * Ticket 021 accepted ignoring it because PRD §14 pinned deployment to EC2 +
+ * Caddy; PRD §15A cut deployment, and the operator has since chosen Railway.
+ * With `PORT` ignored the process bound 8787, the platform routed to $PORT,
+ * and nothing answered — a green build that 502s forever. `API_PORT` still
+ * overrides, so an operator can always pin the port explicitly.
+ *
+ * ONE VALIDATION RULE, NOT TWO: both variables go through `parsePort`, so a
+ * malformed value (empty, non-numeric, non-integer, out of the 1..65535 range)
+ * falls back to the default identically whichever name carried it. A
+ * present-but-malformed `API_PORT` does NOT fall through to `PORT`: it is an
+ * operator mistake about the API's own port, not consent to bind whatever the
+ * environment happened to set.
  *
  * `createAppServer(deps?)` is a separate concern and reads no environment at
  * all: tests listen(0) on an ephemeral port.
  * ==========================================================================
  */
-export function resolveApiPort(env: NodeJS.ProcessEnv = process.env): number {
-  const override = env.API_PORT
-  if (override === undefined || override.trim() === '') return DEFAULT_API_PORT
+function parsePort(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) return undefined
+  return parsed
+}
 
-  const parsed = Number(override)
-  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 65535 ? parsed : DEFAULT_API_PORT
+export function resolveApiPort(env: NodeJS.ProcessEnv = process.env): number {
+  const apiPort = env.API_PORT
+  if (apiPort !== undefined && apiPort.trim() !== '') return parsePort(apiPort) ?? DEFAULT_API_PORT
+
+  if (env.NODE_ENV === 'production') {
+    const platformPort = parsePort(env.PORT)
+    if (platformPort !== undefined) return platformPort
+  }
+
+  return DEFAULT_API_PORT
 }
 
 if (process.env.NODE_ENV !== 'test') {
