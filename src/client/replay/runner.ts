@@ -260,16 +260,42 @@ export const SEGMENTATION_SETTLE_MS = 250;
  * The deadline is armed ONCE, when pacing completes, and is a hard cap rather
  * than an inter-event idle reset: "wait at most this long for the rest".
  *
- * 5 s is 20x the settle window and comfortably longer than any answer a healthy
- * pipeline still owes once the clip has finished playing, so it never truncates
- * a slow-but-valid final utterance; and it is 24x shorter than the batch
- * runner's 120 s per-run patience (browserDeps RUN_TIMEOUT_MS), so a merged
- * clip fails with a NAMED reason long before the sweep's blunt abort fires.
+ * 5 s WAS WRONG, and the reason is worth keeping. It was justified as
+ * "comfortably longer than any answer a healthy pipeline still owes once the
+ * clip has finished playing" — which assumes the pipeline is roughly keeping up
+ * with the clip. THE CASCADE IS SEQUENTIAL AND DOES NOT: `runCascade` opens the
+ * next utterance's STT only after the previous utterance's TTS has finished, so
+ * the pipeline runs progressively BEHIND the audio and the last utterance's
+ * whole STT -> MT -> TTS chain begins after the clip is already over. The lag
+ * therefore GROWS with utterance count and with provider latency; it is not
+ * bounded by anything the clip's length tells you.
+ *
+ * Measured on EN Take 1 (4 utterances, 20.7 s) against production on
+ * 2026-08-10, timestamps relative to the socket opening:
+ *
+ *   utt 3  stt.final 23.3 s · mt.final 24.5 s · utterance.complete 26.3 s
+ *   pacing (clip + trailing pad) ended at ~22.2 s
+ *
+ * The final completion landed 4.1 s after pacing — INSIDE the old 5 s window by
+ * 0.9 s. Two identical runs minutes apart therefore disagreed: one stored four
+ * utterances, the other failed `observed 3` on provider-latency jitter alone.
+ * A gate that flips on a second of vendor variance is not measuring
+ * segmentation, and a FAILED run is not a neutral outcome — it is excluded from
+ * every aggregate, so the flake silently shrinks n.
+ *
+ * 12 s is 48x the settle window and ~3x the worst tail measured, while staying
+ * BELOW RUN_COMPLETION_TIMEOUT_MS (30 s) with room to spare — the ordering that
+ * matters, since a manifest-backed run must fail with its own NAMED
+ * segmentation reason rather than the blunter completion timeout — and 10x
+ * shorter than the batch runner's 120 s per-run patience (browserDeps
+ * RUN_TIMEOUT_MS), so a genuinely merged clip is still named long before the
+ * sweep's blunt abort fires. The cost of the larger window is paid ONLY by runs
+ * that are going to fail anyway.
  *
  * It applies ONLY when the Recording carries a manifest; a manifest-less run's
  * termination is byte-for-byte unchanged, hang included.
  */
-export const SEGMENTATION_IDLE_MS = 5_000;
+export const SEGMENTATION_IDLE_MS = 12_000;
 
 /**
  * TICKET 046 ROUND 3 (R3-1) — how long a run waits for the transport's audio

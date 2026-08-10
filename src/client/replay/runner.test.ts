@@ -1239,11 +1239,16 @@ describe('runOnce — the idle deadline is MANIFEST-ONLY (ticket 031 REGRESSION 
       },
     );
 
-    // PAST_IDLE_MS * 2 is 20 s — four times 031's idle window and still inside
-    // 048's completion budget. A manifest-less run that armed 031's deadline
-    // would have failed with a segmentation reason by now.
-    await vi.advanceTimersByTimeAsync(PAST_IDLE_MS * 2);
-    expect(PAST_IDLE_MS * 2).toBeLessThan(RUN_COMPLETION_TIMEOUT_MS);
+    // A moment STRICTLY BETWEEN the two deadlines — derived from both constants
+    // rather than written as a multiple of one, so the window this test needs
+    // cannot silently close when either moves (raising 031's idle window to
+    // 12 s is what closed it on the old `PAST_IDLE_MS * 2`). A manifest-less run
+    // that armed 031's deadline would have failed with a segmentation reason by
+    // now; 048's has not yet fired.
+    const betweenDeadlinesMs = (SEGMENTATION_IDLE_MS + RUN_COMPLETION_TIMEOUT_MS) / 2;
+    expect(betweenDeadlinesMs).toBeGreaterThan(SEGMENTATION_IDLE_MS);
+    expect(betweenDeadlinesMs).toBeLessThan(RUN_COMPLETION_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(betweenDeadlinesMs);
     expect(settled).toBe(false);
     expect(h.posted).toHaveLength(0);
 

@@ -39,6 +39,7 @@ import { FRAME_MS, FRAME_SAMPLES } from './pacer';
 import type { RecordingsClient, RunsClient } from './recordingsClient';
 import {
   CAPTURE_GATE_NEVER_OPENED,
+  SEGMENTATION_IDLE_MS,
   TRANSPORT_CLOSE_TIMEOUT_MS,
   runOnce,
   type RunOnceConfig,
@@ -481,7 +482,9 @@ describe('Replay Arm A end to end (ticket 043)', () => {
   it('a 4-utterance corpus clip yields 4 utterance.complete events and a NON-NULL audio_queued', async () => {
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    // Past 031's idle deadline, expressed in terms of it: a hard-coded 10 s
+    // silently became too short when the window grew.
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     // THE criterion: Arm A produced a real latency sample, not a null.
@@ -502,7 +505,7 @@ describe('Replay Arm A end to end (ticket 043)', () => {
   it('the paced clip really reached the outbound track — every frame, at 24 kHz, at 1x', async () => {
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     await done;
 
     expect(h.written).toHaveLength(TOTAL_FRAMES);
@@ -520,7 +523,7 @@ describe('Replay Arm A end to end (ticket 043)', () => {
   it('the offer carried a SENDABLE track, never the recvonly transceiver, and stop() released the sink', async () => {
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     await done;
 
     expect(h.pcs).toHaveLength(1);
@@ -537,7 +540,7 @@ describe('Replay Arm A end to end (ticket 043)', () => {
     // answering something other than the audio and they prove nothing.
     const h = makeArmAHarness({ deaf: true });
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     expect(result.run.errors).toEqual(['segmentation: expected 4 utterances, observed 0']);
@@ -567,7 +570,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
   it('produces NON-EMPTY output audio, uploads it, and GET /api/runs/:id/audio returns it', async () => {
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     // The tap saw the one inbound stream the connection produced.
@@ -594,7 +597,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
   it('the stored audio is 24 kHz PCM16 MONO — cascade format, indistinguishable in blind compare', async () => {
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     const decoded = readWav(await h.runs.getAudio(result.run.id));
@@ -615,7 +618,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
       config: REALTIME_CONFIG,
       deps: tapped.deps,
     });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const withTap = await tappedDone;
 
     vi.setSystemTime(0);
@@ -625,7 +628,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
       config: REALTIME_CONFIG,
       deps: plain.deps,
     });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const noTap = await plainDone;
 
     // The tapped run really did capture (else this proves nothing)...
@@ -658,7 +661,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     // timer rather than from the model's audio.
     const h = makeArmAHarness({ mute: true });
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     expect(h.taps).toHaveLength(1);
@@ -679,7 +682,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     // wording met, its PURPOSE defeated.
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     const stored = Array.from(readWav(await h.runs.getAudio(result.run.id)).samples);
@@ -711,7 +714,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
   it('the tail grace is a BUDGET: capture stops once it is spent (round 2, R2-4)', async () => {
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     const stored = Array.from(readWav(await h.runs.getAudio(result.run.id)).samples);
@@ -812,7 +815,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     // smoke test that cannot tell those apart does not confirm AC1.
     const h = makeArmAHarness({ gateStuck: true });
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     // The track really ran and the gate really refused all of it...
@@ -843,7 +846,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     // far worse than the blind spot it replaces.
     const h = makeArmAHarness({ gateStuck: true });
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     expect(result.run.status).toBe('complete');
@@ -876,7 +879,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     // operator at the tap when the cause is the MODEL.
     const h = makeArmAHarness({ noStartedEvent: true });
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     // The real-Chrome silent-model signature, exactly: a track that rendered
@@ -912,7 +915,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
     // did arrive and the track really did carry samples...
     await vi.advanceTimersByTimeAsync(1_500);
     controller.abort();
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     expect(result.cancelled).toBe(true);
@@ -934,7 +937,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
       config: REALTIME_CONFIG,
       deps: healthy.deps,
     });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const withAudio = await healthyDone;
 
     expect(withAudio.outputAudio.length).toBeGreaterThan(0);
@@ -951,7 +954,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
       config: REALTIME_CONFIG,
       deps: silent.deps,
     });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const noAudio = await silentDone;
 
     expect(silent.delivered).toEqual([]);
@@ -963,7 +966,7 @@ describe('Replay Arm A output audio is captured and stored (ticket 046)', () => 
   it('NOTHING AUTOPLAYS, and the run ends up judgeable in blind compare', async () => {
     const h = makeArmAHarness();
     const done = runOnce({ recordingId: RECORDING.id, config: REALTIME_CONFIG, deps: h.deps });
-    await vi.advanceTimersByTimeAsync(DURATION_MS + 10_000);
+    await vi.advanceTimersByTimeAsync(DURATION_MS + SEGMENTATION_IDLE_MS + 1_000);
     const result = await done;
 
     // Capturing is not playing: no AudioContext was constructed by the run.
