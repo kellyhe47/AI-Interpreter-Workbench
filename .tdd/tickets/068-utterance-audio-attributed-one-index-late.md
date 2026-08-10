@@ -1,6 +1,6 @@
 ---
 id: 068
-title: "Cascade output audio is attributed one utterance late — 44 of 50 'failed' utterances translated perfectly and were rejected by the clock guard"
+title: "A hallucinated leading utterance shifts every real one, and the runner truncates instead of noticing"
 status: pending
 source: operator sweep, 2026-08-09 (verified against stored runs)
 depends_on: []
@@ -12,74 +12,104 @@ branch: ""
 
 ## Observed — from the operator's first real sweep, verified on disk
 
-50 of 72 sweep utterances are stored `status: 'failed'`. **44 of those 50 carry a complete source
-AND a correct Spanish target.** The translations are good, including the disfluency category:
+50 of 72 sweep utterances are stored `status: 'failed'`. **44 of those 50 carry a complete source AND
+a correct Spanish target** — the translations are good, disfluencies included. They failed only
+because ticket 055b's guard refused their timing as a clock inversion. Only 6 are genuine
+`no output audio`.
+
+## Root cause — TWO defects, and the second is ours
+
+### 1. The STT hallucinates a leading utterance (upstream)
+
+Across the 17 runs that stored utterances, the FIRST stored source text is:
 
 ```
-"None at all."                                  -> "Ninguno en absoluto."
-"150 mg twice a day with food starting Monday"  -> "150 mg dos veces al día con comida comenzando el lunes"
-"It started, sorry, I think it was Tuesday..."  -> "Comenzó, lo siento, creo que fue el martes por la noche"
+10x  "No, none at all."   <- correct, manifest idx1
+ 1x  "Turn right."          1x  "그러나."        1x  "Hallo."
+ 1x  "żeśmy."               1x  "Yardımımın"     1x  "Telephone"     1x  "Ok."
 ```
 
-They are failed **solely** because ticket 055b's write-time guard refused their timing:
-`clock-inversion: output audio at <t> precedes its own speech_end <t'>`.
+Korean, German, Polish, Turkish — the textbook Whisper-family hallucination on leading
+silence/non-speech. It is intermittent: roughly 7 of 17 runs.
 
-Only 6 of the 50 are genuine failures (`no output audio`).
+### 2. The runner truncates silently instead of detecting the extra segment — THIS IS THE BUG
 
-## Root cause — the audio is attributed one utterance LATE
+`attributeUtterances` (`src/client/replay/runner.ts:829`) maps `manifest[i]` → bucket
+`entry.index - 1`, reading exactly `manifest.length` buckets and **never asking how many the
+transport actually produced**. So a spurious leading segment consumes bucket 0 and every real
+utterance lands one slot late; the last real utterance falls into a bucket nobody reads.
 
-Recording `rec_msjjjc0m001_f1314d52`, manifest anchors `2400 / 8598 / 14560 / 19797`.
-Arm B sweep run `8aba8e2e`, offsets relative to `t0`:
+Recording `rec_msjjjc0m001_f1314d52`, run `8aba8e2e`:
 
-| utterance | own anchor | audio arrived | vs OWN anchor | vs PREVIOUS anchor |
-|---|---|---|---|---|
-| 2 | 8598 | 5197 | **−3401** | **+2797** |
-| 3 | 14560 | 11134 | **−3426** | **+2536** |
-| 4 | 19797 | 17161 | **−2636** | **+2601** |
+| slot | manifest reference | stored source |
+|---|---|---|
+| 1 | "No, none at all." | **"Turn right."** ← in no manifest entry |
+| 2 | "Take two hundred fifty milligrams…" | "None at all." ← *manifest 1* |
+| 3 | "It started— sorry…" | "150 mg twice a day…" ← *manifest 2* |
+| 4 | "Doctor Nguyen referred you…" | "It started, sorry…" ← *manifest 3* |
 
-Against its own anchor every interval is impossible. Against the **previous** anchor every interval
-is a plausible, tightly-clustered cascade latency of **~2.5–2.8 s** (STT final → MT → TTS first byte).
+Manifest utterance 4 is **absent from the record entirely**.
 
-So the audio answering utterance *N* is being recorded against utterance *N+1*'s anchor. The guard is
-working correctly and is reporting a real defect — the defect is the attribution, not the clock.
+The timing evidence agrees exactly. Anchors `2400 / 8598 / 14560 / 19797`; audio arrived at
+`5197 / 11134 / 17161`:
+
+| utterance | vs OWN anchor | vs PREVIOUS anchor |
+|---|---|---|
+| 2 | −3401 | **+2797** |
+| 3 | −3426 | **+2536** |
+| 4 | −2636 | **+2601** |
+
+Against the shifted-by-one anchor every interval is a plausible, tightly clustered cascade latency of
+**~2.5–2.8 s**.
+
+**Every run stored exactly 4 utterances and ZERO runs carry a segmentation error.** Ticket 031's
+guard catches "too few" (`expected 4, observed 3`) and nothing catches "too many". A misaligned run
+therefore reports `status: 'complete'` with confident, wrong per-utterance numbers, and it was only
+caught downstream by 055b's clock guard firing by accident.
 
 ## Why this matters more than the failure count
 
-**The surviving samples are the mis-attributed ones that happened to come out positive**, so the
-figures currently on screen are built on the wrong subset:
+The surviving samples are the mis-attributed ones that happened to come out positive, so the figures
+on the graded screen are built on the wrong subset:
 
-- Arm B renders **p50 0.42 s** over 5 surviving samples; the consistent measured interval above is
-  **~2.6 s**. The displayed figure is not a slow-but-real number, it is a different quantity.
-- Arm C renders **p50 0.02 s / p95 0.08 s** over **2 samples out of 24**. 20 ms from speech end to
-  first audio is physically impossible for a full cascade.
-- Experiment 2's headline `−1.20 s` delta rests on those 2 samples.
+- Arm B renders **p50 0.42 s** where the measured interval is **~2.6 s** — a different quantity, not
+  a fast one.
+- Arm C renders **p50 0.02 s / p95 0.08 s** over **2 samples of 24**. 20 ms speech-end-to-first-audio
+  is physically impossible for a full cascade.
+- Experiment 2's headline **−1.20 s** rests on those two samples.
 
-A wrong number is worse than a missing one, and these are wrong numbers on the graded screen.
+A wrong number is worse than a missing one.
 
-## Acceptance criteria
+## Acceptance criteria — the runner half only
 
-- [ ] The audio instant answering utterance *N* is stored against utterance *N*'s record, verified
-      against a fixture whose per-utterance latencies are known by construction and DISTINCT (equal
-      latencies cannot detect an off-by-one)
-- [ ] Falsifiable against the stored evidence: replaying run `8aba8e2e`'s marks through the fixed
-      attribution yields per-utterance deltas of roughly `+2797 / +2536 / +2601` ms, all positive
-- [ ] The clock-inversion guard is NOT relaxed, weakened, or given a tolerance window — it is
-      correct and it is what surfaced this. Ticket 055b's tests stay green untouched.
-- [ ] A run whose utterances all translate must not report a majority of them `failed`; assert the
-      complete/failed split on a well-formed fixture
-- [ ] Whatever the mechanism turns out to be (transport `utt` index base, manifest index base, or
-      bucket ordering), a test pins the INDEX MAPPING itself, not just the resulting deltas — a
-      test that only checks "no negatives" passes on a fix that shifts everything the other way
+- [ ] The runner compares the transport's OBSERVED segment count against the manifest length in
+      **both** directions. Too many is as much a mismatch as too few, and the existing "too few"
+      message and behaviour are unchanged.
+- [ ] On a mismatch the Run is stored `failed` with a segmentation error naming both counts, and it
+      does **not** silently truncate to `manifest.length`. Falsifiable: a transport emitting 5
+      segments against a 4-entry manifest must not produce a `complete` run.
+- [ ] A misaligned run's per-utterance figures never reach an aggregate — assert through
+      `isAggregatableRun` / the existing gate, **not** a second gate.
+- [ ] The clock-inversion guard is NOT relaxed, weakened, or given a tolerance. It is correct and it
+      is what surfaced this; ticket 055b's tests stay green and untouched.
+- [ ] A well-formed run (observed == manifest) is untouched: same records, same `complete`, same
+      figures. Pin it, so the fix cannot be "fail more often".
+- [ ] The fixture proving alignment uses **distinct** per-utterance latencies — equal ones cannot
+      detect a shift.
 
-## Out of scope
+## Out of scope — deliberately
 
-- Re-running the sweep. The stored runs are the evidence; fix the attribution, then re-run.
-- Changing `speech_end` or the manifest anchors — the anchors are correct and are what proved this.
-- Ticket 053 / cost metering; the audio-concatenation gaps (ticket 069).
+- **Suppressing the hallucination itself.** Trimming leading silence, VAD prefix padding, a language
+  hint or an STT prompt are provider/config decisions and belong in their own ticket. This ticket
+  makes the corruption *loud*; it does not stop the provider producing it.
+- Re-running the sweep. Fix detection first, then re-run — the stored runs are the evidence.
+- Changing `speech_end`, the manifest anchors, or ticket 031's "too few" behaviour.
+- Cost metering (ticket 053) and the audio-concatenation gaps.
 
 ## Notes
 
-- Arm A (realtime) shows 15 of 24 complete, so it is affected less or differently — the realtime tap
-  is a different capture path (046). Diagnose per-arm rather than assuming one cause.
-- This is the second time this project's own guard has surfaced a defect nobody was looking for.
-  055b built the detector on one stored run; the sweep proved it systematic.
+- Arm A (realtime, 15 of 24 complete) uses a different capture path (046's media tap). Diagnose
+  per-arm rather than assuming one cause; the realtime transport may number segments differently.
+- This is the second time this project's own guard surfaced a defect nobody was looking for. 055b
+  built the detector on one stored run; the sweep proved it systematic. The lesson is the same one
+  the repo keeps relearning: the honest failure is the one that tells you it happened.
